@@ -6,8 +6,10 @@ import {
   getSettlementLineGroup,
   resyncLineSplit,
   upsertGroupAllocation,
+  RETURN_TRAN_CODES,
 } from "@/lib/ledger/invoiceMatcher";
 import { guard } from "@/lib/auth/route";
+import { feature } from "@/lib/features/server";
 
 // GET — active allocations, filterable by source_tran_id / source_line_id / invoice_no / acno
 export async function GET(req) {
@@ -77,6 +79,13 @@ export const POST = guard("knockoff.allocate", async (req, { session }) => {
 
     const { root, sliceIds, total: lineAmount } = group;
     const tranCode = root.transactionsMaster.tran_code;
+    // Returns are knocked off only with Settings → Features "knockoff.matchReturns".
+    if (RETURN_TRAN_CODES.includes(Number(tranCode)) && !(await feature("knockoff.matchReturns"))) {
+      return NextResponse.json(
+        { message: "Returns are not knocked off — switch on \"Knock off returns that name no invoice\" in Settings → Features" },
+        { status: 400 },
+      );
+    }
     const requestedTotal = round2(allocations.reduce((sum, a) => sum + Number(a.amount), 0));
 
     // Signed comparison by magnitude: a receipt cannot allocate more than it

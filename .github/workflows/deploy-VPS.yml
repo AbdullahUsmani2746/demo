@@ -18,11 +18,11 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --no-cache . -t ghcr.io/${{ secrets.GHCR_USERNAME }}/sms:latest --platform linux/amd64
+          docker build --no-cache . -t ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest --platform linux/amd64
 
       - name: Push Docker image to GHCR
         run: |
-          docker push ghcr.io/${{ secrets.GHCR_USERNAME }}/sms:latest
+          docker push ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
 
       - name: Deploy to VPS via SSH
         uses: appleboy/ssh-action@v1.0.0
@@ -32,10 +32,10 @@ jobs:
           password: ${{ secrets.VPS_PASSWORD }}
           port: 2746
           script: |
-            cd sms
+            cd demo
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-            docker stop sms || true
-            docker rm sms || true
-            docker image rm ghcr.io/${{ secrets.GHCR_USERNAME }}/sms:latest || true
-            docker pull ghcr.io/${{ secrets.GHCR_USERNAME }}/sms:latest
-            docker run -d --env-file .env -p 127.0.0.1:3015:3015 -v /var/www/uploads:/app/public/uploads --name sms --restart unless-stopped ghcr.io/${{ secrets.GHCR_USERNAME }}/sms:latest
+            docker stop demo || true
+            docker rm demo || true
+            docker image rm ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest || true
+            docker pull ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
+            docker run -d --env-file .env -p 127.0.0.1:3030:3030 -v /var/www/uploads:/app/public/uploads --name demo --restart unless-stopped ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest

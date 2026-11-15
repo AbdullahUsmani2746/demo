@@ -9,7 +9,10 @@ import CurrencySettings from "@/components/Settings/CurrencySettings";
 import CompanySettings from "@/components/Settings/CompanySettings";
 import NotificationSettings from "@/components/Settings/NotificationSettings";
 import StockCheckSettings from "@/components/Settings/StockCheckSettings";
-import { ArrowUpRight, Bell, Boxes, Building, DollarSign, Landmark, ListTree, Lock, Settings2, ShieldCheck, UserCheck, UserCog, Users } from "lucide-react";
+import FeatureSettings from "@/components/Settings/FeatureSettings";
+import ProductionSetupSettings from "@/components/Settings/ProductionSetupSettings";
+import FixedAssetSettings from "@/components/Settings/FixedAssetSettings";
+import { ArrowUpRight, Bell, Boxes, Building, Building2, DollarSign, Factory, Landmark, ListTree, Lock, Settings2, ShieldCheck, ToggleRight, UserCheck, UserCog, Users } from "lucide-react";
 
 // MACNO groups are set on Account settings (its Parties / Vouchers sections),
 // so they are not a section here.
@@ -17,7 +20,10 @@ const TABS = [
   { id: "company", label: "Company", icon: Building, description: "Name, logo, address and tax details", Component: CompanySettings },
   { id: "currency", label: "Currency", icon: DollarSign, description: "The currency every amount is shown in", Component: CurrencySettings },
   { id: "notifications", label: "Notifications", icon: Bell, description: "Who receives which alerts", Component: NotificationSettings },
+  { id: "features", label: "Features", icon: ToggleRight, description: "Switch business flows on or off", Component: FeatureSettings },
   { id: "stock", label: "Stock checking", icon: Boxes, description: "No check, warn or block short stock", Component: StockCheckSettings },
+  { id: "production", label: "Production setup", icon: Factory, description: "Item category kinds and production godowns", Component: ProductionSetupSettings },
+  { id: "fixedAssets", label: "Fixed assets", icon: Building2, description: "Depreciation rules, category defaults and accounts", Component: FixedAssetSettings },
 ];
 
 const LINKS = [

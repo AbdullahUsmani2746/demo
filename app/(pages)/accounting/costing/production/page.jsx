@@ -60,6 +60,7 @@ import {
   CostingFrame, PeriodPicker, SearchBox, Segmented, Signed, Note, IconBtn, TONE_TEXT,
 } from "@/components/Costing/CostingUI";
 import { Skeleton } from "@/components/ui/skeleton";
+import SemiCcPanel from "@/components/Costing/SemiCcPanel";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MONTHS = [
@@ -658,6 +659,9 @@ export default function ProductionCostingPage() {
           </>
         }
       />
+
+      {/* Costing method + semi-finished CC start month (Settings → Features) */}
+      <SemiCcPanel month={month} year={year} />
 
       {/* Summary chips + auto-sequence */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-background p-3">

@@ -6,10 +6,19 @@ import EntityPageLayout from "@/components/shared/EntityPageLayout";
 import entityConfig from "@/components/Setups/config";
 import { useQuery } from '@tanstack/react-query';
 import axios from "axios";
+import { useFeatures } from "@/hooks/useFeatures";
 
 const DynamicEntity = () => {
   const { entity } = useParams();
-  const config = entityConfig[entity];
+  // A field with `feature: "<key>"` exists only while that feature is on (Settings → Features)
+  const features = useFeatures();
+  const baseConfig = entityConfig[entity];
+  const config = useMemo(
+    () => (baseConfig?.fields?.some((f) => f.feature)
+      ? { ...baseConfig, fields: baseConfig.fields.filter((f) => !f.feature || features.on(f.feature)) }
+      : baseConfig),
+    [baseConfig, features],
+  );
 
   // TanStack Query se sab related data fetch karo
   const selectFields = useMemo(() => {

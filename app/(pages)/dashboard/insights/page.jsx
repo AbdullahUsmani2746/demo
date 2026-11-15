@@ -32,8 +32,11 @@ import { WhyPanel, InfoDialog, ApprovalsPanel, CustomizeDialog } from "@/compone
 import PresentMode from "@/components/bi/PresentMode";
 import { useSession } from "next-auth/react";
 
-// On every dashboard: narrow everything to one book (BI "book" field —
-// questions without customers / accounts are not affected).
+// Filters on EVERY dashboard (Book, Item Category, Series) come from the
+// server (lib/bi/dashFilters.js — BI designers switch them on / off with
+// "Dashboard filters"). Each narrows only the figures whose data has it.
+// Book: narrow everything to one book (BI "book" field — questions without
+// customers / accounts are not affected).
 const BOOKS = [
   { key: "", label: "All books" },
   { key: "On books", label: "On" },
@@ -93,6 +96,9 @@ function InsightsPage() {
   const [customizing, setCustomizing] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [dark, setDark] = useState(false);
+  // Built-in filters switched on, as last sent by the server
+  const [builtins, setBuiltins] = useState([]);
+  const [showSetup, setShowSetup] = useState(false);
 
   // Dark mode: this page only, remembered in this browser.
   useEffect(() => {
@@ -179,6 +185,7 @@ function InsightsPage() {
       try {
         const { data: d } = await axios.get(`/api/bi/my/${activeId}?${queryString(period, filters, refresh)}`);
         setData(d);
+        if (Array.isArray(d.builtinFilters)) setBuiltins(d.builtinFilters);
       } catch (e) {
         setError(e.response?.data?.error || e.message);
       } finally {
@@ -188,11 +195,17 @@ function InsightsPage() {
     [activeId, period, filters],
   );
 
-  // Choices for each dashboard filter, loaded once per dashboard.
-  const filterDefs = useMemo(
-    () => (data?.dashboard?.id === activeId ? data.dashboard.layout?.filters ?? [] : []),
-    [data, activeId],
-  );
+  // Multi-select filters: the dashboard's own first, then the built-in ones
+  // switched on that it does not have itself. Choices loaded once per dashboard.
+  const bookOn = builtins.some((f) => f.field === "book");
+  const filterDefs = useMemo(() => {
+    const own = data?.dashboard?.id === activeId ? data.dashboard.layout?.filters ?? [] : [];
+    const ownFields = new Set(own.map((f) => f.field));
+    const extra = builtins
+      .filter((f) => f.kind === "multi" && !ownFields.has(f.field))
+      .map((f) => ({ field: f.field, label: f.label, builtin: true }));
+    return [...own, ...extra];
+  }, [data, activeId, builtins]);
   useEffect(() => {
     filterDefs.forEach((f) => {
       const key = `${activeId}:${f.field}`;
@@ -205,6 +218,8 @@ function InsightsPage() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(filterDefs), activeId]);
+  // A built-in filter stays hidden on a dashboard none of whose data has it
+  const shownDefs = filterDefs.filter((f) => !f.builtin || (choices[`${activeId}:${f.field}`] || []).length > 0);
 
   // narrow: { field, value } — one name from "Why did it change?"
   async function openDrill(questionId, point, r, narrow) {
@@ -374,15 +389,17 @@ function InsightsPage() {
               <SearchSelect ariaLabel="Switch dashboard" placeholder="Switch dashboard…" width={220} isClearable={false}
                 value={activeId} options={list.map((d) => ({ value: d.id, label: d.name }))} onChange={choose} />
             )}
-            <div className="bi-seg" role="tablist" aria-label="Books">
-              {BOOKS.map((b) => (
-                <button key={b.key || "all"} role="tab" aria-selected={b.key === book} className={b.key === book ? "active" : ""}
-                  onClick={() => setFilters((x) => ({ ...x, book: b.key ? [b.key] : [] }))}
-                  title={b.key ? `Only ${b.key.toLowerCase()} customers / accounts and their documents` : "Both books"}>
-                  {b.label}
-                </button>
-              ))}
-            </div>
+            {bookOn && (
+              <div className="bi-seg" role="tablist" aria-label="Books">
+                {BOOKS.map((b) => (
+                  <button key={b.key || "all"} role="tab" aria-selected={b.key === book} className={b.key === book ? "active" : ""}
+                    onClick={() => setFilters((x) => ({ ...x, book: b.key ? [b.key] : [] }))}
+                    title={b.key ? `Only ${b.key.toLowerCase()} customers / accounts and their documents` : "Both books"}>
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <label className="bi-find">
               <Search size={15} aria-hidden="true" />
               <input ref={findRef} value={find} onChange={(e) => setFind(e.target.value)} placeholder="Search this dashboard…" aria-label="Search this dashboard" />
@@ -405,6 +422,19 @@ function InsightsPage() {
               <Link className="bi-btn bi-btn-icon" href="/accounting/bi-designer" title="Open the BI Designer" aria-label="Open the BI Designer">
                 <PencilRuler size={15} />
               </Link>
+            )}
+            {canDesign && (
+              <div className="relative">
+                <button
+                  className={`bi-btn bi-btn-icon ${showSetup ? "on" : ""}`}
+                  onClick={() => setShowSetup((s) => !s)}
+                  title="Dashboard filters — switch the filters every dashboard has on / off"
+                  aria-label="Dashboard filters"
+                >
+                  <SlidersHorizontal size={15} />
+                </button>
+                {showSetup && <DashFilterSetup onClose={() => setShowSetup(false)} onSaved={() => load(true)} />}
+              </div>
             )}
             <button className="bi-btn bi-btn-icon" onClick={toggleDark} title={dark ? "Light mode" : "Dark mode"} aria-label={dark ? "Light mode" : "Dark mode"}>
               {dark ? <Sun size={15} /> : <Moon size={15} />}
@@ -454,13 +484,13 @@ function InsightsPage() {
                 </select>
               </label>
             )}
-            {filterDefs.length > 0 && (
+            {shownDefs.length > 0 && (
               <>
                 <button className={`bi-btn md:hidden ${activeFilterCount ? "on" : ""}`} onClick={() => setShowFilters((s) => !s)}>
                   <SlidersHorizontal size={14} /> Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
                 </button>
                 <div className={`${showFilters ? "flex" : "hidden"} bi-filter-row md:flex`}>
-                  {filterDefs.map((f) => (
+                  {shownDefs.map((f) => (
                     <label key={f.field} className="bi-filter-field">
                       <span className="bi-filter-label">{f.label}</span>
                       <SearchSelect multi width={200} placeholder={`All ${f.label.toLowerCase()}`} value={filters[f.field] || []}
@@ -618,6 +648,60 @@ function InsightsPage() {
       />
 
       {followupId && <LogFollowupModal id={followupId} onClose={() => setFollowupId(null)} onSaved={() => load(true)} />}
+    </div>
+  );
+}
+
+/**
+ * BI designers: switch the built-in dashboard filters on / off for every
+ * dashboard and everybody (/api/bi/dash-filters, lib/bi/dashFilters.js).
+ */
+function DashFilterSetup({ onClose, onSaved }) {
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    axios
+      .get("/api/bi/dash-filters")
+      .then(({ data: d }) => setRows(d.filters || []))
+      .catch((e) => setErr(e.response?.data?.error || e.message));
+  }, []);
+  async function flip(field, enabled) {
+    setBusy(field);
+    setErr(null);
+    try {
+      const { data: d } = await axios.post("/api/bi/dash-filters", { [field]: enabled });
+      setRows(d.filters || []);
+      onSaved?.();
+    } catch (e) {
+      setErr(e.response?.data?.error || e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <div className="bi-card fixed inset-x-4 top-32 z-30 p-3 text-left shadow-lg md:absolute md:inset-x-auto md:right-0 md:top-auto md:mt-2 md:w-72" role="dialog" aria-label="Dashboard filters">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-semibold">Dashboard filters</span>
+        <button className="bi-btn bi-btn-icon" onClick={onClose} title="Close" aria-label="Close"><X size={13} /></button>
+      </div>
+      <p className="mb-2 text-[12px] text-muted-foreground">
+        On every dashboard, for everyone. A filter shows only where the dashboard&apos;s data has it.
+      </p>
+      {err && <div className="bi-error mb-2">{err}</div>}
+      {!rows ? (
+        <div className="text-[12px] text-muted-foreground">Loading…</div>
+      ) : (
+        rows.map((f) => (
+          <label key={f.field} className="flex cursor-pointer items-start gap-2 rounded-md px-1 py-1.5 hover:bg-muted/50">
+            <input type="checkbox" className="mt-0.5" checked={f.enabled} disabled={busy === f.field} onChange={(e) => flip(f.field, e.target.checked)} />
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium">{f.label}</span>
+              {f.description && <span className="block text-[11px] text-muted-foreground">{f.description}</span>}
+            </span>
+          </label>
+        ))
+      )}
     </div>
   );
 }

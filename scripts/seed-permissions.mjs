@@ -47,6 +47,7 @@ const REPORT_MODULE = {
   financial: "Reports · Finance",
   service: "Reports · Service",
   hr: "Reports · HR",
+  fixedAssets: "Reports · Fixed Assets",
   other: "Reports · Other",
 };
 
@@ -77,11 +78,16 @@ const SPECIAL = [
   ["recipe.manage", "Manufacturing", "Create or edit a recipe"],
   ["machineInstruction.manage", "Manufacturing", "Create or edit machine instructions"],
   ["costing.manage", "Stock & Costing", "Maintain BOM costing and future costing"],
+  // Read-only Stock ↔ GL reconciliation and item cost trace (feature costing.reconciliation)
+  ["costing.reconcile", "Stock & Costing", "View the Stock ↔ GL reconciliation and the item cost trace (read-only)"],
   ["qualityControl.manage", "Manufacturing", "Record or amend QC results"],
   ["pos.manage", "Sales", "Operate the point of sale (orders, products, returns)"],
   ["notification.manage", "Administration", "Change notification settings or mark notifications read"],
   ["employee.manage", "Administration", "Create or edit employee records"],
   ["fixedAsset.manage", "Fixed Assets", "Maintain fixed-asset records"],
+  // lib/fixedAssets — the run screen and disposal reversals (system journals).
+  ["fixedAsset.depreciation.run", "Fixed Assets", "Preview, post and reverse monthly depreciation runs (posts system journals)"],
+  ["fixedAsset.dispose", "Fixed Assets", "Reverse a fixed asset disposal (posts the reversal journal)"],
   ["taxChallan.manage", "Finance", "Create or edit tax challans"],
   ["dispatch.invoice", "Sales", "Generate sales invoices from dispatches"],
   ["dispatch.rate.override", "Sales", "Override dispatch rates (otherwise taken from the Sale Order / customer price list)"],
@@ -112,6 +118,7 @@ const SPECIAL = [
   ["knockoff.run", "Finance", "Run invoice knock-off matching"],
   ["knockoff.allocate", "Finance", "Allocate a receipt to an invoice manually"],
   ["knockoff.reverse", "Finance", "Reverse a knock-off allocation or run"],
+  ["knockoff.refifo", "Finance", "Fix FIFO order: re-match parties whose automatic knock-offs are out of order (backup, resume, undo)"],
   ["period.lock", "Stock & Costing", "Lock or unlock an accounting period"],
   ["openingStock.calculate", "Stock & Costing", "Recalculate monthly opening stock"],
   ["stock.adjust", "Stock & Costing", "Adjust stock directly"],
@@ -152,7 +159,24 @@ const SPECIAL = [
   ["hr.payroll.pay", "HR", "Pay the net salaries of a posted payroll (posts payment vouchers)"],
   ["hr.team.manage", "HR", "Set who reports to whom (HR → Team structure)"],
   ["hr.scope.all", "HR", "See every employee in HR when no HR data scope is set (otherwise only their own team)"],
+  // Features hr.bankDisbursement / hr.leavingProcess (prisma/sql/2026-11-21_hr_payroll_additions.sql)
+  ["hr.payroll.bankfile", "HR", "Download bank transfer files and bank advice letters of a payroll; edit bank file layouts"],
+  ["hr.leaving.apply", "HR", "Resign (own leaving request, goes to approval)"],
+  ["hr.leaving.manage", "HR", "Record resignations / terminations for employees, run the clearance checklist, complete the leaving"],
+  ["hr.leaving.approve", "HR", "Approve or reject resignations / terminations"],
+  ["hr.settlement.manage", "HR", "Prepare full & final settlements and submit them for approval"],
+  ["hr.settlement.approve", "HR", "Approve or reject full & final settlements"],
+  ["hr.settlement.post", "HR", "Post full & final settlements to accounts, pay and reverse them (posts vouchers)"],
+  // Feature hr.pfLoans (prisma/sql/2026-11-21_hr_pf_loans.sql)
+  ["hr.pfloan.approve", "HR", "Approve or reject provident fund loans and withdrawals"],
   ["audit.view", "Administration", "Open the Audit Trail (who changed what, when — every table)"],
+  // Feature "vouchers.subAccounts" (app/api/sub-accounts). Adding one from a
+  // voucher line is also open to whoever creates receipts / payments / journals.
+  ["subAccount.manage", "Finance", "Add, rename or delete sub accounts (Finance → Sub Accounts)"],
+  // Feature "reports.rmcInputRates" (app/api/rmc-rates).
+  ["rmcRates.manage", "Stock & Costing", "Set the RMC input rates used by the RMC report's Input Based view"],
+  // Ported from Accounting (prisma/sql/2026-11-21_accounting_features.sql)
+  ["plannedQty.manage", "Stock & Costing", "Type the planned quantities per item per month / quarter (Production → Planned Quantities)"],
 ];
 
 const titleise = (s) =>
@@ -231,11 +255,12 @@ function reportCategory(reportType) {
   if (/^hr[A-Z]/.test(reportType)) return "hr";
   const categories = {
     stock: ["stock", "stockActivity", "stockActivityView", "stockLedger", "stockMetrics", "tradingMargin", "monthlyStock", "monthlyStockValuation", "stockActivityWithRate", "stockWithCost", "fgstock", "fgdailystock"],
-    production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "orderQc", "qcParameters", "batchCosting", "batchBalance", "batchLedger", "processOrderReconciliation", "processOrderTiming", "productionPlanning", "costOfGoodsManufactured", "masterSample", "rmc"],
-    sales: ["sale", "saleOrder", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "dispatch", "dispatchReturn", "dailyDispatch", "salesOrderBalance", "salesTeamMis", "customerMargin", "costOfSales"],
-    purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn", "grnReturn", "purchaseOrderBalance", "materialprocurement", "materialprocurementenquiry", "importedMaterialStock", "importedMaterialinTransit", "importedMaterialDeals", "costOfGoodsSold", "exbondReport"],
-    financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "trialBalancePeriod", "trialBalanceSheet", "profitLoss", "accountsActivity", "payment", "receipt", "journal", "cbBook", "fundsFlow", "fundsPosition", "checksInHand"],
+    production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "orderQc", "qcParameters", "batchCosting", "batchBalance", "batchLedger", "processOrderReconciliation", "processOrderTiming", "pendingReport", "productionPlanning", "costOfGoodsManufactured", "masterSample", "rmc", "dailyProduction", "monthWiseRMMovingAverage", "rmCosting"],
+    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "dispatch", "dispatchReturn", "dailyDispatch", "salesOrderBalance", "salesTeamMis", "customerMargin", "costOfSales", "customerFile", "ilfile", "pcfile", "prfile"],
+    purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn", "grnReturn", "purchaseOrderBalance", "materialprocurement", "materialprocurementenquiry", "importedMaterialStock", "importedMaterialinTransit", "importedMaterialDeals", "costOfGoodsSold", "exbondReport", "purchasingfile"],
+    financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "trialBalancePeriod", "trialBalanceSheet", "profitLoss", "accountsActivity", "payment", "receipt", "journal", "cbBook", "fundsFlow", "fundsPosition", "checksInHand", "profitLossMonthly", "withHoldingTax", "digitalInvoice"],
     service: ["serviceOrder", "serviceEntry", "serviceInvoice"],
+    fixedAssets: ["fixedAssetRegister", "fixedAssetMovement", "fixedAssetSchedule", "fixedAssetDisposals"],
   };
   for (const [cat, list] of Object.entries(categories)) if (list.includes(reportType)) return cat;
   return "other";

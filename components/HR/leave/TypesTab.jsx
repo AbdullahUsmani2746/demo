@@ -21,7 +21,7 @@ import { Card, Chip, DIALOG, DIALOG_FOOTER } from "@/components/HR/payroll/ui";
 
 const BLANK = {
   code: "", name: "", is_paid: true, annual_days: 10, accrual: "YEARLY", prorate_joiners: true, min_service_days: 0,
-  max_carry_forward: 0, allow_negative: false, allow_half_day: true, count_off_days: false, comp_off: false, comp_off_valid_days: 30, max_days_per_request: "",
+  max_carry_forward: 0, allow_negative: false, allow_half_day: true, count_off_days: false, comp_off: false, comp_off_valid_days: 30, encashable: false, max_days_per_request: "",
   gender: "", color: "#0284c7", sort: 0, is_active: true,
 };
 
@@ -165,6 +165,7 @@ export default function TypesTab({ meta }) {
                 <Toggle label="Count week-offs / holidays inside" hint="e.g. maternity — calendar days" checked={form.count_off_days} onChange={set("count_off_days")} />
                 <Toggle label="In use" checked={form.is_active} onChange={set("is_active")} />
                 <Toggle label="Comp-off" hint="Days come from working a week-off / holiday, not Days a year" checked={form.comp_off} onChange={set("comp_off")} />
+                <Toggle label="Encashed at leaving" hint="Balance paid in the final settlement" checked={Boolean(form.encashable)} onChange={set("encashable")} />
               </div>
               {form.comp_off && (
                 <Field label="Take within (days of earning it)" className="max-w-xs">

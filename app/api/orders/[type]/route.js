@@ -27,6 +27,49 @@ import {
   WITHOUT_GODOWN_NOT_SET,
 } from "@/lib/orders/saleOrderApproval";
 import { getGodownStock } from "@/lib/stock/godownStock";
+import { feature } from "@/lib/features/server";
+import { applySaleOrderLineTypes, lineTypeOf, LINE_TYPE } from "@/lib/orders/lineTypes";
+import { approvedTrialItems } from "@/lib/orders/trialBilling";
+// Sale Order line → Production Plan (Features: saleOrder.planFromOrder)
+import { planApprovedOrder, planFieldsOf, isPlanMarked, soPlanLinesError } from "@/lib/orders/soPlan";
+import {
+  duplicateItemsError,
+  priceListError,
+  focTrialError,
+  litreUnitsError,
+  customerCreditChecks,
+} from "@/lib/orders/saleOrderChecks";
+
+// Settings → Features on a Sale Order body (lib/features/catalog.js, group
+// "saleOrder"): line types first (orders.trialLineBilling — Trial / Free of
+// Cost lines rate 0, order flags from the lines), then what may be on the
+// order. Run before the approval gate (a refused order is never held) and
+// again in createOrder / updateOrder (an approved request is checked as it is
+// saved). Safe to run twice. → error message or null.
+async function saleOrderBodyError(body, orderNo = null) {
+  if (!body?.master || !Array.isArray(body.lines)) return null;
+  if (await feature("orders.trialLineBilling")) {
+    const lineTypeError = applySaleOrderLineTypes(body);
+    if (lineTypeError) return lineTypeError;
+  }
+  const party = Number(body.master.party_code?.value ?? body.master.party_code);
+  return (
+    (await duplicateItemsError(body.lines)) ||
+    (await litreUnitsError(body.lines, orderNo)) ||
+    (await priceListError(party, body.lines, orderNo)) ||
+    (await focTrialError({ party, master: body.master, lines: body.lines, orderNo }))
+  );
+}
+
+// Free of Cost worked out from the lines (SMS: a 0 rate makes the order Free
+// of Cost). With line types on, Trial / Rate Negotiation lines are 0 on
+// purpose and do not count — only Normal lines do.
+function autoFreeOfCost(lines, { lineTypesOn }) {
+  const counted = lineTypesOn ? lines.filter((l) => (lineTypeOf(l) ?? LINE_TYPE.NORMAL) === LINE_TYPE.NORMAL) : lines;
+  if (lineTypesOn && !counted.length) return false;
+  const total = counted.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
+  return total === 0 || counted.some((d) => !d.rate || Number(d.rate) === 0);
+}
 
 // Sale Order Urgency Level (High / Moderate / Routine) from the form's select;
 // anything else (or nothing) saves as null.
@@ -326,6 +369,24 @@ export const GET = guardBy(
   orders.forEach((o) => { o.entered_by = userDisplayName(o.users); });
   await attachEnteredBy(orders, "OrderMaster");
 
+  // Lines carry prev_qty / prev_rate / edited_by / edited_at (all scalars of
+  // OrderDetail); add the name of whoever last changed each line's qty / rate.
+  const editorIds = [
+    ...new Set(orders.flatMap((o) => (o.orderDetails || []).map((d) => d.edited_by).filter(Boolean))),
+  ];
+  if (editorIds.length) {
+    const editors = await prisma.user.findMany({
+      where: { id: { in: editorIds } },
+      select: ENTERED_BY_USER_SELECT,
+    });
+    const nameOf = new Map(editors.map((u) => [u.id, userDisplayName(u)]));
+    for (const o of orders) {
+      for (const d of o.orderDetails || []) {
+        if (d.edited_by) d.edited_by_name = nameOf.get(d.edited_by) || null;
+      }
+    }
+  }
+
   return NextResponse.json({
     data: orders,
     totalPages,
@@ -426,6 +487,10 @@ export const POST = guardBy(
       });
     }
     const body = await bodyOf(req);
+    if (type === "saleOrder" && body?.master) {
+      const bodyError = await saleOrderBodyError(body);
+      if (bodyError) return NextResponse.json({ message: bodyError }, { status: 422 });
+    }
     if (body?.master) {
       const held = await approvalGate({ type, action: "create", body, session: ctx.session });
       if (held) return held;
@@ -458,6 +523,19 @@ async function createOrder(req, { params, actingSession = null }) {
         { message: "Request body must be a JSON object" },
         { status: 400 }
       );
+    }
+
+    // Settings → Features (also on an approved request's replay)
+    const lineTypesOn = type === "saleOrder" && (await feature("orders.trialLineBilling"));
+    if (type === "saleOrder") {
+      const bodyError = await saleOrderBodyError(body);
+      if (bodyError) return NextResponse.json({ message: bodyError }, { status: 422 });
+    }
+    // Plan Date / Plan Qty on the lines (saleOrder.planFromOrder); off → none written
+    const planOn = type === "saleOrder" && (await feature("saleOrder.planFromOrder"));
+    if (planOn) {
+      const planError = soPlanLinesError(Array.isArray(body?.lines) ? body.lines : []);
+      if (planError) return NextResponse.json({ message: planError }, { status: 422 });
     }
 
     const { master } = body;
@@ -548,32 +626,30 @@ async function createOrder(req, { params, actingSession = null }) {
       masterData.rateUnderNegotiation = ratesEditableOn(master);
       masterData.dispatchWithoutGodown = soWithoutGodown;
       masterData.urgency_level = urgencyLevelOf(master);
-      if (zeroRatesOn(master)) {
+      // Line types on: Free of Cost / Trial lines were zeroed per line
+      // (applySaleOrderLineTypes) — a Trial order's Normal lines keep their rate.
+      if (zeroRatesOn(master) && !lineTypesOn) {
         lines = zeroLineRates(lines);
       }
     }
 
-    const totalAmount = lines.reduce(
-      (sum, detail) => sum + (Number(detail.amount) || 0),
-      0
-    );
-
-    const anyRateZero = lines.some(
-      (detail) => !detail.rate || Number(detail.rate) === 0
-    );
-
     masterData.freeOfCost =
       master.freeOfCost === true ||
       // A rate still being negotiated may be 0 for now — that is not Free of Cost.
-      (!(isSaleOrder && masterData.rateUnderNegotiation) && (totalAmount === 0 || anyRateZero));
+      (!(isSaleOrder && masterData.rateUnderNegotiation) && autoFreeOfCost(lines, { lineTypesOn }));
 
     // Any approval reason → waits for approval (status 3).
     let soReasons = [];
+    let creditWarnings = [];
     let selfApproved = false;
     if (isSaleOrder) {
       const blocked = await followupBlockMessage(masterData);
       if (blocked) return NextResponse.json({ message: blocked }, { status: 422 });
       soReasons = await saleOrderApprovalReasons(masterData, master, lines, "create");
+      // Credit limit / overdue (Features saleOrder.creditLimit / overdueCheck): hold → a reason
+      const credit = await customerCreditChecks(masterData.party_code, lines);
+      soReasons = [...new Set([...soReasons, ...credit.holdReasons])];
+      creditWarnings = credit.warnings;
       masterData.approval_reasons = soReasons.length ? reasonsText(soReasons) : null;
       if (soReasons.length) {
         selfApproved = await approvedBySaver(session, soReasons);
@@ -626,10 +702,19 @@ async function createOrder(req, { params, actingSession = null }) {
           ? Number(detail.service_id)
           : null),
       order_no: orderMaster.order_no,
+      // Trial / Rate Negotiation per line (orders.trialLineBilling); else the column default (NORMAL)
+      ...(lineTypesOn ? { line_type: lineTypeOf(detail) || LINE_TYPE.NORMAL } : {}),
+      // A line marked for planning keeps its Plan Date / Qty (saleOrder.planFromOrder)
+      ...(planOn ? planFieldsOf(detail) : {}),
     }));
 
 
     await prisma.orderDetail.createMany({ data: orderDetailsData });
+
+    // Not waiting for approval → its marked lines go to their Plan Date's
+    // production plan now; a held order is planned when it is approved
+    // (app/api/orders/saleOrder/approval). A plan problem never undoes the order.
+    const plan = planOn && !held ? await planApprovedOrder({ soNo: orderNo, session }) : null;
 
     // Success response
     return NextResponse.json(
@@ -639,12 +724,15 @@ async function createOrder(req, { params, actingSession = null }) {
           : selfApproved
             ? `${type} created and approved by you (${reasonsText(soReasons)})`
             : `${type} created successfully`,
-        // Only reasons still waiting — the form plans the order when none are
+        // Only reasons still waiting
         approvalReasons: held ? soReasons : [],
+        plan: plan && { ok: plan.ok, message: plan.message },
         order_no: orderNo,
         party_code: String(master.party_code?.label),
         dated: new Date(master.dated),
         unitWarnings,
+        // Credit limit / overdue on "warn" (shown by the form as toasts)
+        warnings: creditWarnings,
         status: 201,
       },
       { status: 201 }
@@ -682,6 +770,10 @@ export const PUT = guardBy(
       if (!stored) return NextResponse.json({ message: "Order not found" }, { status: 404 });
       const mismatchError = orderTypeMismatchError(stored, type);
       if (mismatchError) return NextResponse.json({ message: mismatchError }, { status: 422 });
+      if (type === "saleOrder") {
+        const bodyError = await saleOrderBodyError(body, orderNo);
+        if (bodyError) return NextResponse.json({ message: bodyError }, { status: 422 });
+      }
       const held = await approvalGate({ type, action: "update", targetId: orderNo, targetNo: orderNo, body, session: ctx.session });
       if (held) return held;
     }
@@ -710,6 +802,18 @@ async function updateOrder(req, { params, actingSession = null }) {
         { message: "Request body must be a JSON object" },
         { status: 400 }
       );
+    }
+
+    const lineTypesOn = type === "saleOrder" && (await feature("orders.trialLineBilling"));
+    if (type === "saleOrder") {
+      const bodyError = await saleOrderBodyError(body, body?.master?.order_no);
+      if (bodyError) return NextResponse.json({ message: bodyError }, { status: 422 });
+    }
+    // Plan Date / Plan Qty on the lines (saleOrder.planFromOrder); off → stored ones kept, no new ones
+    const planOn = type === "saleOrder" && (await feature("saleOrder.planFromOrder"));
+    if (planOn) {
+      const planError = soPlanLinesError(Array.isArray(body?.lines) ? body.lines : []);
+      if (planError) return NextResponse.json({ message: planError }, { status: 422 });
     }
 
     const { master } = body;
@@ -788,31 +892,28 @@ async function updateOrder(req, { params, actingSession = null }) {
       masterData.rateUnderNegotiation = ratesEditableOn(master);
       masterData.dispatchWithoutGodown = soWithoutGodown;
       masterData.urgency_level = urgencyLevelOf(master);
-      if (zeroRatesOn(master)) {
+      // Line types on: Free of Cost / Trial lines were zeroed per line
+      // (applySaleOrderLineTypes) — a Trial order's Normal lines keep their rate.
+      if (zeroRatesOn(master) && !lineTypesOn) {
         lines = zeroLineRates(lines);
       }
     }
 
-    const totalAmount = lines.reduce(
-      (sum, detail) => sum + (Number(detail.amount) || 0),
-      0
-    );
-
-    const anyRateZero = lines.some(
-      (detail) => !detail.rate || Number(detail.rate) === 0
-    );
-
     masterData.freeOfCost =
       master.freeOfCost === true ||
       // A rate still being negotiated may be 0 for now — that is not Free of Cost.
-      (!(isSaleOrder && masterData.rateUnderNegotiation) && (totalAmount === 0 || anyRateZero));
+      (!(isSaleOrder && masterData.rateUnderNegotiation) && autoFreeOfCost(lines, { lineTypesOn }));
 
     let soReasons = [];
+    let creditWarnings = [];
     let selfApproved = false;
     if (isSaleOrder) {
       const blocked = await followupBlockMessage(masterData, master.order_no);
       if (blocked) return NextResponse.json({ message: blocked }, { status: 422 });
       soReasons = await saleOrderApprovalReasons(masterData, master, lines, "update");
+      const credit = await customerCreditChecks(masterData.party_code, lines);
+      soReasons = [...new Set([...soReasons, ...credit.holdReasons])];
+      creditWarnings = credit.warnings;
       masterData.approval_reasons = soReasons.length ? reasonsText(soReasons) : null;
       if (soReasons.length) selfApproved = await approvedBySaver(session, soReasons);
       if (selfApproved) {
@@ -858,6 +959,76 @@ async function updateOrder(req, { params, actingSession = null }) {
       }
     }
 
+    // Sale Order line edit audit: each item's qty / rate and last edit before
+    // this save, so a line whose qty or rate changes is stamped with who /
+    // when / the previous figures, and an unchanged line keeps its earlier
+    // stamp (read before the old lines are deleted). An item may be on several
+    // lines (Features saleOrder.duplicateItems = allowed): the nth line of an
+    // item is compared with the nth stored line of that item, in line order.
+    const oldLinesByItem = new Map(); // itcd → stored lines, oldest first
+    if (isSaleOrder) {
+      const oldAuditLines = await prisma.orderDetail.findMany({
+        where: { order_no: Number(master.order_no) },
+        select: { itcd: true, qty: true, rate: true, edited_by: true, edited_at: true, prev_qty: true, prev_rate: true, created_at: true },
+        orderBy: { id: "asc" },
+      });
+      for (const l of oldAuditLines) {
+        if (l.itcd == null) continue;
+        if (!oldLinesByItem.has(l.itcd)) oldLinesByItem.set(l.itcd, []);
+        oldLinesByItem.get(l.itcd).push(l);
+      }
+    }
+    const editedAt = new Date();
+    // Called once per new line, in line order (resolvedLines.map below)
+    const lineAudit = (detail) => {
+      if (!isSaleOrder) return {};
+      const old = oldLinesByItem.get(Number(detail.itcd))?.shift();
+      // A new item added on this edit: stamped, with no previous qty / rate
+      if (!old) return { edited_by: session?.user?.id ?? null, edited_at: editedAt, prev_qty: null, prev_rate: null };
+      const changed = (a, b) => Math.abs((Number(a) || 0) - (Number(b) || 0)) > 0.0001;
+      const kept = { created_at: old.created_at ?? undefined };
+      if (changed(old.qty, detail.qty) || changed(old.rate, detail.rate)) {
+        return { ...kept, edited_by: session?.user?.id ?? null, edited_at: editedAt, prev_qty: old.qty, prev_rate: old.rate };
+      }
+      return { ...kept, edited_by: old.edited_by, edited_at: old.edited_at, prev_qty: old.prev_qty, prev_rate: old.prev_rate };
+    };
+
+    // Each item's stored line type (orders.trialLineBilling): kept as saved
+    // while the feature is off, and the "before" of the trial-approved check.
+    const storedLineTypes = isSaleOrder
+      ? await prisma.orderDetail.findMany({
+          where: { order_no: Number(master.order_no) },
+          select: { itcd: true, line_type: true },
+          orderBy: { id: "asc" },
+        })
+      : [];
+    const storedTypeOf = new Map();
+    for (const l of storedLineTypes) if (l.itcd != null && !storedTypeOf.has(l.itcd)) storedTypeOf.set(l.itcd, l.line_type);
+    const lineTypeData = (detail) => {
+      if (!isSaleOrder) return {};
+      if (lineTypesOn) return { line_type: lineTypeOf(detail) || LINE_TYPE.NORMAL };
+      const kept = storedTypeOf.get(Number(detail.itcd));
+      return kept ? { line_type: kept } : {};
+    };
+
+    // Each item's stored Plan Date / Qty (saleOrder.planFromOrder): kept
+    // through the edit — also while the feature is off (read before delete)
+    const keptPlan = new Map();
+    if (isSaleOrder) {
+      const oldPlanLines = await prisma.orderDetail.findMany({
+        where: { order_no: Number(master.order_no), OR: [{ plan_date: { not: null } }, { plan_qty: { not: null } }] },
+        select: { itcd: true, plan_date: true, plan_qty: true },
+      });
+      for (const l of oldPlanLines) {
+        if (l.itcd != null && !keptPlan.has(l.itcd)) keptPlan.set(l.itcd, { plan_date: l.plan_date, plan_qty: l.plan_qty });
+      }
+    }
+    const planData = (detail) => {
+      if (!isSaleOrder) return {};
+      if (planOn && isPlanMarked(detail) && !keptPlan.has(Number(detail.itcd))) return planFieldsOf(detail);
+      return keptPlan.get(Number(detail.itcd)) ?? {};
+    };
+
     // delete old lines first
     await prisma.orderDetail.deleteMany({
       where: { order_no: Number(master.order_no) }
@@ -892,21 +1063,39 @@ async function updateOrder(req, { params, actingSession = null }) {
             ? Number(detail.service_id)
             : null,
       order_no: Number(master.order_no),
+      ...lineAudit(detail),
+      ...lineTypeData(detail),
+      ...planData(detail),
     }));
 
     await prisma.orderDetail.createMany({
       data: orderDetailsData
     });
 
+    // Not waiting for approval → lines newly marked for planning are planned now
+    const plan = planOn && !(soReasons.length && !selfApproved)
+      ? await planApprovedOrder({ soNo: Number(master.order_no), session })
+      : null;
+
+    // Trial / Rate Negotiation lines turned Normal with a rate = the client
+    // approved them; dispatched ones are ready to bill (lib/orders/trialBilling.js)
+    const trialApproved = lineTypesOn
+      ? await approvedTrialItems({ orderNo: master.order_no, before: storedLineTypes, after: resolvedLines, session })
+      : { items: [], message: null };
+
+    const savedMessage = soReasons.length && !selfApproved
+      ? `${type} updated — sent for approval (${reasonsText(soReasons)})`
+      : selfApproved
+        ? `${type} updated and approved by you (${reasonsText(soReasons)})`
+        : `${type} updated successfully`;
     return NextResponse.json({
-      message: soReasons.length && !selfApproved
-        ? `${type} updated — sent for approval (${reasonsText(soReasons)})`
-        : selfApproved
-          ? `${type} updated and approved by you (${reasonsText(soReasons)})`
-          : `${type} updated successfully`,
+      message: trialApproved.message ? `${savedMessage}. ${trialApproved.message}` : savedMessage,
+      trialApproved: trialApproved.items,
       approvalReasons: selfApproved ? [] : soReasons,
+      plan: plan && { ok: plan.ok, message: plan.message },
       order_no: Number(master.order_no),
       unitWarnings,
+      warnings: [...creditWarnings, ...(trialApproved.message ? [trialApproved.message] : [])],
       status: 200,
     });
 

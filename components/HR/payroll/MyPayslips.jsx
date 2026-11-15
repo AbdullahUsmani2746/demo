@@ -11,10 +11,14 @@ import { fmtMoney } from "@/lib/hr/salary/calc";
 import { api, EmptyState } from "@/components/HR/shared";
 import { downloadPayslips } from "@/components/HR/payroll/payslipPdf";
 import { Card } from "@/components/HR/payroll/ui";
+import { MyTaxCertificate } from "@/components/HR/payroll/TaxCertificates";
+import { useFeatures } from "@/hooks/useFeatures";
 
 export default function MyPayslips() {
   const { data, isLoading } = useQuery({ queryKey: ["hr-my-payslips"], queryFn: () => api("/api/hr/payroll/mine") });
   const [busy, setBusy] = useState(null);
+  const features = useFeatures();
+  const cert = features.on("hr.taxCertificate") ? <MyTaxCertificate /> : null;
   const download = async (p) => {
     setBusy(p.id);
     try {
@@ -28,6 +32,8 @@ export default function MyPayslips() {
   if (isLoading) return <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[...Array(3)].map((_, i) => <Skeleton key={i} className="h-40 rounded-xl" />)}</div>;
   if (!data?.payslips?.length) return <Card><EmptyState icon={FileText} title="No payslips yet" hint="Payslips appear here once a month’s payroll is posted." /></Card>;
   return (
+    <div className="space-y-3">
+    {cert}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {data.payslips.map((p) => (
         <div key={p.id} className="flex flex-col overflow-hidden rounded-xl border border-border bg-background transition-colors hover:border-primary/30">
@@ -54,6 +60,7 @@ export default function MyPayslips() {
           </div>
         </div>
       ))}
+    </div>
     </div>
   );
 }

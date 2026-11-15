@@ -39,6 +39,10 @@ import { CSS } from "@dnd-kit/utilities";
 import { useQuery } from "@tanstack/react-query";
 import SearchableSelect from "@/components/ui/searchable-select";
 import { useBOM } from "@/hooks/useBOM";
+import { useFeatures } from "@/hooks/useFeatures";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { productKindLabel } from "@/lib/production/setupConfig";
+import { bomPercentError } from "@/lib/production/rules";
 import { useDebounce } from "@/hooks/useDebounce";
 import BOMForm from "./BOMForm";
 import { useSession } from "next-auth/react";
@@ -131,6 +135,13 @@ const SortableBomRow = ({ id, children }) => {
 };
 
 const BOMTab = () => {
+  // Settings → Production setup (which products are finished goods) and
+  // Settings → Features "bom.percentRule" / "bom.oneActivePerItem" — the BOM
+  // API applies the same rules (lib/manufacturing/bomRules.js).
+  const { setup } = useProductionSetup();
+  const bomFeatures = useFeatures();
+  const percentRule = bomFeatures.value("bom.percentRule");
+  const oneActivePerItem = bomFeatures.on("bom.oneActivePerItem");
   const { data: session } = useSession();
   const { company } = useCompany();
 
@@ -417,7 +428,8 @@ const BOMTab = () => {
             setExistingBOM(result.bom);
             if (
               modalState.modalMode === "create" &&
-              !modalState.selectedBomToClone
+              !modalState.selectedBomToClone &&
+              !oneActivePerItem
             ) {
               setSaveDisabled(true);
             }
@@ -431,7 +443,7 @@ const BOMTab = () => {
         setSaveDisabled(false);
       }
     },
-    [modalState.modalMode, modalState.selectedBomToClone],
+    [modalState.modalMode, modalState.selectedBomToClone, oneActivePerItem],
   );
 
   useEffect(() => {
@@ -457,7 +469,7 @@ const BOMTab = () => {
           jobNo: String(item.finished_id || "N/A"),
           productName: String(item.product_name || "N/A"),
           productCategory: String(
-            item.product_ic_id === 1 ? "Finished" : "Semi Finished",
+            productKindLabel(setup, item.product_ic_id),
           ),
           items:
             item.bom_details?.map((detail) => ({
@@ -487,7 +499,7 @@ const BOMTab = () => {
         showNotification("Failed to generate PDF", "error");
       }
     },
-    [session, company, showNotification],
+    [session, company, showNotification, setup],
   );
 
   const handleSearch = useCallback((value) => {
@@ -525,7 +537,7 @@ const BOMTab = () => {
     setSaveDisabled(false);
 
     if (item) {
-      const category = item.product_ic_id === 1 ? "Finished" : "Semi Finished";
+      const category = productKindLabel(setup, item.product_ic_id);
       setBomFormData({
         finished_id: item.finished_id,
         category: category,
@@ -547,7 +559,7 @@ const BOMTab = () => {
         bomDetails: [],
       });
     }
-  }, []);
+  }, [setup]);
 
   const handleCloneBOM = useCallback(
     (item) => {
@@ -564,7 +576,7 @@ const BOMTab = () => {
       setSaveDisabled(false);
       setBomFormData({
         finished_id: "",
-        category: item.product_ic_id === 1 ? "Finished" : "Semi Finished",
+        category: productKindLabel(setup, item.product_ic_id),
         instructions: "A",
         bomDetails:
           item.bom_details?.map((detail) => ({
@@ -580,7 +592,7 @@ const BOMTab = () => {
         "success",
       );
     },
-    [showNotification],
+    [showNotification, setup],
   );
 
   const closeModal = useCallback(() => {
@@ -614,42 +626,20 @@ const BOMTab = () => {
       (sum, mat) => sum + (parseFloat(mat.material_percentage) || 0),
       0,
     );
-    const tolerance = 0.01; // 0.01% tolerance for floating point issues
-    // Finished BOM: 1% leeway either side of 100–110% (i.e. 99–111%)
-    // const finishedTolerance = 1;
-    // Finished BOM (create): total must be 100%, give or take 0.03%
-    // (99.97–100.03). The old 100–110% range is gone.
-    const finishedTolerance = 0.03;
-
-    // Validate percentages: Finished allows 100-110%, others require exactly 100%
-    if (bomFormData.category === "Finished") {
-      if (
-        // totalPercentage < 100 - tolerance ||
-        // totalPercentage > 110 + tolerance
-        // totalPercentage < 100 - finishedTolerance ||
-        // totalPercentage > 110 + finishedTolerance
-        Math.abs(totalPercentage - 100) > finishedTolerance
-      ) {
-        // showNotification("Material percentages must add up correctly", "error");
-        showNotification(
-          `Material percentages must total 100% — current total is ${totalPercentage.toFixed(2)}%`,
-          "error",
-        );
-        return;
-      }
-    } else {
-      if (Math.abs(totalPercentage - 100) > tolerance) {
-        showNotification(
-          "Material percentages must add up to exactly 100%",
-          "error",
-        );
-        return;
-      }
+    // Settings → Features "bom.percentRule" (SMS: a new finished BOM totals 100 %)
+    const percentError = bomPercentError(percentRule, totalPercentage, {
+      finished: bomFormData.category === "Finished",
+      editing: false,
+    });
+    if (percentError) {
+      showNotification(percentError, "error");
+      return;
     }
     if (
       existingBOM &&
       existingBOM.instructions === "A" &&
-      !modalState.selectedBomToClone
+      !modalState.selectedBomToClone &&
+      !oneActivePerItem
     ) {
       showNotification(
         "An active BOM already exists for this product. Cannot create new BOM.",
@@ -675,6 +665,8 @@ const BOMTab = () => {
     showNotification,
     existingBOM,
     modalState.selectedBomToClone,
+    percentRule,
+    oneActivePerItem,
   ]);
 
   const handleUpdateBOM = useCallback(async () => {
@@ -690,33 +682,14 @@ const BOMTab = () => {
       0,
     );
 
-    const tolerance = 0.01; // 0.01% tolerance for floating point issues
-    // Finished BOM: 1% leeway either side of 100–110% (i.e. 99–111%)
-    const finishedTolerance = 1;
-
-
-    // Validate percentages: Finished allows 100-110%, others require exactly 100%
-    if (
-      bomFormData.category === "Finished" ||
-      (existingBOM && existingBOM.item?.ic_id === 1)
-    ) {
-      if (
-        // totalPercentage < 100 - tolerance ||
-        // totalPercentage > 110 + tolerance
-        totalPercentage < 100 - finishedTolerance ||
-        totalPercentage > 110 + finishedTolerance
-      ) {
-        showNotification("Material percentages must add up correctly", "error");
-        return;
-      }
-    } else {
-      if (Math.abs(totalPercentage - 100) > tolerance) {
-        showNotification(
-          "Material percentages must add up to exactly 100%",
-          "error",
-        );
-        return;
-      }
+    // Settings → Features "bom.percentRule" (SMS: an edited finished BOM 99–111 %)
+    const percentError = bomPercentError(percentRule, totalPercentage, {
+      finished: bomFormData.category === "Finished",
+      editing: true,
+    });
+    if (percentError) {
+      showNotification(percentError, "error");
+      return;
     }
     try {
       const result = await updateBOM({
@@ -738,7 +711,7 @@ const BOMTab = () => {
     updateBOM,
     closeModal,
     showNotification,
-    existingBOM, // read by the Finished check above — was missing (stale value)
+    percentRule,
   ]);
 
   const openBomView = useCallback(
@@ -840,12 +813,14 @@ const BOMTab = () => {
       modalState.modalMode === "create" &&
       !modalState.selectedBomToClone &&
       existingBOM &&
-      existingBOM.instructions === "A"
+      existingBOM.instructions === "A" &&
+      !oneActivePerItem
     ) {
       return true;
     }
     return saveDisabled;
   }, [
+    oneActivePerItem,
     isCreating,
     isUpdating,
     modalState.modalMode,

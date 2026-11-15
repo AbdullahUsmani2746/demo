@@ -219,7 +219,7 @@ export default function SignIn() {
             <Image src="/ebiz-logo.png" alt="" width={40} height={40} />
           </span>
           <div>
-            <p className="text-lg font-bold tracking-tight">BIZ LOGIST</p>
+            <p className="text-lg font-bold tracking-tight">BIZLOGIST ERP</p>
             <p className="text-xs text-white/70">Enterprise business management</p>
           </div>
         </div>
@@ -246,7 +246,7 @@ export default function SignIn() {
           </ul>
         </div>
 
-        <p className="relative text-xs text-white/55">© {new Date().getFullYear()} BIZ LOGIST</p>
+        <p className="relative text-xs text-white/55">© {new Date().getFullYear()} BIZLOGIST ERP</p>
       </aside>
 
       {/* ── Sign in ── */}
@@ -258,7 +258,7 @@ export default function SignIn() {
               <Image src="/ebiz-logo.png" alt="" width={36} height={36} />
             </span>
             <div>
-              <p className="text-lg font-bold tracking-tight text-foreground">BIZ LOGIST</p>
+              <p className="text-lg font-bold tracking-tight text-foreground">BIZLOGIST ERP</p>
               <p className="text-xs text-muted-foreground">Enterprise business management</p>
             </div>
           </div>

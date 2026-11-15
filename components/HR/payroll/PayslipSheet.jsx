@@ -16,7 +16,8 @@ import { cn } from "@/lib/utils";
 import { fmtMoney } from "@/lib/hr/salary/calc";
 import { api, BRAND_BTN, NativeSelect } from "@/components/HR/shared";
 import { downloadPayslips } from "@/components/HR/payroll/payslipPdf";
-import { Chip, SHEET, SHEET_FOOTER } from "@/components/HR/payroll/ui";
+import { Chip, SHEET, SHEET_FOOTER } from "@/components/HR/payroll/ui";
+import { LOAN_KINDS } from "@/lib/hr/loans/schedule";
 
 export default function PayslipSheet({ runId, slip, canEdit, company, month, onClose, onChanged }) {
   const [adj, setAdj] = useState([]);
@@ -118,8 +119,9 @@ export default function PayslipSheet({ runId, slip, canEdit, company, month, onC
               <Rows rows={[
                 ...d.deductions.map((x) => [x.name, x.amount]),
                 ...(d.eobi.employee ? [["EOBI", d.eobi.employee]] : []),
+                ...(d.pf?.employee ? [["Provident fund", d.pf.employee]] : []),
                 ...(d.tax.month ? [["Income tax", d.tax.month]] : []),
-                ...d.loans.map((l) => [`${l.kind === "LOAN" ? "Loan" : "Advance"} #A-${l.loan_id}${l.overridden ? " (changed)" : ""}`, l.amount, l.due]),
+                ...d.loans.map((l) => [`${LOAN_KINDS[l.kind]?.short ?? "Loan"} #A-${l.loan_id}${l.overridden ? " (changed)" : ""}`, l.amount, l.due]),
                 ...d.adjustments.filter((x) => x.kind === "DEDUCTION").map((x) => [`${x.label} (one-off)`, x.amount]),
               ]} total={slip.total_deductions} />
             </Section>
@@ -134,6 +136,8 @@ export default function PayslipSheet({ runId, slip, canEdit, company, month, onC
             </Section>
           )}
           {d.eobi.employer > 0 && <p className="text-xs text-muted-foreground">Employer pays EOBI {fmtMoney(d.eobi.employer)} on top (not deducted).</p>}
+          {d.pf?.employer > 0 && <p className="text-xs text-muted-foreground">Employer adds {fmtMoney(d.pf.employer)} to the provident fund (not deducted).</p>}
+          {d.gratuity?.provision ? <p className="text-xs text-muted-foreground">Gratuity provided this month {fmtMoney(d.gratuity.provision)} (liability {fmtMoney(d.gratuity.liability)} for {d.gratuity.years} year(s)).</p> : null}
 
           {canEdit && (
             <Section title="Changes for this month">

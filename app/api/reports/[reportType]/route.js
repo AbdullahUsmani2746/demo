@@ -5,6 +5,7 @@ import { getOpening, getOpeningRates, getLatestOpeningPeriod, openingQtySql, ope
 import { REPORT_CONFIG, ENTERED_BY_REPORTS } from "@/components/Reports/config";
 import { attachEnteredBy } from "@/lib/audit/enteredBy";
 import { getAccount, requireAccount, getAccountGroup, accountSettingError } from "@/lib/accounts/accountSettings";
+import { distributorFileCodes } from "@/lib/reports/distributorFiles";
 import { resolveItemAccounts } from "@/lib/accounts/itemAccounts";
 import { format } from "date-fns";
 import { Prisma } from "@prisma/client";
@@ -13,6 +14,9 @@ import { getProductionPlanningReport } from "@/lib/reports/productionPlanning";
 import { getBatchBalanceReport } from "@/lib/reports/batchBalance";
 import { getBatchLedgerReport } from "@/lib/reports/batchLedger";
 import { getProcessOrderTimingReport } from "@/lib/reports/processOrderTiming";
+// Ported from Eastland: Sale Order → Plan → Lab → Process Order → Dispatch → Invoice
+import { getIsoTimelineReport } from "@/lib/reports/isoTimeline";
+import { getPendingReport } from "@/lib/reports/pendingReport";
 import { getSalesTeamMisReport } from "@/lib/reports/salesTeamMis";
 import { getRMCReport } from "@/lib/reports/rmc";
 import { getFundsFlowReport } from "@/lib/reports/fundsFlow";
@@ -20,9 +24,11 @@ import { getFundsPositionReport } from "@/lib/reports/fundsPosition";
 import { getSavedAccountOrder } from "@/lib/reports/accountOrder";
 import { getCustomerMarginReport } from "@/lib/reports/customerMargin";
 import { getChecksInHandReport } from "@/lib/reports/checksInHand";
+import { getFixedAssetRegister, getFixedAssetMovement, getFixedAssetSchedule, getFixedAssetDisposals } from "@/lib/reports/fixedAssets";
 import { getHrReport } from "@/lib/reports/hr";
 import { hrReportKey } from "@/lib/hr/reports/catalog";
 import { getMaterialProcurementReport, calculateMaterialProcurementSummary } from "@/lib/reports/materialProcurement";
+import { getProductionSetup, isFinishedCategory } from "@/lib/production/setup";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { authorize, authErrorResponse } from "@/lib/auth/route";
@@ -31,6 +37,12 @@ import { scopedSalesPersons } from "@/lib/auth/salesScope";
 import { buildLedgerRows, ledgerDrCr, wantsLedgerDetail } from "@/lib/reports/ledgerDetail";
 import { attachItemInfo } from "@/lib/reports/itemInfo";
 import { expandItemRows, mergeVoucherLines } from "@/lib/reports/accountLedgerSummary";
+import { withSubAccounts, summariseBySubAccount } from "@/lib/reports/subAccountLedger";
+import { feature } from "@/lib/features/server";
+import { getPriorMonthReturns } from "@/lib/costing/saleReturnCost";
+import { isBlendedCosting } from "@/lib/costing/issueRate";
+import { getCcComponents } from "@/lib/costing/ccRates";
+import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
 import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingApprovals";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -377,7 +389,9 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
   let totalCost = 0;
 
   for (const r of data) {
-    const cost = Number(r.total_cost_amount || 0);
+    // COGS: net of earlier months' returns at their own cost (saleReturn.costAtOriginalMonth);
+    // rows without net_cost_amount (feature off / COGM) use total_cost_amount as before
+    const cost = Number(r.net_cost_amount ?? r.total_cost_amount ?? 0);
     if (cost === 0) continue;
     const acno = acnoMap.get(Number(r.product_code));
     if (acno == null) { missing.push(`Item ${r.product_code} (${r.product_name || ""})`); continue; }
@@ -386,8 +400,14 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
   }
 
   // Debit the COGS account (Account Settings) with the same total that was credited.
+  // A stock account whose returns outweigh its cost is debited instead (and
+  // COGS credited when the whole period nets negative) — never a negative amount.
   const debitByAcno = new Map();
-  if (totalCost !== 0) debitByAcno.set(await requireAccount("cogs"), totalCost);
+  for (const [acno, amt] of [...creditByAcno]) {
+    if (amt < 0) { creditByAcno.delete(acno); debitByAcno.set(acno, (debitByAcno.get(acno) || 0) - amt); }
+  }
+  if (totalCost > 0) debitByAcno.set(await requireAccount("cogs"), (debitByAcno.get(await requireAccount("cogs")) || 0) + totalCost);
+  else if (totalCost < 0) creditByAcno.set(await requireAccount("cogs"), (creditByAcno.get(await requireAccount("cogs")) || 0) - totalCost);
   const dated = filters.dateTo ? new Date(filters.dateTo) : new Date();
 
   return await finalizeCogJV({
@@ -406,7 +426,7 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
 // NOT a pure integer (i.e. it is text — even if the text contains digits). Each
 // item's cost = issued qty × blended cost rate (material_issuance_rate) from the
 // Stock Activity With Rate report for the same month.
-async function getDirectMaterialIssuanceCostReport(filters = {}) {
+export async function getDirectMaterialIssuanceCostReport(filters = {}) {
   const m = parseInt(filters.month) || (new Date().getMonth() + 1);
   const y = parseInt(filters.year) || new Date().getFullYear();
   const dateFrom = new Date(y, m, 1, 0, 0, 0, 0);
@@ -523,7 +543,9 @@ async function postDirectMaterialIssuanceJV(filters, userId, preview = false) {
   const missing = [];
 
   for (const r of data) {
-    const cost = Number(r.total_cost_amount || 0);
+    // COGS: net of earlier months' returns at their own cost (saleReturn.costAtOriginalMonth);
+    // rows without net_cost_amount (feature off / COGM) use total_cost_amount as before
+    const cost = Number(r.net_cost_amount ?? r.total_cost_amount ?? 0);
     if (cost === 0) continue;
 
     const drAcno = DR_ACNO_BY_TYPE[r.issuance_type];
@@ -1024,7 +1046,16 @@ export async function GET(request, { params }) {
       }
       case "accountLedger":
         data = await getAccountLedger(filters);
-        summary = calculateAccountLedgerSummary(data);
+        // Sub Accounts (feature "vouchers.subAccounts"): column, filter and the
+        // Summary by Sub Account view. Off → the plain ledger, filter / view ignored.
+        if (await feature("vouchers.subAccounts")) {
+          data = await withSubAccounts(data, filters.subAccount);
+          summary = calculateAccountLedgerSummary(data);
+          const view = filters.viewMode && typeof filters.viewMode === "object" ? filters.viewMode.value : filters.viewMode;
+          if (view === "summary") data = await summariseBySubAccount(data);
+        } else {
+          summary = calculateAccountLedgerSummary(data);
+        }
         break;
       case "accountLedgerSummary": {
         // Invoice / return items as columns (lib/reports/accountLedgerSummary.js).
@@ -1078,6 +1109,63 @@ export async function GET(request, { params }) {
         const flatData = await getProfitLossReport(filters);
         summary = calculateTrialBalancePeriodSummary(flatData);
         data = trialBalanceAccountRows(flatData);
+        break;
+      }
+      case "profitLossMonthly": {
+        // P&L, one column per month (getProfitLossMonthlyReport)
+        data = await getProfitLossMonthlyReport(filters);
+        const sumWhere = (pred) => Number(data.filter(pred).reduce((s, r) => s + (r.total || 0), 0).toFixed(2));
+        summary = {
+          total_accounts: data.length,
+          total_income: sumWhere((r) => Number(r.mbscd) === 4),
+          total_expense: sumWhere((r) => Number(r.mbscd) === 5),
+          net: sumWhere(() => true),
+        };
+        break;
+      }
+      // ── Ported from the Accounting system ──
+      case "customerFile": {
+        data = await getCustomerFileReport(filters);
+        break;
+      }
+      case "dailyProduction":
+        data = await getDailyProductionReport(filters);
+        summary = calculateDailyProductionSummary(data);
+        break;
+      case "digitalInvoice": {
+        data = await getDigitalInvoiceReport(filters);
+        // summary = calculateDigitalInvoiceSummary(data);
+        break;
+      }
+      case "ilfile": {
+        data = await getILFileReport(filters);
+        break;
+      }
+      case "monthWiseRMMovingAverage": {
+        const result = await getMonthWiseRMMovingAverageReport(filters);
+        data = result.rows;
+        currentColumns = result.columns;
+        summary = calculateMonthWiseRMMovingAverageSummary(data);
+        break;
+      }
+      case "pcfile": {
+        data = await getPCFileReport(filters);
+        break;
+      }
+      case "prfile": {
+        data = await getPRFileReport(filters);
+        break;
+      }
+      case "purchasingfile": {
+        data = await getPurchasingFileReport(filters);
+        break;
+      }
+      case "rmCosting":
+        data = await getRMCostingReport(filters);
+        summary = calculateRMCostingSummary(data);
+        break;
+      case "withHoldingTax": {
+        data = await getWithHoldingTaxReport(filters);
         break;
       }
       case "salesOrderBalance":
@@ -1280,6 +1368,33 @@ export async function GET(request, { params }) {
         break;
       }
 
+      // Sale Order To Invoice Time Tracking (Features: saleOrder.planFromOrder)
+      case "isoTimeline": {
+        if (!(await feature("saleOrder.planFromOrder"))) {
+          return NextResponse.json({ error: "Planning from the Sale Order is switched off (Settings → Features → Sale Order)." }, { status: 403 });
+        }
+        const result = await getIsoTimelineReport({
+          ...filters,
+          soDateFrom: filters.soDateFrom ? normalizeDateStr(filters.soDateFrom) : null,
+          soDateTo: filters.soDateTo ? normalizeDateStr(filters.soDateTo) : null,
+          session,
+        });
+        data = result.data;
+        summary = result.summary;
+        break;
+      }
+
+      // Pending Report — plan lines waiting for their Process Order (Features: production.labNature)
+      case "pendingReport": {
+        if (!(await feature("production.labNature"))) {
+          return NextResponse.json({ error: "The Lab's Nature on plan lines is switched off (Settings → Features → Production)." }, { status: 403 });
+        }
+        const result = await getPendingReport(filters);
+        data = result.data;
+        summary = result.summary;
+        break;
+      }
+
       case "processOrderTiming": {
         const result = await getProcessOrderTimingReport({
           dateFrom: filters.dateFrom,
@@ -1334,6 +1449,22 @@ export async function GET(request, { params }) {
 
       case "checksInHand": {
         const result = await getChecksInHandReport(filters);
+        data = result.data;
+        summary = result.summary;
+        break;
+      }
+
+      // Fixed assets (lib/reports/fixedAssets.js). The schedule belongs to the
+      // "fixedAssets.depreciation" feature (Settings → Features).
+      case "fixedAssetRegister":
+      case "fixedAssetMovement":
+      case "fixedAssetSchedule":
+      case "fixedAssetDisposals": {
+        if (reportType === "fixedAssetSchedule" && !(await feature("fixedAssets.depreciation"))) {
+          return NextResponse.json({ error: "Monthly depreciation is switched off (Settings → Features → Fixed assets)." }, { status: 403 });
+        }
+        const fn = { fixedAssetRegister: getFixedAssetRegister, fixedAssetMovement: getFixedAssetMovement, fixedAssetSchedule: getFixedAssetSchedule, fixedAssetDisposals: getFixedAssetDisposals }[reportType];
+        const result = await fn(filters);
         data = result.data;
         summary = result.summary;
         break;
@@ -3689,8 +3820,11 @@ function calculateStockSummary(data) {
 
 async function getFGDailyUpdate(filters = {}) {
   try {
-    const FG_GODOWN = 3; // FG-DESPATCH — where T8 production lands and T6 dispatches leave from
-    const FG_CATEGORY = 1; // Finished goods only
+    // Settings → Production setup: the finished goods godown (where T8 lands
+    // and T6 dispatches leave from) and the finished goods categories
+    const prodSetup = await getProductionSetup();
+    const FG_GODOWN = prodSetup.finishedGoodsGodown;
+    const FG_CATEGORIES = prodSetup.finishedCategoryIds.length ? prodSetup.finishedCategoryIds : [-1];
 
     const parseBackendDate = (val) => {
       if (val instanceof Date) return new Date(val);
@@ -3716,7 +3850,7 @@ async function getFGDailyUpdate(filters = {}) {
     const openingStocks = await getOpening(month, year, {
       godown: FG_GODOWN,
       itemWhere: {
-        ic_id: FG_CATEGORY,
+        ic_id: { in: FG_CATEGORIES },
         ...(filters?.item ? { itcd: parseInt(filters.item) } : {}),
       },
       include: { item: true },
@@ -3782,7 +3916,7 @@ async function getFGDailyUpdate(filters = {}) {
     const mmFilterSql = filters?.mm
       ? Prisma.sql`AND CAST(i.itcd AS TEXT) LIKE ${'%' + filters.mm + '%'}`
       : Prisma.empty;
-    const fgCategoryFilterSql = Prisma.sql`AND i.ic_id = ${FG_CATEGORY}`;
+    const fgCategoryFilterSql = Prisma.sql`AND i.ic_id IN (${Prisma.join(FG_CATEGORIES)})`;
 
     // Roll opening forward when report starts after the 1st of the month
     if (dateFrom > monthStart) {
@@ -5532,6 +5666,8 @@ export async function getAccountLedger(filters) {
 
     groupedByAccount[acno].push({
       tran_id: Number(r.tran_id),
+      // This account's own Transactions line (Sub Account lookup, lib/reports/subAccountLedger.js)
+      line_id: r.line_id != null ? Number(r.line_id) : null,
       // Voucher drill (CLAUDE.md rule 15)
       tran_code: r.tran_code != null ? Number(r.tran_code) : null,
       acno,
@@ -6436,6 +6572,134 @@ async function getProfitLossReport(filters) {
     credit: Number(r.credit) || 0,
     balance: Number(r.closing) || 0,
   }));
+}
+
+// Profit and Loss — Month on Month (REPORT_CONFIG.profitLossMonthly).
+// The same figures as getProfitLossReport (same tran_codes, same Dr / Cr rule,
+// P&L groups 4 / 5 only), one row per account with one column per month of
+// the period: m_YYYY_MM = that month's debit − credit (+ Dr, − Cr, the sign of
+// the P&L "Balance"), and `total` = the whole period (= the P&L Balance).
+// The month columns are built by the config from the same date range.
+async function getProfitLossMonthlyReport(filters) {
+  let { dateFrom, dateTo } = filters;
+
+  if (!dateFrom) dateFrom = "2000-01-01";
+  if (!dateTo) dateTo = new Date().toISOString().split("T")[0];
+
+  // Account filter (optional, one or many: "860,263") — empty = every account
+  const accountIds = (Array.isArray(filters.account) ? filters.account : String(filters.account ?? "").split(","))
+    .map((a) => Number(a))
+    .filter((a) => Number.isFinite(a) && a > 0);
+  const accountSql = accountIds.length
+    ? Prisma.sql`AND t.acno IN (${Prisma.join(accountIds)})`
+    : Prisma.empty;
+
+  const results = await prisma.$queryRaw`
+    WITH txn AS (
+      SELECT
+        t.acno,
+        a.acname,
+        a.macno,
+        m.macname,
+        m.bscd,
+        mb.mbscd,
+        mb."mbscdDetail",
+        b."bscdDetail",
+        to_char(tm.dated, 'YYYY_MM') AS ym,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.damt,0)
+          ELSE 0
+        END AS debit_amount,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.camt,0)
+          ELSE 0
+        END AS credit_amount
+
+      FROM "Transactions" t
+      INNER JOIN "TRANSACTIONS_MASTER" tm
+        ON t.tran_id = tm.tran_id
+      LEFT JOIN "acno" a
+        ON t.acno = a.acno
+      LEFT JOIN "MACNO" m
+        ON a.macno = m.macno
+      LEFT JOIN "BSCD" b
+        ON m.bscd = b.bscd
+      LEFT JOIN "MBSCD" mb
+        ON b.mbscd = mb.mbscd
+
+      WHERE tm.tran_code IN (1,2,3,4,5,6,9,10,12,21)
+        AND tm.dated BETWEEN ${dateFrom}::date AND ${dateTo}::date
+        AND (b.mbscd = 4  OR b.mbscd = 5) -- Only P&L groups
+        AND a.acno IS NOT NULL
+        ${accountSql}
+    )
+    SELECT
+      acno,
+      macno,
+      mbscd,
+      bscd,
+      "mbscdDetail",
+      "bscdDetail",
+      COALESCE(acname, 'Unknown') AS account,
+      COALESCE(macname, 'Unknown') AS macaccount,
+      ym,
+      SUM(debit_amount) AS debit,
+      SUM(credit_amount) AS credit
+    FROM txn
+    GROUP BY acno, acname, macno, macname, bscd, mbscd, "mbscdDetail", "bscdDetail", ym
+    HAVING SUM(debit_amount) <> 0 OR SUM(credit_amount) <> 0
+    ORDER BY mbscd ASC, account ASC, ym ASC;
+  `;
+
+  // One row per account, the months side by side
+  const byAccount = new Map();
+  for (const r of results) {
+    const acno = r.acno != null ? Number(r.acno) : "";
+    let row = byAccount.get(acno);
+    if (!row) {
+      row = {
+        mbscd: r.mbscd ?? "",
+        mbscdName: r.mbscdDetail ?? "",
+        bscd: r.bscd ?? "",
+        bscdName: r.bscdDetail ?? "",
+        macno: r.macno != null ? Number(r.macno) : "",
+        macaccount: r.macaccount ?? "",
+        acno,
+        account: r.account ?? "",
+        dr_movement: 0,
+        cr_movement: 0,
+        total: 0,
+      };
+      byAccount.set(acno, row);
+    }
+    const debit = Number(r.debit) || 0;
+    const credit = Number(r.credit) || 0;
+    const key = `m_${r.ym}`;
+    row[key] = (row[key] || 0) + (debit - credit);
+    row.dr_movement += debit;
+    row.cr_movement += credit;
+    row.total += debit - credit;
+  }
+
+  // Same order as the P&L tree: main group › sub group › main account › name
+  const code = (v) => parseFloat(v) || 0;
+  return [...byAccount.values()].sort(
+    (a, b) =>
+      code(a.mbscd) - code(b.mbscd) ||
+      code(a.bscd) - code(b.bscd) ||
+      code(a.macno) - code(b.macno) ||
+      String(a.account).localeCompare(String(b.account)),
+  );
 }
 
 
@@ -11185,7 +11449,31 @@ export async function getStockActivityWithRateReport(filters = {}) {
     // itemCcRateMap is now ready — replaces the old single cc_rate_per_unit scalar
 
 
+    // ── 4b. Returns of earlier months' dispatches (Settings → Features
+    // "saleReturn.costAtOriginalMonth", lib/costing/saleReturnCost.js): their
+    // stock comes back at the cost the original month charged and enters this
+    // month's average at that cost. A source month that is not locked yet is
+    // computed from its own report; _priorDepth stops that chain.
+    const priorDepth = Number(filters._priorDepth || 0);
+    const priorReturns = priorDepth < 2 && (await feature("saleReturn.costAtOriginalMonth"))
+      ? await getPriorMonthReturns(
+        {
+          dateFrom: dateFrom ? new Date(dateFrom) : null,
+          dateTo: dateTo ? new Date(dateTo) : null,
+          monthStart: new Date(year, month - 1, 1, 0, 0, 0, 0),
+          product, category, godown,
+        },
+        (f) => getStockActivityWithRateReport({ ...f, _priorDepth: priorDepth + 1 }),
+      )
+      : new Map();
+
     // ── 5. Enrich: derive all rates and computed values ───────────────────────
+    // Categories that carry CC this month: finished goods, plus semi-finished
+    // while "costing.semiFinishedCC" applies (lib/costing/ccPolicy.js).
+    // "costing.method" = blendedCC → CC carried in by semi-finished / finished
+    // inputs is tracked through every stage (lib/costing/ccRates.js).
+    const ccCategoryIds = await ccCategoryIdsFor(month, year);
+    const ccComponents = (await isBlendedCosting()) ? await getCcComponents({ month, year }) : null;
     const enrichedResults = allRows.map(item => {
       const os = openingStockMap.get(Number(item.product_code))
         ?? { opening_qty: 0, opening_rate: 0, opening_value: 0 };
@@ -11195,6 +11483,14 @@ export async function getStockActivityWithRateReport(filters = {}) {
       const opening_cc_rate = Number(os.opening_cc_rate || 0);
       const opening_rm_rate = Number(os.opening_rm_rate || 0);
       const opening_value = opening_stock * opening_rate;
+
+      // Earlier months' returns at their original cost (0 while the feature is off)
+      const pr = priorReturns.get(Number(item.product_code));
+      const prior_ret_qty = pr ? pr.qty : 0;
+      const prior_ret_sale_amount = pr ? pr.sale_amount : 0;
+      const prior_ret_cost_value = pr ? pr.cost_value : 0;
+      const prior_ret_cc_value = pr ? pr.cc_value : 0;
+      const prior_ret_rm_value = pr ? pr.rm_value : 0;
 
       // ── Quantities ──────────────────────────────────────────────────────────
       const net_purchase_qty = Number(item.purchase_qty || 0) - Number(item.purchase_ret_qty || 0);
@@ -11225,12 +11521,23 @@ export async function getStockActivityWithRateReport(filters = {}) {
       const pos_ret_rate = Number(item.pos_ret_qty || 0) > 0 ? Number(item.pos_ret_amount || 0) / Number(item.pos_ret_qty) : 0;
 
       // ── CC rate: PER-ITEM from PCE (CHANGED from global cc_rate_per_unit) ──
-      // is_fg: only category 1 items (finished goods) carry a CC overhead.
+      // carries_cc: finished goods (Production setup), plus semi-finished while
+      // "costing.semiFinishedCC" applies, carry a CC overhead.
       // cc_rate is looked up from itemCcRateMap using this item's product_code.
       // If the item has no PCE rows (not produced), cc_rate = 0.
-      const is_fg = Number(item.category_id) === 1;
+      const carries_cc = ccCategoryIds.includes(Number(item.category_id));
       let cc_rate = 0;
-      if (is_fg) {
+      let cc_own_cost = 0;
+      let cc_input_cost = 0;
+      if (carries_cc && ccComponents) {
+        // Blended: own CC of this month's costing + CC carried in by inputs
+        const ccc = ccComponents.has(item.product_code) ? ccComponents.get(item.product_code) : null;
+        cc_own_cost = ccc ? ccc.own_cost : 0;
+        cc_input_cost = ccc ? ccc.input_cost : 0;
+        const blended_qty = opening_stock + (ccc ? ccc.qty : 0) + prior_ret_qty;
+        const blended_cost = opening_stock * opening_cc_rate + cc_own_cost + cc_input_cost + prior_ret_cc_value;
+        cc_rate = blended_qty > 0 ? blended_cost / blended_qty : 0;
+      } else if (carries_cc) {
         const pceAgg = ccAggByItcd.get(Number(item.product_code));
 
         const prod_cc_cost = pceAgg ? pceAgg.total_cc_cost : 0;
@@ -11238,8 +11545,9 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
         const opening_cc_cost = opening_stock * opening_cc_rate;
 
-        const blended_qty = prod_qty + opening_stock;
-        const blended_cost = prod_cc_cost + opening_cc_cost;
+        // Returned units carry the CC of the month they were sold in.
+        const blended_qty = prod_qty + opening_stock + prior_ret_qty;
+        const blended_cost = prod_cc_cost + opening_cc_cost + prior_ret_cc_value;
 
 
         cc_rate = blended_qty > 0 ? blended_cost / blended_qty : 0;
@@ -11263,11 +11571,13 @@ export async function getStockActivityWithRateReport(filters = {}) {
       const total_qty_for_rate = opening_stock
         + Number(item.purchase_qty || 0)
         - Number(item.purchase_ret_qty || 0)
-        + production_qty;
+        + production_qty
+        + prior_ret_qty;
       const total_value_for_rate = opening_value
         + Number(item.purchase_amount || 0)
         - Number(item.purchase_ret_amount || 0)
-        + production_value;
+        + production_value
+        + prior_ret_cost_value;
       const avg_rate_after_purchase = total_qty_for_rate > 0
         ? total_value_for_rate / total_qty_for_rate
         : 0;
@@ -11345,8 +11655,17 @@ export async function getStockActivityWithRateReport(filters = {}) {
         net_transfer_qty,
         cc_rate,
         opening_cc_rate,                         // NOW: per-item from PCE (not global)
+        carries_cc,                              // category carries CC this month (COGS split reads it)
+        cc_own_cost,
+        cc_input_cost,
         opening_rm_rate,                         // NOW: per-item from PCE (not global)
         stock_balance,
+        prior_ret_qty,
+        prior_ret_sale_amount,
+        prior_ret_cost_value,
+        prior_ret_rm_value,
+        prior_ret_cc_value,
+        prior_ret_sources: pr ? [...new Set(pr.sources)].join(", ") : "",
         avg_rate_after_purchase,
         total_cost_rate,
         stock_value,
@@ -11469,7 +11788,7 @@ function calculateStockActivityWithRateSummary(data) {
 //       which now uses itemCcRateMap).  No change needed in this function
 //       because it delegates all costing to getStockActivityWithRateReport.
 // ─────────────────────────────────────────────────────────────────────────────
-async function getCostOfGoodsSoldReport(filters = {}) {
+export async function getCostOfGoodsSoldReport(filters = {}) {
   try {
     const { dateFrom, dateTo } = filters;
     const dFrom = dateFrom ? new Date(dateFrom) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
@@ -11479,26 +11798,45 @@ async function getCostOfGoodsSoldReport(filters = {}) {
 
     // getStockActivityWithRateReport already uses per-item CC from PCE
     const rawData = await getStockActivityWithRateReport(filters);
+    const prodSetup = await getProductionSetup();
+
+    // Settings → Features "saleReturn.costAtOriginalMonth": this period's sales
+    // net only with returns of THIS period's dispatches; returns of earlier
+    // months are reversed separately at their own month's cost (ret_*). The
+    // stock activity rows carry prior_ret_* only while the feature is on.
+    const costReturns = await feature("saleReturn.costAtOriginalMonth");
+    const currentSold = (item) => {
+      const priorQty = costReturns ? Number(item.prior_ret_qty || 0) : 0;
+      const priorAmt = costReturns ? Number(item.prior_ret_sale_amount || 0) : 0;
+      const qty = (Number(item.sale_qty || 0) + Number(item.pos_qty || 0))
+        - (Number(item.sale_ret_qty || 0) - priorQty + Number(item.pos_ret_qty || 0));
+      const amount = (Number(item.sale_amount || 0) + Number(item.pos_amount || 0))
+        - (Number(item.sale_ret_amount || 0) - priorAmt + Number(item.pos_ret_amount || 0));
+      return qty > 0 ? { qty, amount } : { qty: 0, amount: 0 };
+    };
 
     return rawData
       .filter(item => {
-        // Only include items that had net sales in the period
-        const sq = (Number(item.sale_qty || 0) + Number(item.pos_qty || 0))
-          - (Number(item.sale_ret_qty || 0) + Number(item.pos_ret_qty || 0));
-        return sq > 0;
+        // Only include items that had net sales in the period (or, with
+        // returns at their original cost, a return of an earlier month)
+        return currentSold(item).qty > 0 || (costReturns && Number(item.prior_ret_qty || 0) > 0);
       })
       .map(item => {
-        const is_fg = Number(item.category_id) === 1;
-        const sold_qty = (Number(item.sale_qty || 0) + Number(item.pos_qty || 0))
-          - (Number(item.sale_ret_qty || 0) + Number(item.pos_ret_qty || 0));
-        const sale_amt = (Number(item.sale_amount || 0) + Number(item.pos_amount || 0))
-          - (Number(item.sale_ret_amount || 0) + Number(item.pos_ret_amount || 0));
+        const is_fg = isFinishedCategory(prodSetup, item.category_id);
+        const { qty: sold_qty, amount: sale_amt } = currentSold(item);
         const sale_rate = sold_qty > 0 ? sale_amt / sold_qty : 0;
+        // Return reversal at the original month's cost (0 while the feature is off)
+        const ret_qty = costReturns ? Number(item.prior_ret_qty || 0) : 0;
+        const ret_sale_amount = costReturns ? Number(item.prior_ret_sale_amount || 0) : 0;
+        const ret_rm_amount = costReturns ? Number(item.prior_ret_rm_value || 0) : 0;
+        const ret_cc_amount = costReturns ? Number(item.prior_ret_cc_value || 0) : 0;
+        const ret_cost_amount = costReturns ? Number(item.prior_ret_cost_value || 0) : 0;
 
         // avg_rate_after_purchase = blended cost rate (RM + CC already baked in).
         // We back out CC to show RM and CC as separate columns in the UI.
         const total_cost_rate = Number(item.avg_rate_after_purchase || 0);
-        const cc_rate = is_fg ? Number(item.cc_rate || item.opening_cc_rate || 0) : 0; // per-item from PCE
+        // carries_cc comes from the stock activity row (CC categories this month)
+        const cc_rate = (item.carries_cc ?? is_fg) ? Number(item.cc_rate || item.opening_cc_rate || 0) : 0;
         const rm_rate = total_cost_rate - cc_rate;
 
         const rm_cost_amount = rm_rate * sold_qty;
@@ -11543,6 +11881,17 @@ async function getCostOfGoodsSoldReport(filters = {}) {
           gross_profit_rate,
           gross_profit_amount,
           gross_profit_pct,
+          // Return reversal at the original month's cost + net (saleReturn.costAtOriginalMonth)
+          ret_qty,
+          ret_source_months: costReturns ? item.prior_ret_sources || "" : "",
+          ret_sale_amount,
+          ret_cost_rate: ret_qty > 0 ? ret_cost_amount / ret_qty : 0,
+          ret_rm_amount,
+          ret_cc_amount,
+          ret_cost_amount,
+          net_sale_amount: sale_amt - ret_sale_amount,
+          net_cost_amount: total_cost_amount - ret_cost_amount,
+          net_gross_profit: (sale_amt - ret_sale_amount) - (total_cost_amount - ret_cost_amount),
           // Supporting columns
           opening_qty: item.opening_stock || 0,
           opening_rate: item.opening_rate || 0,
@@ -11598,7 +11947,7 @@ function calculateCOGSSummary(data) {
 //   SUM(cc_cost) and SUM(qty_costed) per finished_id into cogmCcMap,
 //   then derive weighted avg cc_rate = total_cc_cost / total_qty.
 // ─────────────────────────────────────────────────────────────────────────────
-async function getCostOfGoodsManufacturedReport(filters = {}) {
+export async function getCostOfGoodsManufacturedReport(filters = {}) {
   try {
     const { month, year, product, category, viewMode, plan_id } = filters;
     const m = parseInt(month) || (new Date().getMonth() + 1);
@@ -11635,6 +11984,13 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
 
     // ── 3. Group PCE entries by finished_id ───────────────────────────────────
     const itemMap = new Map();
+    const prodSetup = await getProductionSetup();
+    // CC categories this month (finished, + semi-finished while
+    // "costing.semiFinishedCC" applies) and, with "costing.method" = blendedCC,
+    // the CC carried in by inputs — shown as its own split (lib/costing/ccRates.js).
+    const ccCategoryIds = await ccCategoryIdsFor(m, y);
+    const carriesCc = (icId) => ccCategoryIds.includes(Number(icId));
+    const ccComponents = (await isBlendedCosting()) ? await getCcComponents({ month: m, year: y }) : null;
 
     for (const entry of entries) {
       const finished_id = entry.plan?.finished_id ?? entry.itcd;
@@ -11644,7 +12000,7 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
       const item = entry.plan?.item ?? orphanItemMap.get(id) ?? null;
       const ic_id = Number(item?.ic_id ?? 0);
       const ic_name = item?.itemCategories?.ic_name ?? '';
-      const is_fg = ic_id === 1;
+      const is_fg = isFinishedCategory(prodSetup, ic_id);
 
       if (category && ic_id !== parseInt(category)) continue;
       if (product && id !== parseInt(product)) continue;
@@ -11662,6 +12018,7 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
           total_qty: 0,
           total_rm_cost: 0,   // SUM(actual_issued_cost ?? total_cost)
           total_cc_cost: 0,   // SUM(cc_cost)
+          total_cc_input: 0,  // CC carried in by inputs (inside total_rm_cost; blendedCC only)
           raw_entries: [],
           material_map: {},
         });
@@ -11683,6 +12040,9 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
       g.total_qty += qty;
       g.total_rm_cost += rm_cost;
       g.total_cc_cost += cc_cost;
+      const cc_input = ccComponents && carriesCc(ic_id) ? ccComponents.entryInputCost(entry) : 0;
+      g.total_cc_input += cc_input;
+      entry.__cc_input = cc_input;
       g.raw_entries.push(entry);
 
       // Accumulate merged materials for summary view
@@ -11721,11 +12081,21 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
 
       const qty = g.total_qty;
       const rm_cost = g.total_rm_cost;
-      const cc_cost = g.is_finished_good ? g.total_cc_cost : 0;
+      const cc_cost = carriesCc(g.ic_id) ? g.total_cc_cost : 0;
       const rm_rate = qty > 0 ? rm_cost / qty : 0;
       const cc_rate = qty > 0 ? cc_cost / qty : 0;
       const net_rate = rm_rate + cc_rate;
       const net_cost = rm_cost + cc_cost;
+      // RM pure / CC total split (CC carried in by inputs moved out of RM)
+      const cc_input_cost = g.total_cc_input;
+      const split = {
+        rm_pure_cost: rm_cost - cc_input_cost,
+        rm_pure_rate: qty > 0 ? (rm_cost - cc_input_cost) / qty : 0,
+        cc_input_cost,
+        cc_input_rate: qty > 0 ? cc_input_cost / qty : 0,
+        cc_total_cost: cc_cost + cc_input_cost,
+        cc_total_rate: qty > 0 ? (cc_cost + cc_input_cost) / qty : 0,
+      };
 
       if (isDetail) {
         result.push({
@@ -11741,6 +12111,7 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
           rm_cost,
           cc_rate,
           cc_cost,
+          ...split,
           net_rate,
           net_cost,
           production_orders: g.production_orders,
@@ -11781,6 +12152,9 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
             qty: po_qty,
             rm_cost: po_rm_cost,
             cc_cost: po_cc_cost,
+            rm_pure_cost: po_rm_cost - Number(entry.__cc_input || 0),
+            cc_input_cost: Number(entry.__cc_input || 0),
+            cc_total_cost: po_cc_cost + Number(entry.__cc_input || 0),
             net_cost: po_rm_cost + po_cc_cost,
           });
         }
@@ -11799,6 +12173,7 @@ async function getCostOfGoodsManufacturedReport(filters = {}) {
           rm_cost,
           cc_rate,
           cc_cost,
+          ...split,
           net_rate,
           net_cost,
           material_details: JSON.stringify(Object.values(g.material_map)),
@@ -14190,4 +14565,1169 @@ function calculateSalesMatrixMonthwiseSummary(data = [], monthsList = []) {
     : 0;
 
   return summary;
+}
+
+
+// ============================================================
+// Reports ported from the Accounting system
+// ============================================================
+// Raw material item category (the SMS code base keeps raw materials in category 3).
+const RM_IC_ID = 3;
+
+async function getCustomerFileReport(filters) {
+  // The principal's codes (Settings "distributorFileCodes", lib/reports/distributorFiles.js)
+  const codes = await distributorFileCodes();
+  // Every account of the Customers group (Finance → Account Settings → Parties)
+  const emptyRow = {
+    customer_code: "",
+    customer_status: "",
+    customer_name: "",
+    country_code: "",
+    country_name: "",
+    zip_code: "",
+    city: "",
+    address: "",
+    customer_type: "",
+    customer_sub_group_code: "",
+    customer_sub_group_description: "",
+    subsidiary_code: "",
+    salesman_code: "",
+  };
+
+  const accounts = await prisma.aCNO.findMany({
+    where: {
+      macno: { in: await getAccountGroup("customers") },
+    },
+    select: {
+      acno: true,
+      acname: true,
+      address: true,
+      city: true,
+      country: true,
+      category: true,
+      subCategory: false,
+      salesArea: true,
+      lock: true,
+    },
+    orderBy: { acno: 'asc' },
+  });
+
+  if (accounts.length === 0) {
+    return [emptyRow];
+  }
+
+  const rows = accounts.map((acno) => ({
+    customer_code: String(acno.acno),
+    // customer_status: acno.lock ? "Inactive" : "Active",
+    customer_status: codes.customerStatus,
+    customer_name: acno.acname || "",
+    country_code: codes.countryCode,
+    country_name: codes.countryName,
+    zip_code: "",
+    city: acno.city || "",
+    address: acno.address || "",
+    customer_type: codes.partyType,
+    customer_sub_group_code: acno.subCategory || "",
+    customer_sub_group_description: acno.subCategory || "",
+    subsidiary_code: codes.subsidiaryCode,
+    salesman_code: acno.salesArea || "",
+  }));
+
+  if (rows.length === 0) {
+    return [emptyRow];
+  }
+
+  return rows;
+}
+
+async function getDailyProductionReport(filters) {
+
+  const where = {
+    // Sirf woh process orders jo production mein gaye (status = "Posted")
+    status: "Posted",
+  };
+
+  // Date Filter
+  if (filters.dateFrom || filters.dateTo) {
+    where.dated = {
+      gte: filters.dateFrom
+        ? new Date(
+          new Date(filters.dateFrom).setUTCHours(0, 0, 0, 0)
+        )
+        : undefined,
+      lte: filters.dateTo
+        ? new Date(
+          new Date(filters.dateTo).setUTCHours(23, 59, 59, 999)
+        )
+        : undefined,
+    };
+  }
+
+  // Process Order Filter
+  if (filters.processOrderNo) {
+    where.id = Number(filters.processOrderNo);
+  }
+
+  // Finished Product Filter
+  if (filters.item) {
+    where.finished_id = Number(filters.item);
+  }
+
+  const plans = await prisma.productionPlanMaster.findMany({
+    where: {
+      ...where,
+      item: {
+        ic_id: 2,
+      },
+    },
+    include: {
+      item: {
+        select: {
+          itcd: true,
+          item: true,
+          code: true,
+          packing_material_code: true
+        },
+      },
+    },
+    orderBy: {
+      batch_no: "asc"
+    },
+  });
+
+  const rows = [];
+
+  plans.forEach(master => {
+
+    const planned = Number(master.qty || 0);
+
+    const actual = Number(master.actual_yield || 0);
+
+    const addition =
+      actual > planned
+        ? actual - planned
+        : 0;
+
+    const totalPlanned = planned + addition;
+
+    rows.push({
+      process_order_no: master.id,
+
+      material_code: master.finished_id || "",
+
+      product:
+        (master.item?.code ? master.item.code + " " : "") +
+        (master.item?.item || ""),
+
+      batch_no: master.batch_no || "",
+
+      actual_yield: actual,
+
+      planned_yield: planned,
+
+      addition: addition,
+
+      total_planned_yield: totalPlanned,
+
+      wastage:
+        totalPlanned > 0
+          ? Number(
+            (
+              ((totalPlanned - actual) / totalPlanned) *
+              100
+            ).toFixed(2)
+          )
+          : 0,
+
+      packaging: master.item?.packing_material_code || "",
+
+      against: master.sale_ord_no
+        ? `Against Sale Order No: ${master.sale_ord_no}`
+        : "Against Sale Order",
+    });
+
+  });
+
+  return rows;
+}
+
+async function getDigitalInvoiceReport(filters) {
+  const where = {
+    tran_code: 6, // Sale/Dispatch transaction code
+    invoice_no: {
+      not: null,
+      notIn: ["", "null", "undefined"],
+    },
+    dated: {
+      gte: filters.dateFrom ? new Date(filters.dateFrom) : undefined,
+      lte: filters.dateTo ? new Date(filters.dateTo) : undefined,
+    },
+  };
+
+  const whereTransactions = {
+    sub_tran_id: { in: [1, 2] },
+  };
+
+  // Optional item filter
+  if (filters.item) {
+    const itemId = parseInt(filters.item);
+    whereTransactions.itcd = itemId;
+    where.transactions = { some: { itcd: itemId } };
+  }
+
+  const transactions = await prisma.transactionsMaster.findMany({
+    where,
+    include: {
+      acno: true,
+      ordersSO: true,
+      transactions: {
+        where: whereTransactions,
+        include: { itemDetails: true },
+      },
+    },
+    orderBy: [{ check_date: "asc" }, { tran_id: "asc" }],
+  });
+
+  // Flatten: one row per transaction line item
+  const rows = [];
+
+  for (const t of transactions) {
+    if (!t.invoice_no || !t.invoice_no.toString().trim()) continue;
+
+    const formatYMD = (value) => {
+      if (!value) return "";
+      const d = new Date(value);
+      if (isNaN(d.getTime())) return "";
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+
+    const invoiceDateFormatted = formatYMD(t.check_date);
+    const deliveryDateFormatted = formatYMD(t.dated); 
+
+    // Group line items within the same invoice by item code/id and taxRate
+    const lineMap = new Map();
+
+    for (const line of t.transactions) {
+      const itemCode = line.itemDetails?.code ?? line.itcd ?? "";
+      const taxRate = line.st_rate ?? 0;
+      const key = `${itemCode}_${taxRate}`;
+
+      const grossAmt = line.camt ?? 0;
+      const stAmt = (line.tax_amount != null && line.tax_amount > 0)
+        ? line.tax_amount
+        : line.st_rate
+          ? (grossAmt * line.st_rate) / 100
+          : (line.st_amount ?? 0);
+      const furtherTax = (line.additional_tax_amount != null && line.additional_tax_amount > 0)
+        ? line.additional_tax_amount
+        : line.additional_tax
+          ? (grossAmt * line.additional_tax) / 100
+          : 0;
+      const totalVal = grossAmt + stAmt + furtherTax;
+      const qty = line.qty ?? 0;
+
+      if (!lineMap.has(key)) {
+        lineMap.set(key, {
+          line,
+          grossAmt,
+          stAmt,
+          furtherTax,
+          totalVal,
+          qty,
+        });
+      } else {
+        const existing = lineMap.get(key);
+        existing.grossAmt += grossAmt;
+        existing.stAmt += stAmt;
+        existing.furtherTax += furtherTax;
+        existing.totalVal += totalVal;
+        existing.qty += qty;
+      }
+    }
+
+    for (const itemGroup of lineMap.values()) {
+      const line = itemGroup.line;
+
+      rows.push({
+        // ── Hardcoded / Fixed seller fields ─────────────────────────────────
+        Scenario: "SN001",
+        sellerTransactionId: t.invoice_no,
+        invoiceDate: invoiceDateFormatted,
+        invoiceTypeId: "Sale Invoice",
+        sellerCode: "00212",
+        sellerBusinessName: "Siegwerk Pakistan Pvt Ltd",
+        sellerAddress: "Suite No. 003 and 004, Plot No. C-43, Ground Floor, Block 4, Federal B Area, Karachi, Pakistan",
+        sellerProvince: "Sindh",
+        sellerNtnCnic: "4559581",
+
+        // ── Fixed zeros ──────────────────────────────────────────────────────
+        PONo: t.ordersSO?.sale_po ?? "",
+        PODate: 0,
+        DONo: t.dispatch_no ?? "",
+        DeliveryDate: deliveryDateFormatted,
+
+        // ── Dynamic buyer fields ─────────────────────────────────────────────
+        buyerBusinessName: t.acno?.acname ?? "",
+        buyerNtnCnic: t.acno?.ntnNo ?? "",
+        buyerAddress: t.acno?.address?.trim() || t.acno?.customerBankAddr?.trim() || "",
+        buyerProvince: t.acno?.country,
+        buyerRegistrationType: t.acno?.tax_filing_status === "Filer" ? "Registered" : (t.acno?.tax_filing_status === "Non-Filer" || t.acno?.tax_filing_status === "NonFiler") ? "Unregistered" : (t.acno?.tax_filing_status ?? ""),
+
+        // ── Dynamic product fields ───────────────────────────────────────────
+        sellerItemCode: line.itemDetails?.code ?? "",
+        hsCode: "3215.1110",
+        productDescription: line.itemDetails?.item ?? "",
+        Quantity: itemGroup.qty,
+        UoM: line.itemDetails?.unit ?? line.unit ?? "",
+
+        // ── Tax / amount fields ──────────────────────────────────────────────
+        valueSalesExcludingST: itemGroup.grossAmt,
+        taxRate: line.st_rate ?? 0,
+        salesTaxApplicable: itemGroup.stAmt,
+        furtherTax: itemGroup.furtherTax,
+
+        // ── Fixed zeros ──────────────────────────────────────────────────────
+        extraTax: 0,
+        fedPayable: 0,
+        totalValues: itemGroup.totalVal,
+        discount: 0,
+        salesTaxWithheldAtSource: 0,
+        fixedNotifiedValueOrRetailPrice: 0,
+        SpecialDiscount: 0,
+        AdvanceTaxRate: 0,
+        AdvanceTax: 0,
+
+        // ── Hardcoded / Fixed ────────────────────────────────────────────────
+        saleType: "Goods at standard rate (default)",
+        sroScheduleNo: 0,
+        sroItemSerialNo: 0,
+        NoteTemplateName: 0,
+      });
+    }
+  }
+
+  return rows;
+}
+
+async function getILFileReport(filters) {
+  // The principal's codes (Settings "distributorFileCodes", lib/reports/distributorFiles.js)
+  const codes = await distributorFileCodes();
+
+  const records = await prisma.transactions.findMany({
+    where: {
+      sub_tran_id: 1,
+      transactionsMaster: {
+        tran_code: 6,
+        NOT: {
+          OR: [
+            { invoice_no: "" },
+            { invoice_no: null },
+          ],
+        },
+        ...(filters.dateFrom || filters.dateTo
+          ? {
+            dated: {
+              ...(filters.dateFrom && { gte: filters.dateFrom }),
+              ...(filters.dateTo && { lte: filters.dateTo }),
+            },
+
+          }
+          : {}),
+      },
+    },
+    include: {
+      acnoDetails: true,
+      itemDetails: true,
+      transactionsMaster: {
+        include: {
+          acno: true
+        }
+      },
+    },
+    orderBy: {
+      tran_id: "desc",
+    },
+  });
+  const emptyRow = {
+  };
+
+  if (records.length === 0) {
+    return [emptyRow];
+  }
+
+  const invoiceCounters = {};
+  const soCounters = {};
+
+  const rows = records.map((record) => {
+    const master = record.transactionsMaster || {};
+    const acnoDetails = record.acnoDetails || {};
+    const itemDetails = record.itemDetails || {};
+
+    const invoiceNo = master.invoice_no || "";
+    const soNo = master.so_no || "";
+
+    if (invoiceNo) {
+      invoiceCounters[invoiceNo] =
+        (invoiceCounters[invoiceNo] || 0) + 1;
+    }
+
+    if (soNo) {
+      soCounters[soNo] =
+        (soCounters[soNo] || 0) + 1;
+    }
+
+    return {
+      invoice_line_number: invoiceNo
+        ? invoiceCounters[invoiceNo]
+        : "",
+
+      invoice_number: invoiceNo || "",
+
+      product_code:
+        String(record.itcd || ""),
+
+      adjustment: "",
+
+      salesman_code: master.acno.salesArea,
+
+      customer_code: master.pycd,
+
+
+      transition_Currency_code: "PKR",
+      local_currency_code: "PKR",
+
+      invoice_date: master.dated
+        ? new Date(master.dated)
+          .toISOString()
+          .split("T")[0]
+        : "",
+
+      quantity: Number(record.qty) || 0,
+
+      sale_amount_transac:
+        Number(record.camt) || 0,
+
+      sale_amount_local:
+        Number(record.camt) || 0,
+
+      line_type_code: "PR",
+
+      data_type: master.dated
+        ? `AC${new Date(master.dated).getFullYear()}`
+        : "",
+
+      subsidiary_code: codes.subsidiaryCode,
+
+      business_group_code: "FP",
+      business_group_segment_code: "FP",
+
+      business_unit_code: "CL",
+
+      customer_order_number: soNo
+        ? String(soNo)
+        : "",
+
+      customer_order_line_number: soNo
+        ? soCounters[soNo]
+        : "",
+
+      document_number: master.dispatch_no,
+
+      incoterm: "DAP",
+      incoterm_location: "KHI",
+
+      payment_terms: master.acno.crDays,
+    };
+  });
+
+  return rows;
+}
+
+async function getMonthWiseRMMovingAverageReport(filters) {
+  // Build start/end from monthFrom/yearFrom and monthTo/yearTo
+  const monthFrom = parseInt(filters.monthFrom || (new Date().getMonth() - 5)) || 1;
+  const yearFrom  = parseInt(filters.yearFrom)  || new Date().getFullYear();
+  const monthTo   = parseInt(filters.monthTo)   || (new Date().getMonth() + 1);
+  const yearTo    = parseInt(filters.yearTo)    || new Date().getFullYear();
+
+  const start = new Date(yearFrom, monthFrom - 1, 1, 0, 0, 0, 0);       // first day of "from" month
+  const end   = new Date(yearTo,   monthTo,       0, 23, 59, 59, 999);   // last day of "to" month
+
+
+  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const monthsList = [];
+  let current = new Date(start.getFullYear(), start.getMonth(), 1);
+
+  while (current <= end) {
+    const y = current.getFullYear();
+    const m = current.getMonth();
+    const yearShort = String(y).slice(-2);
+    monthsList.push({
+      key: `${y}-${String(m).padStart(2, "0")}`,
+      label: `${monthNames[m]}-${yearShort}`,
+      year: y,
+      month: m
+    });
+    current.setMonth(current.getMonth() + 1);
+  }
+
+  const where = {
+    transactionsMaster: {
+      tran_code: 7,
+      dated: {
+        gte: start,
+        lte: end,
+      },
+    },
+    itemDetails: {
+      ic_id: 3,
+    },
+  };
+
+  if (filters.item) {
+    where.itcd = parseInt(filters.item);
+  }
+
+  const txs = await prisma.transactions.findMany({
+    where,
+    include: {
+      transactionsMaster: {
+        select: {
+          dated: true,
+        },
+      },
+      itemDetails: {
+        select: {
+          itcd: true,
+          item: true,
+          code: true,
+        },
+      },
+    },
+  });
+
+  const itemsMap = {};
+
+  txs.forEach((tx) => {
+    const itcd = tx.itcd;
+    if (!itcd) return;
+
+    if (!itemsMap[itcd]) {
+      itemsMap[itcd] = {
+        itcd: itcd,
+        item_code: tx.itemDetails?.code || "-",
+        item_name: tx.itemDetails?.item || "Unknown",
+        monthlyQty: {},
+      };
+      monthsList.forEach((m) => {
+        itemsMap[itcd].monthlyQty[m.key] = 0;
+      });
+    }
+
+    const date = new Date(tx.transactionsMaster.dated);
+    const key = `${date.getFullYear()}-${String(date.getMonth()).padStart(2, "0")}`;
+    if (itemsMap[itcd].monthlyQty[key] !== undefined) {
+      itemsMap[itcd].monthlyQty[key] += tx.qty || 0;
+    }
+  });
+
+  const resultRows = Object.values(itemsMap).map((row) => {
+    const newRow = {
+      id: String(row.itcd),
+      itcd: row.itcd,
+      item_code: row.item_code,
+      item_name: row.item_name,
+    };
+
+    let totalAbsolute = 0;
+    monthsList.forEach((m) => {
+      const val = row.monthlyQty[m.key] || 0;
+      newRow[`abs_${m.key}`] = val;
+      totalAbsolute += val;
+    });
+    newRow[`abs_total`] = totalAbsolute;
+
+    let sumSoFar = 0;
+    monthsList.forEach((m, idx) => {
+      sumSoFar += row.monthlyQty[m.key] || 0;
+      const avg = sumSoFar / (idx + 1);
+      newRow[`avg_${m.key}`] = avg;
+    });
+
+    return newRow;
+  });
+
+  const dynamicColumns = [
+    { field: "itcd", headerName: "Item Code ID", width: 15 },
+    { field: "item_code", headerName: "Item Code", width: 15 },
+    { field: "item_name", headerName: "Item Name", width: 40 },
+  ];
+
+  monthsList.forEach((m) => {
+    dynamicColumns.push({
+      field: `abs_${m.key}`,
+      headerName: `${m.label}`,
+      width: 15,
+      type: "number",
+    });
+  });
+  dynamicColumns.push({
+    field: "abs_total",
+    headerName: "TOTAL",
+    width: 15,
+    type: "number",
+  });
+
+  monthsList.forEach((m) => {
+    dynamicColumns.push({
+      field: `avg_${m.key}`,
+      headerName: `${m.label} Avg`,
+      width: 15,
+      type: "number",
+    });
+  });
+
+  return {
+    rows: resultRows,
+    columns: dynamicColumns,
+  };
+}
+
+async function getPCFileReport(filters) {
+  // The principal's codes (Settings "distributorFileCodes", lib/reports/distributorFiles.js)
+  const codes = await distributorFileCodes();
+  // Step 1: Get tran_ids from transactionsMaster where tran_code = 6
+  const masterWhere = { tran_code: 6 };
+
+  if (filters.dateFrom && filters.dateTo) {
+    masterWhere.dated = { gte: filters.dateFrom, lte: filters.dateTo };
+  } else if (filters.dateFrom) {
+    masterWhere.dated = { gte: filters.dateFrom };
+  } else if (filters.dateTo) {
+    masterWhere.dated = { lte: filters.dateTo };
+  }
+
+  const masters = await prisma.transactionsMaster.findMany({
+    where: masterWhere,
+    select: {
+      tran_id: true,
+      dated: true,
+      invoice_no: true,
+      pycd: true,
+      acno: {
+        select: { acno: true, acname: true },
+      },
+    },
+    orderBy: { dated: 'desc' },
+  });
+
+  const emptyRow = {
+    invoice_line_number: "",
+    invoice_number: "",
+    product_code: "",
+    customer_code: "",
+    invoice_date: "",
+    product_cost_budget: 0,
+    product_cost_conv_budget: 0,
+    product_material_cost_budget: 0,
+    product_cost_standard: 0,
+    product_conv_cost_standard: 0,
+    product_material_cost_standard: 0,
+    product_cost_actual: 0,
+    product_conv_cost_actual: 0,
+    product_material_cost_actual: 0,
+    subsidiary_code: "",
+  };
+
+  if (masters.length === 0) {
+    return [emptyRow];
+  }
+
+  const masterMap = {};
+  masters.forEach((m) => { masterMap[m.tran_id] = m; });
+
+  // Step 2: Get transaction lines for those tran_ids
+  const records = await prisma.transactions.findMany({
+    where: {
+      tran_id: { in: masters.map((m) => m.tran_id) },
+    },
+    include: {
+      itemDetails: {
+        select: { itcd: true, item: true, code: true, price: true },
+      },
+    },
+  });
+
+  const rows = records.map((record) => {
+    const master = masterMap[record.tran_id] || {};
+    const item = record.itemDetails || {};
+    const supplier = master.acno || {};
+
+    const invoiceDate = master.dated
+      ? new Date(master.dated).toISOString().split('T')[0]
+      : "";
+
+    const actualCost = Number(record.damt) || Number(record.camt) || 0;
+    const qty = Number(record.qty) || 1;
+    const rate = Number(record.rate) || 0;
+    const standardPrice = Number(item.price) || 0;
+
+    return {
+      invoice_line_number: String(record.sub_tran_id || record.id || ""),
+      invoice_number: master.invoice_no || "",
+      product_code: item.code || (record.itcd ? String(record.itcd) : ""),
+      customer_code: supplier.acno
+        ? String(supplier.acno)
+        : master.pycd
+          ? String(master.pycd)
+          : "",
+      invoice_date: invoiceDate,
+      product_cost_budget: 0,
+      product_cost_conv_budget: 0,
+      product_material_cost_budget: 0,
+      product_cost_standard: standardPrice,
+      product_conv_cost_standard: 0,
+      product_material_cost_standard: standardPrice * qty,
+      product_cost_actual: actualCost,
+      product_conv_cost_actual: 0,
+      product_material_cost_actual: rate * qty,
+      subsidiary_code: "",
+    };
+  });
+
+  if (rows.length === 0) {
+    return [emptyRow];
+  }
+
+  return rows;
+}
+
+async function getPRFileReport(filters) {
+  // The principal's codes (Settings "distributorFileCodes", lib/reports/distributorFiles.js)
+  const codes = await distributorFileCodes();
+  const emptyRow = {
+    product_code: "",
+    product_status: "",
+    product_name: "",
+    generic_product_code: "",
+    packing_code: "",
+    measure_unit_code: "",
+    business_unit_code: "",
+    product_line_code: "",
+    product_family_code: "",
+    product_type_code: "",
+    product_series_code: "",
+    product_line_name: "",
+    product_family_name: "",
+    product_type_name: "",
+    product_series_name: "",
+    product_color_code: "",
+    product_class_code: "",
+    product_class_name: "",
+    free1: "",
+    free2: "",
+    free3: "",
+    subsidiary_code: "",
+    un_code: "",
+    hazard_class: "",
+    packaging_group: "",
+    freezing_point: "",
+    heat_sensitivity: "",
+    standard_cost: 0,
+    manufactured_locally: "",
+    make_to_stock: "",
+  };
+
+  const items = await prisma.item.findMany({
+    include: {
+      itemCategories: true,
+    },
+    orderBy: {
+      itcd: "asc",
+    },
+  });
+
+  if (items.length === 0) {
+    return [emptyRow];
+  }
+
+  const rows = items.map((item) => ({
+    product_code: item.code || String(item.itcd || ""),
+
+    product_status: item.discard
+      ? "Inactive"
+      : "Active",
+
+    product_name: item.item || "",
+
+    generic_product_code:
+      item.sku ||
+      (item.itcd
+        ? String(item.itcd)
+        : ""),
+
+    packing_code: item.packing_material_code
+      ? String(item.packing_material_code)
+      : "1",
+    measure_unit_code: item.unit || "KG",
+    business_unit_code: item.business_unit || "CL",
+    product_line_code: "NC",
+    product_family_code: "NC",
+    product_type_code: "NC",
+    product_series_code: item.series || "NC",
+    product_line_name: "NC",
+    product_family_name: "NC",
+    product_type_name: "NC",
+    product_series_name: item.series || "NC",
+    product_color_code: item.color || "NC",
+    product_class_code: item.ic_id
+      ? String(item.ic_id)
+      : "NC",
+    product_class_name:
+      item.itemCategories?.name || "NC",
+    free1: "",
+    free2: "",
+    free3: "",
+    subsidiary_code: codes.subsidiaryCode,
+    un_code: "",
+    hazard_class: "",
+    packaging_group: "",
+    freezing_point: "",
+    heat_sensitivity: "",
+    standard_cost: Number(item.price) || 0,
+    manufactured_locally: "",
+    make_to_stock: "",
+  }));
+
+  return rows.length ? rows : [emptyRow];
+}
+
+async function getPurchasingFileReport(filters) {
+  // The principal's codes (Settings "distributorFileCodes", lib/reports/distributorFiles.js)
+  const codes = await distributorFileCodes();
+  // Step 1: Get tran_ids from transactionsMaster where tran_code = 6
+  const masterWhere = { tran_code: 6 };
+
+  const startDate = filters.dateFrom
+    ? new Date(new Date(filters.dateFrom).setHours(0, 0, 0, 0))
+    : undefined;
+
+  const endDate = filters.dateTo
+    ? new Date(new Date(filters.dateTo).setHours(23, 59, 59, 999))
+    : undefined;
+
+  const masters = await prisma.transactionsMaster.findMany({
+    where: masterWhere,
+    select: {
+      tran_id: true,
+      dated: true,
+      invoice_no: true,
+      pycd: true,
+      rmk5: true,
+      acno: {
+        select: { acno: true, acname: true, category: true },
+      },
+    },
+    orderBy: {
+      dated: 'desc',
+    }
+  });
+
+  const emptyRow = {
+    site_order: "",
+    period_start: "",
+    period_end: "",
+    local_raw_material_code: "",
+    local_raw_material_description: "",
+    local_supplier_code: "",
+    local_supplier_description: "",
+    purchased_qty_in_kilograms: 0,
+    total_cost: 0,
+    material_price_per_kilogram: 0,
+    last_mat_price_per_kilogram: 0,
+    currency_code_iso: "",
+    incoterm: "",
+    material_type: "",
+    supplier_type: "",
+  };
+
+  if (masters.length === 0) {
+    return [emptyRow];
+  }
+
+  const masterMap = {};
+  masters.forEach((m) => { masterMap[m.tran_id] = m; });
+
+  // Step 2: Get transactions for those tran_ids, including item and currency details
+  const records = await prisma.transactions.findMany({
+    where: {
+      tran_id: { in: masters.map((m) => m.tran_id) },
+    },
+    include: {
+      itemDetails: {
+        select: { itcd: true, item: true, code: true, itemCategories: { select: { id: true } } },
+      },
+      currencyDetails: {
+        select: { currency: true },
+      },
+    },
+  });
+
+  // Step 3: Collect all itcds to get the last purchase rate per item
+  const itcdSet = new Set();
+  records.forEach((r) => { if (r.itcd) itcdSet.add(r.itcd); });
+
+  // Build a map of last purchase rate per itcd (latest dated purchase transaction)
+  const lastRateMap = {};
+  if (itcdSet.size > 0) {
+    const lastPurchases = await prisma.transactions.findMany({
+      where: {
+        itcd: { in: [...itcdSet] },
+        transactionsMaster: { tran_code: 6 },
+        rate: { not: null },
+      },
+      select: { itcd: true, rate: true, tran_id: true },
+      orderBy: { tran_id: 'desc' },
+    });
+    lastPurchases.forEach((lp) => {
+      if (lp.itcd && !(lp.itcd in lastRateMap)) {
+        lastRateMap[lp.itcd] = Number(lp.rate) || 0;
+      }
+    });
+  }
+
+  const rows = records.map((record) => {
+    const master = masterMap[record.tran_id] || {};
+    const item = record.itemDetails || {};
+    const currency = record.currencyDetails || {};
+    const supplier = master.acno || {};
+
+    const datedObj = master.dated ? new Date(master.dated) : null;
+    const dateStr = datedObj ? datedObj.toISOString().split('T')[0] : "";
+
+    // Derive period start/end from dated (first and last day of that month)
+    let periodStart = "";
+    let periodEnd = "";
+    if (datedObj) {
+      const y = datedObj.getFullYear();
+      const mo = datedObj.getMonth();
+      periodStart = new Date(y, mo, 1).toISOString().split('T')[0];
+      periodEnd = new Date(y, mo + 1, 0).toISOString().split('T')[0];
+    }
+
+    const qty = Number(record.qty) || 0;
+    const rate = Number(record.rate) || 0;
+    const totalCost = Number(record.damt) || (qty * rate);
+    const lastRate = record.itcd ? (lastRateMap[record.itcd] ?? rate) : rate;
+
+    return {
+      // site_order: master.invoice_no || "",
+      site_order: codes.subsidiaryCode,
+      period_start: periodStart,
+      period_end: periodEnd,
+      local_raw_material_code: item.code || (record.itcd ? String(record.itcd) : ""),
+      local_raw_material_description: item.item || "",
+      local_supplier_code: supplier.acno ? String(supplier.acno) : (master.pycd ? String(master.pycd) : ""),
+      local_supplier_description: supplier.acname || "",
+      purchased_qty_in_kilograms: qty,
+      total_cost: totalCost,
+      material_price_per_kilogram: rate,
+      last_mat_price_per_kilogram: lastRate,
+      currency_code_iso: currency.currency || "PKR",
+      incoterm: master.rmk5 || "DAP",
+      material_type: "RM",
+      supplier_type: codes.partyType,
+
+      // currency_code_iso: currency.currency || "PKR",
+      // incoterm: master.rmk5 || "DAP",
+      // material_type: item.itemCategories ? String(item.itemCategories.id) : "RM",
+      // supplier_type: supplier.category || "TP",
+    };
+  });
+
+  if (rows.length === 0) {
+    return [emptyRow];
+  }
+
+  return rows;
+}
+
+// Raw material opening stock and rate of a month, with the rate change on the
+// month before. Opening stock is read through lib/openingStock.js (qty summed
+// over every godown, rate per item) — never from MonthlyOpeningStock directly.
+async function getRMCostingReport(filters = {}) {
+  const now = new Date();
+  const month = parseInt(filters.month) || now.getMonth() + 1;
+  const year = parseInt(filters.year) || now.getFullYear();
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+
+  const items = await prisma.item.findMany({
+    where: { ic_id: RM_IC_ID, OR: [{ discard: false }, { discard: null }] },
+    select: { itcd: true, item: true, code: true, unit: true },
+    orderBy: { item: "asc" },
+  });
+  const itcds = items.map((i) => i.itcd);
+  if (!itcds.length) return [];
+
+  const [current, prevRates] = await Promise.all([
+    getOpening(month, year, { itcds }),
+    getOpeningRates(prevMonth, prevYear, { itcds }),
+  ]);
+  const currentMap = new Map(current.map((r) => [r.itcd, r]));
+
+  return items.map((item) => {
+    const row = currentMap.get(item.itcd) || null;
+    const prevRate = prevRates.get(item.itcd)?.opening_rate ?? null;
+    return {
+      itcd: item.itcd,
+      item_name: item.item,
+      code: item.code || "",
+      unit: item.unit || "",
+      opening_qty: row?.opening_qty ?? null,
+      opening_rate: row?.opening_rate ?? null,
+      opening_value: row?.opening_value ?? null,
+      rate_change_pct: pctChangeRM(row?.opening_rate ?? null, prevRate),
+    };
+  });
+}
+
+async function getWithHoldingTaxReport(filters) {
+  const startDate = filters.dateFrom
+    ? new Date(new Date(filters.dateFrom).setHours(0, 0, 0, 0))
+    : undefined;
+
+  const endDate = filters.dateTo
+    ? new Date(new Date(filters.dateTo).setHours(23, 59, 59, 999))
+    : undefined;
+
+  const transactions = await prisma.transactions.findMany({
+    where: {
+      sub_tran_id: { in: [1, 2] },
+      transactionsMaster: {
+        tran_code: 2,
+        dated: {
+          gte: filters.dateFrom ? startDate : undefined,
+          lte: filters.dateTo ? endDate : undefined,
+        },
+      }
+    },
+    include: {
+      acnoDetails: true,
+      transactionsMaster: true
+    },
+    orderBy: [
+      { tran_id: 'asc' },
+      { narration5: 'asc' }
+    ]
+  });
+
+  // Group by tran_id + narration5 (the shared line index)
+  const grouped = new Map();
+
+  for (const tr of transactions) {
+    // key combines voucher id + the matching index from narration5
+    const key = `${tr.tran_id}__${tr.narration5}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        master: tr.transactionsMaster,
+        vendorName: "Unknown Vendor",
+        ntnNo: "-",
+        totalInvoiceAmount: 0,
+        taxAmount: 0,
+      });
+    }
+
+    const row = grouped.get(key);
+
+    if (tr.sub_tran_id === 1) {
+      row.vendorName = tr.acnoDetails?.acname || "Unknown Vendor";
+      row.ntnNo = tr.acnoDetails?.ntnNo || "-";
+      row.totalInvoiceAmount += Number(tr.damt || 0);
+    } else if (tr.sub_tran_id === 2) {
+      row.taxAmount += Number(tr.camt || 0);
+    }
+  }
+
+  const reportRows = Array.from(grouped.values()).map((row, index) => ({
+    sNo: index + 1,
+    date: row.master?.dated
+      ? format(row.master.dated, "dd-MM-yyyy")
+      : "",
+    vendorName: row.vendorName,
+    ntnNo: row.ntnNo,
+    totalInvoiceAmount: row.totalInvoiceAmount,
+    taxAmount: row.taxAmount,
+    chqAmount: row.totalInvoiceAmount - row.taxAmount,
+  }));
+
+  return reportRows;
+}
+
+function calculateDailyProductionSummary(rows) {
+  const totalPlanned = rows.reduce((sum, row) => sum +
+    Number(row.total_planned_yield || 0), 0);
+  const totalActual =
+    rows.reduce(
+      (sum, row) =>
+        sum +
+        Number(row.actual_yield || 0),
+      0
+    );
+  return {
+    semiFinishProductivity:
+      totalPlanned
+        ? Number(
+          (
+            (totalActual / totalPlanned)
+            *
+            100
+          ).toFixed(2)
+        )
+        : 0,
+    finishedInkProductivity:
+      totalPlanned
+        ? Number(
+          (
+            (totalActual / totalPlanned)
+            *
+            100
+          ).toFixed(2)
+        )
+        : 0,
+    total_orders:
+      rows.length,
+    total_actual_yield:
+      totalActual,
+    total_planned_yield:
+      totalPlanned
+  };
+}
+
+function calculateMonthWiseRMMovingAverageSummary(data) {
+  return {
+    total_items: data.length,
+    overall_total_consumption: data.reduce((sum, r) => sum + (r.abs_total || 0), 0),
+  };
+}
+
+function calculateRMCostingSummary(data) {
+  const withRate = data.filter((d) => d.opening_rate != null);
+  const rates = withRate.map((d) => d.opening_rate);
+
+  return {
+    total_items: data.length,
+    items_with_data: withRate.length,
+    items_missing: data.length - withRate.length,
+    total_value: Number(data.reduce((s, d) => s + (d.opening_value || 0), 0).toFixed(2)),
+    avg_rate: rates.length ? Number((rates.reduce((s, v) => s + v, 0) / rates.length).toFixed(4)) : null,
+    min_rate: rates.length ? Math.min(...rates) : null,
+    max_rate: rates.length ? Math.max(...rates) : null,
+  };
+}
+
+function pctChangeRM(curr, prev) {
+  if (curr == null || prev == null || prev === 0) return null;
+  return ((curr - prev) / Math.abs(prev)) * 100;
 }

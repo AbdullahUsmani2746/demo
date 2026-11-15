@@ -7,6 +7,7 @@ import { bi, biJson, routeId } from "@/lib/bi/http";
 import { BiError, fieldValues } from "@/lib/bi/engine";
 import { canViewDashboard, layoutQuestionIds } from "@/lib/bi/access";
 import { datasetByKey } from "@/lib/bi/datasets";
+import { enabledDashFilters } from "@/lib/bi/dashFilters";
 
 export const GET = guard(
   null,
@@ -16,7 +17,9 @@ export const GET = guard(
     if (!(await canViewDashboard(session, id))) throw new BiError("This dashboard is not assigned to you.", 403);
     const dashboard = await prisma.biDashboard.findUnique({ where: { id } });
     const field = new URL(req.url).searchParams.get("field");
-    if (!dashboard || !(dashboard.layout?.filters ?? []).some((f) => f.field === field)) return biJson({ values: [] });
+    // The dashboard's own filters, or a built-in one that is switched on
+    const builtin = (await enabledDashFilters()).some((f) => f.field === field && f.kind === "multi");
+    if (!dashboard || !(builtin || (dashboard.layout?.filters ?? []).some((f) => f.field === field))) return biJson({ values: [] });
 
     const qs = await prisma.biQuestion.findMany({
       where: { id: { in: layoutQuestionIds(dashboard.layout) } },

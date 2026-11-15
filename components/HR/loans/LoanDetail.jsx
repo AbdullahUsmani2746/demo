@@ -193,7 +193,7 @@ export default function LoanDetail({ loanId, onClose, meta }) {
                           <td className="px-3 py-1.5 text-right">{fmtMoney(r.balance)}</td>
                         </tr>
                       ))}
-                      {!data.schedule.length && <tr><td colSpan={4} className="px-3 py-3 text-center text-muted-foreground">Nothing left to recover.</td></tr>}
+                      {!data.schedule.length && <tr><td colSpan={4} className="px-3 py-3 text-center text-muted-foreground">{l.refundable === false ? "A provident fund withdrawal is not paid back." : "Nothing left to recover."}</td></tr>}
                     </tbody>
                   </table>
                 </div>

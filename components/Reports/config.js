@@ -10,6 +10,7 @@ import {
 } from "@/lib/accounts/groupParams";
 import { engineColumns, HR_REPORTS, hrEngineKey } from "@/lib/hr/reports/catalog";
 import { fiscalYearStart } from "@/lib/hr/payroll/compute";
+import { voucherHref } from "@/lib/vouchers/voucherLink";
 
 // report-config-helpers.js
 
@@ -43,6 +44,14 @@ const filterValue = (v) => (v && typeof v === "object" && !Array.isArray(v) && "
 
 // /accounting/reports/<report>?… for a drill step. Empty / "all" / false
 // values are left out, multi-select arrays are joined with commas.
+// A stage time (ISO string) in the viewer's own clock; text such as "Under Approval" as it is.
+const fmtStageTime = (v) => {
+  if (!v) return "";
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  return d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h12" });
+};
+
 const reportHref = (report, params = {}) => {
   const p = new URLSearchParams();
   Object.entries(params).forEach(([k, raw]) => {
@@ -85,6 +94,13 @@ const fitLayout = (report, build) => (filters) => {
 
 // Drill trail: the Account Ledger of one account for a period.
 const accountLedgerHref = ({ account, dateFrom, dateTo }) => reportHref("accountLedger", { account, dateFrom, dateTo });
+// Account Ledger, View = Summary by Sub Account (feature "vouchers.subAccounts"):
+// the account on its first row only (acno_label), then one row per sub account.
+const ACCOUNT_LEDGER_SUB_ACCOUNT_COLUMNS = [
+  { field: "acno_label", headerName: "Account", width: 50 },
+  { field: "sub_account", headerName: "Sub Account", width: 40 },
+  { field: "net_amount", headerName: "Net Amount (Dr − Cr)", width: 40, type: "currency", fixed: true, showTotal: true },
+];
 // Aging reports open the ledger from the start of the books (as their old
 // drillDown did) so every open invoice is in view.
 const BOOKS_START_DMY = "01-01-2000";
@@ -159,6 +175,33 @@ const ACCOUNT_TREE_GROUPS = [
   { field: "bscd", title: "Sub group", label: (r) => [r.bscd !== "" && r.bscd != null ? String(r.bscd).padStart(2, "0") : "", r.bscdName].filter(Boolean).join(" "), subtotalLabel: "Total" },
   { field: "macno", title: "Main account", label: (r) => [r.macno !== "" && r.macno != null ? String(r.macno).padStart(3, "0") : "", r.macaccount].filter(Boolean).join(" "), subtotalLabel: "Total" },
 ];
+// P&L Month on Month: the months of the filter period, in order —
+// [{ field: "m_2026_11", label: "Nov 2026" }, …]. Dates come as "DD-MM-YYYY"
+// on the page and as Date objects in the API route; at most 60 months.
+const PNL_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const pnlDay = (v) => {
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  const s = String(v || "");
+  let m = /^(\d{2})-(\d{2})-(\d{4})/.exec(s);
+  if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+  m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+  return null;
+};
+const pnlMonths = (filters = {}) => {
+  const from = pnlDay(filters.dateFrom);
+  const to = pnlDay(filters.dateTo);
+  if (!from || !to || from > to) return [];
+  const out = [];
+  let y = from.getFullYear();
+  let mo = from.getMonth();
+  while ((y < to.getFullYear() || (y === to.getFullYear() && mo <= to.getMonth())) && out.length < 60) {
+    out.push({ field: `m_${y}_${String(mo + 1).padStart(2, "0")}`, label: `${PNL_MONTH_NAMES[mo]} ${y}` });
+    mo += 1;
+    if (mo > 11) { mo = 0; y += 1; }
+  }
+  return out;
+};
 const accountTreeLayout = {
   pinned: ["acno", "account"],
   groups: [
@@ -241,7 +284,7 @@ const materialProcurementLayout = (filters) => {
     groups: [
       { id: "cons", label: "Consumption", fields: ["avg_cons_6m", "max_cons_6m"] },
       { id: "stock", label: "Stock", fields: ["opening_stock", "total_stock", "stock_factory", "stock_prod", "stock_fg", "stock_bond", "stock_transit"], foldTo: "total_stock" },
-      { id: "order", label: "Reorder", fields: ["re_order_level", "order_qty", "stock_sufficient_months"] },
+      { id: "order", label: "Reorder", fields: ["re_order_level", "item_re_order", "min_order_qty", "order_qty", "stock_sufficient_months"] },
       { id: "months", label: "Monthly consumption", fields: months },
     ],
     rowGroupBy: [{ field: "section_no", title: "Section", label: (r) => r.section_label || "Unclassified", subtotalLabel: "Total" }],
@@ -7440,6 +7483,34 @@ export const REPORT_CONFIG = {
         clearable: true,
         multiple: true,
       },
+      // Sub Accounts (feature "vouchers.subAccounts"): "FUEL - 2531 - VEHICLE EXP";
+      // the report keeps the lines whose Transactions.sub_account is that name.
+      {
+        name: "subAccount",
+        label: "Sub Account",
+        type: "select",
+        feature: "vouchers.subAccounts",
+        nameKeys: ["acname", "acno", "account_name"],
+        separator: " - ",
+        valueKey: "id",
+        apiEndpoint: "/api/sub-accounts/list",
+        clearable: true,
+        multiple: true,
+      },
+      // Detail = the ledger rows. Summary by Sub Account = one row per Account +
+      // Sub Account with the period's net amount (Debit − Credit).
+      {
+        name: "viewMode",
+        label: "View",
+        type: "select",
+        feature: "vouchers.subAccounts",
+        options: [
+          { value: "detail", label: "Detail" },
+          { value: "summary", label: "Summary by Sub Account" },
+        ],
+        default: { value: "detail", label: "Detail" },
+        clearable: false,
+      },
       // Summary = one row per voucher line of this account (a receipt's cash
       // account = one total row). Detailed = that total split per counter-line
       // (lib/reports/ledgerDetail.js); balances are the same either way.
@@ -7480,6 +7551,8 @@ export const REPORT_CONFIG = {
       // { field: "narration", headerName: "Narration", width: 50 },
       { field: "tran_type", headerName: "Type", width: 25 },
       { field: "narration", headerName: "Narration", width: 45 },
+      // Transactions.sub_account (feature "vouchers.subAccounts")
+      { field: "sub_account", headerName: "Sub Account", width: 25, feature: "vouchers.subAccounts" },
       { field: "user_name", headerName: "User", width: 20 },
       {
         field: "debit",
@@ -7508,25 +7581,51 @@ export const REPORT_CONFIG = {
       },
     ],
 
+    // View = Summary by Sub Account (feature "vouchers.subAccounts"): one row
+    // per Account + Sub Account, built by summariseBySubAccount in
+    // app/api/reports/[reportType]/route.js.
+    getColumns: (filters) =>
+      filterValue(filters?.viewMode) === "summary" ? ACCOUNT_LEDGER_SUB_ACCOUNT_COLUMNS : REPORT_CONFIG.accountLedger.columns,
+
     // Wide-report layout (rule 15). Each row opens its voucher (tran_id +
     // tran_code); 2+ accounts still group per account via rowGrouping above.
-    layout: {
-      pinned: ["dated", "vr_no"],
-      groups: [
-        { id: "doc", label: "Document", fields: ["detail_invoice_no", "rmk5", "tran_type", "narration", "user_name"] },
-        { id: "acc", label: "Account", fields: ["acno", "acname", "against"] },
-        { id: "amt", label: "Amounts", fields: ["debit", "credit", "balance"], foldTo: "balance" },
-      ],
-      views: [
-        { id: "standard", label: "Standard", fields: ["dated", "vr_no", "slip_no", "detail_invoice_no", "acname", "against", "tran_type", "narration", "user_name", "debit", "credit", "balance"] },
-        { id: "all", label: "All columns" },
-      ],
-      card: {
-        title: (r) => r.narration || r.acname || r.tran_type || "",
-        subtitle: (r) => [r.vr_no && `VR ${r.vr_no}`, r.tran_type, r.detail_invoice_no && `INV ${r.detail_invoice_no}`, r.against && `vs ${r.against}`, r.user_name].filter(Boolean).join(" · "),
-        figures: ["debit", "credit", "balance"],
+    layout: (filters) =>
+      filterValue(filters?.viewMode) === "summary"
+        ? {
+            pinned: ["acno_label", "sub_account"],
+            card: { title: "sub_account", subtitle: "acno_label", figures: ["net_amount"] },
+          }
+        : {
+            pinned: ["dated", "vr_no"],
+            groups: [
+              { id: "doc", label: "Document", fields: ["detail_invoice_no", "rmk5", "tran_type", "narration", "sub_account", "user_name"] },
+              { id: "acc", label: "Account", fields: ["acno", "acname", "against"] },
+              { id: "amt", label: "Amounts", fields: ["debit", "credit", "balance"], foldTo: "balance" },
+            ],
+            views: [
+              { id: "standard", label: "Standard", fields: ["dated", "vr_no", "slip_no", "detail_invoice_no", "acname", "against", "tran_type", "narration", "sub_account", "user_name", "debit", "credit", "balance"] },
+              { id: "all", label: "All columns" },
+            ],
+            card: {
+              title: (r) => r.narration || r.acname || r.tran_type || "",
+              subtitle: (r) => [r.vr_no && `VR ${r.vr_no}`, r.tran_type, r.detail_invoice_no && `INV ${r.detail_invoice_no}`, r.against && `vs ${r.against}`, r.sub_account, r.user_name].filter(Boolean).join(" · "),
+              figures: ["debit", "credit", "balance"],
+            },
+          },
+    // Summary by Sub Account rows open the ledger of that account + sub account.
+    drill: [
+      {
+        label: "Open the ledger lines",
+        when: (row) => row.row_kind === "subAccount" && !!row.acno,
+        href: (row, filters) =>
+          reportHref("accountLedger", {
+            account: row.acno,
+            ...(row.sub_account_id ? { subAccount: row.sub_account_id } : {}),
+            dateFrom: filters.dateFrom,
+            dateTo: filters.dateTo,
+          }),
       },
-    },
+    ],
     summaryFields: [
       {
         field: "total_debit",
@@ -8406,6 +8505,690 @@ export const REPORT_CONFIG = {
     ],
     exportOptions: { pdf: true, excel: true, csv: true },
   },
+
+  // Profit and Loss — Month on Month: the P&L figures, one column per month
+  // of the period (API getProfitLossMonthlyReport: m_YYYY_MM = the month's
+  // debit − credit, total = the period = the P&L Balance). Same account tree.
+  profitLossMonthly: {
+    title: "Profit and Loss — Month on Month",
+    description: "Profit and loss by account, each month of the period in its own column",
+    apiEndpoint: "/api/reports/profitLossMonthly",
+    filters: [
+      { name: "dateFrom", type: "date", label: "From Date", required: true, default: new Date(new Date().getFullYear(), 0, 1) },
+      { name: "dateTo", type: "date", label: "To Date", required: true, default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0) },
+      {
+        // Optional — empty = every P&L account
+        name: "account",
+        label: "Account",
+        type: "select",
+        nameKeys: ["acno", "acname"],
+        separator: " - ",
+        valueKey: "acno",
+        options: "accounts",
+        apiEndpoint: "/api/accounts/acno",
+        clearable: true,
+        multiple: true,
+      },
+    ],
+    getColumns: (filters = {}) => [
+      { field: "mbscd", headerName: "MBSCD No", width: 25 },
+      { field: "mbscdName", headerName: "MBSCD", width: 35 },
+      { field: "bscd", headerName: "BSCD No", width: 25 },
+      { field: "bscdName", headerName: "BSCD", width: 35 },
+      { field: "macno", headerName: "M Account No", width: 25 },
+      { field: "macaccount", headerName: "M Account", width: 40 },
+      { field: "acno", headerName: "Account No", width: 25 },
+      { field: "account", headerName: "Account", width: 35 },
+      ...pnlMonths(filters).map((m) => ({
+        field: m.field,
+        headerName: m.label,
+        width: 25,
+        type: "currency",
+        showTotal: true,
+        valueGetter: (params) => params.row?.[m.field] || 0,
+      })),
+      { field: "total", headerName: "Total", width: 30, type: "currency", showTotal: true, fixed: true },
+      { field: "dr_movement", headerName: "Period Debit", width: 25, type: "currency", showTotal: true },
+      { field: "cr_movement", headerName: "Period Credit", width: 25, type: "currency", showTotal: true },
+    ],
+    // Account tree as group rows (same as P&L); the months are one band
+    layout: (filters = {}) => {
+      const months = pnlMonths(filters).map((m) => m.field);
+      return {
+        pinned: ["acno", "account"],
+        groups: [
+          { id: "tree", label: "Account tree", fields: ["mbscd", "mbscdName", "bscd", "bscdName", "macno", "macaccount"] },
+          { id: "months", label: "Month on month", fields: [...months, "total"], foldTo: "total" },
+          { id: "move", label: "Period movement", fields: ["dr_movement", "cr_movement"] },
+        ],
+        views: [
+          { id: "months", label: "Months", fields: [...months, "total"] },
+          { id: "all", label: "Everything" },
+        ],
+        defaultView: "months",
+        rowGroupBy: ACCOUNT_TREE_GROUPS,
+        card: { title: "account", subtitle: "acno", figures: ["total", ...months.slice(-3)] },
+      };
+    },
+    drill: [
+      {
+        label: "Open account ledger",
+        when: (row) => !!row.acno,
+        href: (row, filters) => accountLedgerHref({ account: row.acno, dateFrom: filters.dateFrom, dateTo: filters.dateTo }),
+      },
+    ],
+    summaryFields: [
+      { field: "total_income", label: "Total Income", type: "currency" },
+      { field: "total_expense", label: "Total Expenses", type: "currency" },
+      { field: "net", label: "Net (+ Loss / − Profit)", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: true },
+  },
+  // ── Ported from the Accounting system ──
+  customerFile: {
+    title: "Customer File Report",
+    description: "Detailed report of customers",
+    apiEndpoint: "/api/reports/customerFile",
+    showEmptyTable: true,
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        required: true,
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        required: true,
+      },
+    ], // To be added later
+    getColumns: () => [
+      { field: "customer_code", headerName: "Customer Code", width: 150, length: 12 },
+      { field: "customer_status", headerName: "Customer Status", width: 120, length: 1 },
+      { field: "customer_name", headerName: "Customer Name", width: 250, length: 50 },
+      { field: "country_code", headerName: "Country Code", width: 120, length: 2 },
+      { field: "country_name", headerName: "Country Name", width: 150, length: 20 },
+      { field: "zip_code", headerName: "ZIP Code", width: 120, length: 10 },
+      { field: "city", headerName: "City", width: 150, length: 30 },
+      { field: "address", headerName: "Address", width: 200, length: 30 },
+      { field: "customer_type", headerName: "Customer Type", width: 130, length: 5 },
+      { field: "customer_sub_group_code", headerName: "Customer Sub-Group Code", width: 200, length: 12 },
+      { field: "customer_sub_group_description", headerName: "Customer Sub-Group Description", width: 250, length: 50 },
+      { field: "subsidiary_code", headerName: "Subsidiary Code", width: 150, length: 3 },
+      { field: "salesman_code", headerName: "Salesman Code", width: 150, length: 8 },
+    ],
+    exportOptions: { txt: true, excel: true },
+  },
+  dailyProduction: {
+    title: "Daily Production Report",
+    description: "Daily Production Report",
+    apiEndpoint: "/api/reports/dailyProduction",
+
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        required: true,
+        default: new Date(),
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        required: true,
+        default: new Date(),
+      },
+      {
+        name: "item",
+        label: "Item",
+        type: "select",
+        default: { value: "", label: "All Items" },
+        options: "products",
+        apiEndpoint: "/api/setup/items",
+        valueKey: "itcd",
+        nameKeys: ["itcd", "item", "code"],
+        separator: " - ",
+        clearable: true,
+      },
+      // {
+      //   name: "processOrderNo",
+      //   label: "Process Order No",
+      //   type: "text",
+      //   clearable: true,
+      // },
+    ],
+
+    columns: [
+      { field: "material_code", headerName: "Material Code", width: 120 },
+      { field: "product", headerName: "Product", width: 320 },
+      { field: "batch_no", headerName: "Batch No", width: 120 },
+      { field: "actual_yield", headerName: "Actual Yield KG", width: 120 },
+      { field: "planned_yield", headerName: "Planned Yield KG", width: 120 },
+      { field: "addition", headerName: "Addition", width: 100 },
+      { field: "total_planned_yield", headerName: "Total Planned Yield KG", width: 150 },
+      { field: "wastage", headerName: "Wastage %", width: 100 },
+      { field: "packaging", headerName: "Packaging", width: 100 },
+      { field: "against", headerName: "Against", width: 150 },
+    ],
+    // summaryFields: [ 
+    // {
+    //   field: "total_actual_yield",
+    //   label: "Total Actual Yield",
+    //   type: "number",
+    // },
+    // {
+    //   field: "total_planned_yield",
+    //   label: "Total Planned Yield",
+    //   type: "number",
+    // },
+    // {
+    //   field: "semiFinishProductivity",
+    //   label: "Semi Finish Productivity %",
+    //   type: "percentage",
+    // },
+    // {
+    //   field: "finishedInkProductivity",
+    //   label: "Finished Ink Productivity %",
+    //   type: "percentage",
+    // },
+    // ],
+    exportOptions: {
+      pdf: true,
+      excel: true,
+    },
+    // rowClassName: (row) => (row.row || row).semiFinishProductivity > 80 ? "bg-red-100" : "",
+    // rowClassNameDetail: (row) => (row.row || row).finishProductivity > 80 ? "bg-red-100" : "",
+
+  },
+  //  Digital Invoice Report
+  digitalInvoice: {
+    title: "FBR Digital Invoice Report",
+    description: "FBR Digital Invoice report",
+    apiEndpoint: "/api/reports/digitalInvoice",
+
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        required: true,
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        required: true,
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+      },
+      {
+        name: "item",
+        label: "Item",
+        type: "select",
+        options: "products",
+        default: { value: "", label: "All Items" },
+        apiEndpoint: "/api/setup/items",
+        valueKey: "itcd",
+        nameKeys: ["code", "item"],
+        separator: " - ",
+        clearable: true,
+      },
+    ],
+
+    columns: [
+      { field: "Scenario",                        headerName: "Scenario",                          width: 30,  type: "text" },
+      { field: "sellerTransactionId",             headerName: "sellerTransactionId",             width: 50,  type: "text" },
+      { field: "invoiceDate",                     headerName: "invoiceDate",                      width: 40,  type: "text" },
+      { field: "invoiceTypeId",                   headerName: "invoiceTypeId",                   width: 50,  type: "text" },
+      { field: "sellerCode",                      headerName: "sellerCode",                       width: 35,  type: "text" },
+      { field: "sellerBusinessName",              headerName: "sellerBusinessName",              width: 80,  type: "text" },
+      { field: "sellerAddress",                   headerName: "sellerAddress",                    width: 50,  type: "text" },
+      { field: "sellerProvince",                  headerName: "sellerProvince",                   width: 40,  type: "text" },
+      { field: "sellerNtnCnic",                   headerName: "sellerNtn/Cnic",                   width: 45,  type: "text" },
+      { field: "PONo",                            headerName: "PONo",                             width: 25,  type: "text" },
+      { field: "PODate",                          headerName: "PODate",                           width: 25,  type: "text" },
+      { field: "DONo",                            headerName: "DONo",                             width: 25,  type: "text" },
+      { field: "DeliveryDate",                    headerName: "DeliveryDate",                     width: 35,  type: "text" },
+      { field: "buyerBusinessName",               headerName: "buyerBusinessName",               width: 80,  type: "text" },
+      { field: "buyerNtnCnic",                    headerName: "buyerNtn/Cnic",                    width: 45,  type: "text" },
+      { field: "buyerAddress",                    headerName: "buyerAddress",                     width: 70,  type: "text" },
+      { field: "buyerProvince",                   headerName: "buyerProvince",                    width: 40,  type: "text" },
+      { field: "buyerRegistrationType",           headerName: "buyerRegistrationType",           width: 55,  type: "text" },
+      { field: "sellerItemCode",                  headerName: "sellerItemCode",                  width: 45,  type: "text" },
+      { field: "hsCode",                          headerName: "hsCode",                           width: 35,  type: "text" },
+      { field: "productDescription",              headerName: "productDescription",               width: 80,  type: "text" },
+      { field: "Quantity",                        headerName: "Quantity",                          width: 30,  type: "number" },
+      { field: "UoM",                             headerName: "UoM",                               width: 25,  type: "text" },
+      { field: "valueSalesExcludingST",           headerName: "valueSalesExcludingST",             width: 55,  type: "currency" },
+      { field: "taxRate",                         headerName: "taxRate",                          width: 30,  type: "number" },
+      { field: "salesTaxApplicable",              headerName: "salesTaxApplicable",              width: 55,  type: "currency" },
+      { field: "furtherTax",                      headerName: "furtherTax",                       width: 35,  type: "currency" },
+      { field: "extraTax",                        headerName: "extraTax",                         width: 30,  type: "text" },
+      { field: "fedPayable",                      headerName: "fedPayable",                       width: 35,  type: "text" },
+      { field: "totalValues",                     headerName: "totalValues",                      width: 40,  type: "currency" },
+      { field: "discount",                        headerName: "discount",                          width: 30,  type: "text" },
+      { field: "salesTaxWithheldAtSource",        headerName: "salesTaxWithheldAtSource",             width: 55,  type: "text" },
+      { field: "fixedNotifiedValueOrRetailPrice", headerName: "fixedNotifiedValueOrRetailPrice", width: 70, type: "text" },
+      { field: "SpecialDiscount",                 headerName: "SpecialDiscount",                  width: 45,  type: "text" },
+      { field: "AdvanceTaxRate",                  headerName: "AdvanceTaxRate",                  width: 45,  type: "text" },
+      { field: "AdvanceTax",                      headerName: "AdvanceTax",                       width: 35,  type: "text" },
+      { field: "saleType",                        headerName: "saleType",                         width: 80,  type: "text" },
+      { field: "sroScheduleNo",                   headerName: "sroScheduleNo",                   width: 45,  type: "text" },
+      { field: "sroItemSerialNo",                 headerName: "sroItemSerialNo",                width: 50,  type: "text" },
+      { field: "NoteTemplateName",                headerName: "NoteTemplateName",                width: 55,  type: "text" },
+    ],
+
+    // summaryFields: [
+    //   { field: "total_rows",           label: "Total Rows",              type: "number" },
+    //   { field: "total_quantity",       label: "Total Quantity",          type: "number" },
+    //   { field: "total_sales_excl_st",  label: "Total Sales (Excl. ST)",  type: "currency" },
+    //   { field: "total_sales_tax",      label: "Total Sales Tax",         type: "currency" },
+    //   { field: "total_values",         label: "Total Values",            type: "currency" },
+    // ],
+
+    exportOptions: {
+      excel: true,
+    },
+  },
+  ilfile: {
+    title: "IL File Report",
+    description: "Detailed report of IL file",
+    apiEndpoint: "/api/reports/ilfile",
+    showEmptyTable: true,
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        required: true,
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        required: true,
+      },
+    ],
+    columns: [
+      { field: "invoice_line_number", headerName: "Invoice Line Number", width: 150, length: 15 },
+      { field: "invoice_number", headerName: "Invoice Number", width: 150, length: 15 },
+      { field: "product_code", headerName: "Product Code", width: 150, length: 30 },
+      { field: "adjustment", headerName: "Adjustment Description", width: 150, length: 15 },
+      { field: "salesman_code", headerName: "Salesman Code", width: 150, length: 8 },
+      { field: "customer_code", headerName: "Customer Code", width: 150, length: 12 },
+      { field: "transition_Currency_code", headerName: "Transition Currency Code", width: 150, length: 3 },
+      { field: "local_currency_code", headerName: "Local Curreny Code", width: 150, length: 3 },
+      { field: "invoice_date", headerName: "Invoice Date", width: 150, length: 10 },
+      { field: "quantity", headerName: "Quantity", width: 150, length: 16, numeric: true },
+      { field: "sale_amount_transac", headerName: "Sale Amount Transac", width: 150, length: 16, numeric: true },
+      { field: "sale_amount_local", headerName: "Sale Amount Local", width: 150, length: 16, numeric: true },
+      { field: "line_type_code", headerName: "Line Type Code", width: 150, length: 2 },
+      { field: "data_type", headerName: "Data Type", width: 150, length: 6 },
+      { field: "subsidiary_code", headerName: "Subsidiary Code", width: 150, length: 3 },
+      { field: "business_group_code", headerName: "Bussiness Group Code", width: 200, length: 5 },
+      { field: "business_group_segment_code", headerName: "Bussiness Group Segment Code", width: 200, length: 5 },
+      { field: "free", headerName: "Free", width: 150, length: 5 },
+      { field: "free", headerName: "Free", width: 150, length: 5 },
+      { field: "business_unit_code", headerName: "Business Unit code", width: 150, length: 2 },
+      { field: "customer_order_number", headerName: "Customer Order Number", width: 150, length: 15 },
+      { field: "customer_order_line_number", headerName: "Customer Order Line Number", width: 150, length: 15 },
+      { field: "document_number", headerName: "Document Number", width: 150, length: 20 },
+      { field: "incoterm", headerName: "Incoterm", width: 150, length: 3 },
+      { field: "incoterm_location", headerName: "Incoterm Location", width: 150, length: 30 },
+      { field: "payment_terms", headerName: "Payment terms", width: 150, length: 3, excludeFromTxt: true },
+    ],
+    exportOptions: { txt: true, excel: true },
+  },
+  monthWiseRMMovingAverage: {
+    title: "MonthWise RM Moving Average Consumption",
+    description: "Monthwise absolute and moving average consumption analysis for Raw Materials",
+    apiEndpoint: "/api/reports/monthWiseRMMovingAverage",
+    filters: [
+      {
+        name: "monthFrom",
+        label: "Month From",
+        type: "select",
+        required: true,
+        options: [
+          { value: "1", label: "January" },
+          { value: "2", label: "February" },
+          { value: "3", label: "March" },
+          { value: "4", label: "April" },
+          { value: "5", label: "May" },
+          { value: "6", label: "June" },
+          { value: "7", label: "July" },
+          { value: "8", label: "August" },
+          { value: "9", label: "September" },
+          { value: "10", label: "October" },
+          { value: "11", label: "November" },
+          { value: "12", label: "December" },
+        ],
+        default: String(new Date().getMonth() - 4 < 1 ? new Date().getMonth() - 4 + 12 : new Date().getMonth() - 4),
+      },
+      // {
+      //   name: "yearFrom",
+      //   label: "Year From",
+      //   type: "select",
+      //   required: true,
+      //   options: Array.from({ length: 5 }, (_, i) => ({
+      //     value: String(new Date().getFullYear() - i),
+      //     label: String(new Date().getFullYear() - i),
+      //   })),
+      //   default: String(new Date().getFullYear()),
+      // },
+      {
+        name: "monthTo",
+        label: "Month To",
+        type: "select",
+        required: true,
+        options: [
+          { value: "1", label: "January" },
+          { value: "2", label: "February" },
+          { value: "3", label: "March" },
+          { value: "4", label: "April" },
+          { value: "5", label: "May" },
+          { value: "6", label: "June" },
+          { value: "7", label: "July" },
+          { value: "8", label: "August" },
+          { value: "9", label: "September" },
+          { value: "10", label: "October" },
+          { value: "11", label: "November" },
+          { value: "12", label: "December" },
+        ],
+        default: String(new Date().getMonth() + 1),
+      },
+      // {
+      //   name: "yearTo",
+      //   label: "Year To",
+      //   type: "select",
+      //   required: true,
+      //   options: Array.from({ length: 5 }, (_, i) => ({
+      //     value: String(new Date().getFullYear() - i),
+      //     label: String(new Date().getFullYear() - i),
+      //   })),
+      //   default: String(new Date().getFullYear()),
+      // },
+      {
+        name: "item",
+        valueKey: "itcd",
+        nameKeys: ["itcd", "item", "code"],
+        separator: " - ",
+        label: "Item",
+        type: "select",
+        options: "items",
+        default: { value: "", label: "All Items" },
+        apiEndpoint: "/api/setup/items",
+        clearable: true,
+      },
+    ],
+    getColumns: (filters = {}) => {
+      const MONTH_NAMES = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+      const now = new Date();
+
+      const monthFrom = parseInt(filters.monthFrom) || (now.getMonth() - 4 < 0 ? now.getMonth() - 4 + 12 : now.getMonth() - 4 || 1);
+      const yearFrom  = parseInt(filters.yearFrom)  || now.getFullYear();
+      const monthTo   = parseInt(filters.monthTo)   || (now.getMonth() + 1);
+      const yearTo    = parseInt(filters.yearTo)    || now.getFullYear();
+
+      const start = new Date(yearFrom, monthFrom - 1, 1);
+      const end   = new Date(yearTo,   monthTo - 1,   1);
+
+      const monthsList = [];
+      let cur = new Date(start);
+      while (cur <= end) {
+        const y = cur.getFullYear();
+        const m = cur.getMonth();
+        monthsList.push({
+          key:   `${y}-${String(m).padStart(2, "0")}`,
+          label: `${MONTH_NAMES[m]}-${String(y).slice(-2)}`,
+        });
+        cur.setMonth(cur.getMonth() + 1);
+      }
+
+      const cols = [
+        { field: "itcd",      headerName: "ITCD",      width: 10 },
+        { field: "item_code", headerName: "Item Code",  width: 20 },
+        { field: "item_name", headerName: "Item Name",  width: 40 },
+      ];
+
+      // Absolute consumption columns
+      monthsList.forEach((m) => {
+        cols.push({ field: `abs_${m.key}`, headerName: `Absolute Consumption: ${m.label}`,   width: 15, type: "number" });
+      });
+      cols.push({ field: "abs_total", headerName: "Total Absolute Consumption", width: 15, type: "number" });
+
+      // Moving average columns
+      monthsList.forEach((m) => {
+        cols.push({ field: `avg_${m.key}`, headerName: `Average Consumption: ${m.label}`, width: 15, type: "number" });
+      });
+
+      return cols;
+    },
+    exportOptions: {
+      pdf: true,
+      excel: true,
+      csv: false,
+    },
+  },
+  pcfile: {
+    title: "PC File Report",
+    description: "Detailed report of PC File",
+    apiEndpoint: "/api/reports/pcfile",
+    showEmptyTable: true,
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        required: true,
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        required: true,
+      },
+    ], // To be added later
+    getColumns: () => [
+      { field: "invoice_line_number", headerName: "Invoice Line Number", width: 150, length: 12 },
+      { field: "innvoice_number", headerName: "Invoice Number", width: 150, length: 12 },
+      { field: "product_code", headerName: "Product Code", width: 150, length: 12 },
+      { field: "customer_code", headerName: "Customer Code", width: 150, length: 15 },
+      { field: "invoice_date", headerName: "Invoice Date", width: 150, length: 10 },
+      { field: "product_cost_budget", headerName: "Product Cost Budget", width: 150, length: 12, numeric: true },
+      { field: "product_cost_conv_budget", headerName: "Product Cost Conv Budget", width: 150, length: 12, numeric: true },
+      { field: "Product_Material_Cost_Budget", headerName: "product material cost budget", width: 150, length: 12, numeric: true },
+      { field: "Product_Cost_Standard", headerName: "product cost standard", width: 150, length: 12, numeric: true },
+      { field: "Product_Conv_Cost_Standard", headerName: "product conv cost standard", width: 150, length: 12, numeric: true },
+      { field: "Product_Material_Cost_Standard", headerName: "product material cost standard", width: 150, length: 12, numeric: true },
+      { field: "product_cost_actual", headerName: "Product Cost Actual", width: 150, length: 12, numeric: true },
+      { field: "product_conc_cost_actual", headerName: "Product Conv Cost Actual", width: 150, length: 12, numeric: true },
+      { field: "product_material_cost_actual", headerName: "Product Material Cost Actual", width: 150, length: 12, numeric: true },
+      { field: "subsidiary_code", headerName: "Subsidiary Code", width: 150, length: 12 },
+    ],
+    exportOptions: { txt: true, excel: true },
+  },
+  prfile: {
+    title: "PR File Report",
+    description: "Detailed report of PR File",
+    apiEndpoint: "/api/reports/prfile",
+    showEmptyTable: true,
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        required: true,
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        required: true,
+      },
+    ], // To be added later
+    getColumns: () => [
+      { field: "product_code", headerName: "  Product Code", width: 150, length: 12 },
+      { field: "product_status", headerName: "Product Status", width: 150, length: 12 },
+      { field: "product_name", headerName: "Product Name", width: 150, length: 12 },
+      { field: "generic_product_code", headerName: "Generic Product Code", width: 150, length: 15 },
+      { field: "packing_code", headerName: "Packing Code", width: 150, length: 10 },
+      { field: "measure_unit_code", headerName: "Measure Unit Code", width: 150, length: 12 },
+      { field: "business_unit_code", headerName: "Business Unit Code", width: 150, length: 12 },
+      { field: "product_line_code", headerName: "Product Line Code", width: 150, length: 12 },
+      { field: "product_family_code", headerName: "Product Family Code", width: 150, length: 12 },
+      { field: "product_type_code", headerName: "Product Type Code", width: 150, length: 12 },
+      { field: "product_series_code", headerName: "Product Series Code", width: 150, length: 12 },
+      { field: "product_line_name", headerName: "Product Line Name", width: 150, length: 12 },
+      { field: "product_family_name", headerName: "Product Family Name", width: 150, length: 12 },
+      { field: "product_type_name", headerName: "Product Type Name", width: 150, length: 12 },
+      { field: "product_series_name", headerName: "Product Series Name", width: 150, length: 12 },
+      { field: "product_color_code", headerName: "Product Color Code", width: 150, length: 12 },
+      { field: "product_class_code", headerName: "Product Class Code", width: 150, length: 12 },
+      { field: "product_class_name", headerName: "Product Class Name", width: 150, length: 12 },
+      { field: "free", headerName: "Free", width: 150, length: 12 },
+      { field: "free", headerName: "Free", width: 150, length: 12 },
+      { field: "free", headerName: "Free", width: 150, length: 12 },
+      { field: "subsidiary_code", headerName: "Subsidiary Code", width: 150, length: 12 },
+      { field: "un_code", headerName: "UN Code", width: 150, length: 12 },
+      { field: "hazard_class", headerName: "Hazard Class", width: 150, length: 12 },
+      { field: "packaging_group", headerName: "Packaging Group", width: 150, length: 12 },
+      { field: "freezing_point", headerName: "Freezing Point", width: 150, length: 12 },
+      { field: "heat_sensitivity", headerName: "Heat Sensitivity", width: 150, length: 12 },
+      { field: "standard_cost", headerName: "Standard Cost", width: 150, length: 12, numeric: true },
+      { field: "manufactured_locally", headerName: "Manufactured Locally", width: 150, length: 12 },
+      { field: "make_to_stock", headerName: "Make to Stock", width: 150, length: 12 },
+    ],
+    exportOptions: { txt: true, excel: true },
+  },
+  purchasingfile: {
+    title: "Purchasing File Report",
+    description: "Detailed report of Purchasing File",
+    apiEndpoint: "/api/reports/purchasingfile",
+    showEmptyTable: true,
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+        required: true,
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        required: true,
+      },
+    ],
+    getColumns: () => [
+      { field: "site_order", headerName: "Site Order", width: 150, length: 12 },
+      { field: "period_start", headerName: "Period Start", width: 150, length: 12 },
+      { field: "period_end", headerName: "Period End", width: 150, length: 12 },
+      { field: "local_raw_material_code", headerName: "Local Raw Material Code", width: 180, length: 12 },
+      { field: "local_raw_material_description", headerName: "Local Raw Material Description", width: 220, length: 12 },
+      { field: "local_supplier_code", headerName: "Local Supplier Code", width: 160, length: 12 },
+      { field: "local_supplier_description", headerName: "Local Supplier Description", width: 200, length: 12 },
+      { field: "purchased_qty_in_kilograms", headerName: "Purchased Qty in kilograms", width: 200, length: 12, numeric: true },
+      { field: "total_cost", headerName: "Total Cost", width: 150, length: 12, numeric: true },
+      { field: "material_price_per_kilogram", headerName: "Material Price per kilogram", width: 200, length: 12, numeric: true },
+      { field: "last_mat_price_per_kilogram", headerName: "Last Mat Price per kilogram", width: 200, length: 12, numeric: true },
+      { field: "currency_code_iso", headerName: "Currency Code (ISO)", width: 160, length: 12 },
+      { field: "incoterm", headerName: "Incoterm", width: 150, length: 12 },
+      { field: "material_type", headerName: "Material Type", width: 150, length: 12 },
+      { field: "supplier_type", headerName: "Supplier Type", width: 150, length: 12 },
+    ],
+    exportOptions: { txt: true, excel: true },
+  },
+  rmCosting: {
+    title: "RM Costing Report",
+    description: "Opening stock qty/rate/value for every raw material, as of a given month",
+    apiEndpoint: "/api/reports/rmCosting",
+    filters: [
+      { name: "year", type: "select", label: "Year", options: generateYearOptions(), default: String(new Date().getFullYear()) },
+      { name: "month", type: "select", label: "Month", options: generateMonthOptions(), default: String(new Date().getMonth() + 1) },
+    ],
+    columns: [
+      { field: "item_name", headerName: "Item", type: "text" },
+      { field: "code", headerName: "Code", type: "text" },
+      { field: "unit", headerName: "Unit", type: "text" },
+      { field: "opening_qty", headerName: "Opening Qty", type: "number" },
+      { field: "opening_rate", headerName: "Rate", type: "number" },
+      { field: "opening_value", headerName: "Value", type: "number" },
+      { field: "rate_change_pct", headerName: "Rate Change %", type: "number" },
+    ],
+    summaryFields: [
+      { field: "total_items", label: "Total Items", type: "number" },
+      { field: "items_with_data", label: "With Data", type: "number" },
+      { field: "items_missing", label: "Missing Data", type: "number" },
+      { field: "total_value", label: "Total Value", type: "number" },
+      { field: "avg_rate", label: "Avg Rate", type: "number" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: true },
+  },
+  withHoldingTax: {
+    title: "With Holding Tax Report",
+    description: "WithHoldingTax Report",
+    apiEndpoint: "/api/reports/withHoldingTax",
+
+    filters: [
+      {
+        name: "dateFrom",
+        label: "From Date",
+        type: "date",
+        required: true,
+        default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+      },
+      {
+        name: "dateTo",
+        label: "To Date",
+        type: "date",
+        required: true,
+        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+      },
+      {
+        name: "vendor",
+        label: "Vendor",
+        valueKey: "acno",
+        type: "select",
+        nameKeys: ["acno", "acname"],
+        separator: " - ",
+        options: "vendors",
+        default: { value: "", label: "All Vendors" },
+        apiEndpoint: "/api/accounts/acno?macno=53",
+        clearable: true,
+      },
+    ],
+
+    columns: [
+      { field: "sNo", headerName: "S.No", width: 10, type: "number" },
+      // { field: "dated", headerName: "Date", width: 15 },
+      { field: "vendorName", headerName: "Name Of Vendor", width: 35 },
+      { field: "ntnNo", headerName: "NTN #", width: 20 },
+      { field: "totalInvoiceAmount", headerName: "Total Invoice Amount", width: 25, type: "number", showTotal: true },
+      { field: "taxAmount", headerName: "Tax Amount", width: 20, type: "number", showTotal: true },
+      { field: "chqAmount", headerName: "Chq Amount", width: 20, type: "number", showTotal: true },
+    ],
+
+    exportOptions: {
+      pdf: true,
+      excel: true,
+      //csv: true,
+    },
+  },
+
 
   // config.js
   stockMetrics: {
@@ -10974,6 +11757,281 @@ export const REPORT_CONFIG = {
     exportOptions: { excel: true, pdf: true, csv: true },
   },
 
+  // ─── Fixed assets (lib/reports/fixedAssets.js) ────────────────────────────
+  // Every row that comes from a voucher carries tran_id + tran_code (GRN 14,
+  // disposal 15, relocation 16, depreciation / disposal journal 3).
+  fixedAssetRegister: {
+    title: "Fixed Asset Register",
+    description: "Every fixed asset as of a day — cost, accumulated depreciation, net book value, holder and status",
+    apiEndpoint: "/api/reports/fixedAssetRegister",
+    showSummary: true,
+    filters: [
+      { name: "dateTo", label: "As Of", type: "date", required: true, default: new Date() },
+      {
+        name: "category", label: "Category", type: "select", apiEndpoint: "/api/setup/fixed_asset_categories",
+        valueKey: "id", nameKeys: ["ic_name"], default: { value: "", label: "All Categories" }, clearable: true,
+      },
+      {
+        name: "department", label: "Department", type: "select", apiEndpoint: "/api/setup/departments",
+        valueKey: "id", nameKeys: ["dept_name"], default: { value: "", label: "All Departments" }, clearable: true,
+      },
+      {
+        name: "status", label: "Status", type: "select",
+        options: [
+          { value: "IN_USE", label: "In use" },
+          { value: "DISPOSED", label: "Disposed" },
+          { value: "all", label: "All" },
+        ],
+        default: { value: "IN_USE", label: "In use" },
+      },
+    ],
+    columns: [
+      { field: "asset_no", headerName: "Asset No", width: 14 },
+      { field: "item", headerName: "Item", width: 28 },
+      { field: "category", headerName: "Category", width: 22 },
+      { field: "in_service", headerName: "In Service", width: 14, type: "date" },
+      { field: "method", headerName: "Method", width: 16 },
+      { field: "life_months", headerName: "Life (months)", width: 12, type: "integer" },
+      { field: "rb_rate", headerName: "Rate %", width: 10, type: "number" },
+      { field: "salvage", headerName: "Salvage", width: 14, type: "currency" },
+      { field: "cost", headerName: "Cost", width: 18, type: "currency", showTotal: true },
+      { field: "accumulated", headerName: "Accumulated Depreciation", width: 18, type: "currency", showTotal: true },
+      { field: "nbv", headerName: "Net Book Value", width: 18, type: "currency", showTotal: true },
+      { field: "department", headerName: "Department", width: 18 },
+      { field: "employee", headerName: "Employee", width: 18 },
+      { field: "location", headerName: "Location", width: 16 },
+      { field: "status", headerName: "Status", width: 12 },
+      { field: "disposed_on", headerName: "Disposed On", width: 14, type: "date" },
+    ],
+    layout: {
+      pinned: ["asset_no", "item"],
+      groups: [
+        { id: "rules", label: "Depreciation", fields: ["in_service", "method", "life_months", "rb_rate", "salvage"], foldTo: "method" },
+        { id: "values", label: "Values", fields: ["cost", "accumulated", "nbv"] },
+        { id: "holder", label: "Holder", fields: ["department", "employee", "location"], foldTo: "department" },
+      ],
+      views: [
+        { id: "values", label: "Values", fields: ["asset_no", "item", "category", "in_service", "cost", "accumulated", "nbv", "status"] },
+        { id: "holders", label: "Holders", fields: ["asset_no", "item", "category", "department", "employee", "location", "status"] },
+      ],
+      rowGroupBy: [{ field: "category", title: "Category", label: (r) => r.category || "(no category)", subtotalLabel: "Total" }],
+      card: { title: "item", subtitle: (r) => [r.asset_no, r.category, r.department].filter(Boolean).join(" · "), figures: ["cost", "accumulated", "nbv", "status"] },
+    },
+    drill: [
+      {
+        label: "Open disposal voucher",
+        when: (row) => !!row.disposal_tran_id,
+        href: (row) => voucherHref({ tran_id: row.disposal_tran_id, tran_code: 15 }),
+      },
+      {
+        label: "Depreciation schedule",
+        when: (row) => !!row.asset_number,
+        href: (row) => reportHref("fixedAssetSchedule", { asset: row.asset_number, status: "all" }),
+      },
+      {
+        label: "Movements of this asset",
+        when: (row) => !!row.asset_number,
+        href: (row, filters) => reportHref("fixedAssetMovement", { asset: row.asset_number, dateFrom: "01-01-2000", dateTo: filters.dateTo }),
+      },
+    ],
+    summaryFields: [
+      { field: "assets", label: "Assets", type: "number" },
+      { field: "totalCost", label: "Cost", type: "currency" },
+      { field: "totalAccumulated", label: "Accumulated Depreciation", type: "currency" },
+      { field: "totalNbv", label: "Net Book Value", type: "currency" },
+    ],
+    exportOptions: { excel: true, pdf: true },
+  },
+
+  fixedAssetMovement: {
+    title: "Fixed Asset Movement",
+    description: "Additions, relocations, disposals and depreciation per asset in a period — each opens its voucher",
+    apiEndpoint: "/api/reports/fixedAssetMovement",
+    showSummary: true,
+    filters: [
+      { name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), 0, 1) },
+      { name: "dateTo", label: "To Date", type: "date", required: true, default: new Date() },
+      {
+        name: "kind", label: "Movement", type: "select",
+        options: [
+          { value: "all", label: "All movements" },
+          { value: "ADDITION", label: "Additions" },
+          { value: "RELOCATION", label: "Relocations" },
+          { value: "HOLDER_CHANGE", label: "Holder changes" },
+          { value: "DISPOSAL", label: "Disposals" },
+          { value: "DEPRECIATION", label: "Depreciation" },
+        ],
+        default: { value: "all", label: "All movements" },
+      },
+      {
+        name: "category", label: "Category", type: "select", apiEndpoint: "/api/setup/fixed_asset_categories",
+        valueKey: "id", nameKeys: ["ic_name"], default: { value: "", label: "All Categories" }, clearable: true,
+      },
+      {
+        name: "asset", label: "Asset", type: "select", apiEndpoint: "/api/fixed-assets/picker",
+        valueKey: "asset_no", nameKeys: ["asset_label", "item"], separator: " — ", default: { value: "", label: "All Assets" }, clearable: true,
+      },
+    ],
+    columns: [
+      { field: "dated", headerName: "Date", width: 14, type: "date" },
+      { field: "kind", headerName: "Movement", width: 16 },
+      { field: "asset_no", headerName: "Asset No", width: 12 },
+      { field: "item", headerName: "Item", width: 26 },
+      { field: "category", headerName: "Category", width: 20 },
+      { field: "from_holder", headerName: "From", width: 24 },
+      { field: "to_holder", headerName: "To", width: 24 },
+      { field: "cost", headerName: "Cost In / (Out)", width: 16, type: "currency", showTotal: true },
+      { field: "depreciation", headerName: "Depreciation", width: 16, type: "currency", showTotal: true },
+      { field: "proceeds", headerName: "Proceeds", width: 16, type: "currency", showTotal: true },
+      { field: "gain_loss", headerName: "Gain / (Loss)", width: 16, type: "currency", showTotal: true },
+      { field: "remarks", headerName: "Remarks", width: 28 },
+    ],
+    layout: {
+      pinned: ["dated", "kind"],
+      groups: [
+        { id: "holder", label: "Holder", fields: ["from_holder", "to_holder"], foldTo: "to_holder" },
+        { id: "money", label: "Amounts", fields: ["cost", "depreciation", "proceeds", "gain_loss"] },
+      ],
+      card: { title: (r) => `${r.kind} — ${r.asset_no}`, subtitle: (r) => [r.dated, r.item].filter(Boolean).join(" · "), figures: ["cost", "depreciation", "proceeds", "gain_loss"] },
+    },
+    summaryFields: [
+      { field: "additions", label: "Additions (cost)", type: "currency" },
+      { field: "disposalsCost", label: "Disposals (cost)", type: "currency" },
+      { field: "depreciation", label: "Depreciation", type: "currency" },
+      { field: "relocations", label: "Relocations", type: "number" },
+      { field: "gainLoss", label: "Gain / (Loss)", type: "currency" },
+    ],
+    exportOptions: { excel: true, pdf: true },
+  },
+
+  fixedAssetSchedule: {
+    title: "Depreciation Schedule",
+    description: "Per asset, month by month — opening NBV, depreciation, accumulated, closing NBV: posted months and the projection to end of life",
+    apiEndpoint: "/api/reports/fixedAssetSchedule",
+    showSummary: true,
+    filters: [
+      {
+        name: "asset", label: "Asset", type: "select", apiEndpoint: "/api/fixed-assets/picker",
+        valueKey: "asset_no", nameKeys: ["asset_label", "item"], separator: " — ", default: { value: "", label: "All Assets" }, clearable: true,
+      },
+      {
+        name: "category", label: "Category", type: "select", apiEndpoint: "/api/setup/fixed_asset_categories",
+        valueKey: "id", nameKeys: ["ic_name"], default: { value: "", label: "All Categories" }, clearable: true,
+      },
+      {
+        name: "status", label: "Assets", type: "select",
+        options: [
+          { value: "IN_USE", label: "In use" },
+          { value: "DISPOSED", label: "Disposed" },
+          { value: "all", label: "All" },
+        ],
+        default: { value: "IN_USE", label: "In use" },
+      },
+      { name: "dateFrom", label: "From Month", type: "date" },
+      { name: "dateTo", label: "To Month", type: "date" },
+    ],
+    columns: [
+      { field: "asset_no", headerName: "Asset No", width: 12 },
+      { field: "item", headerName: "Item", width: 26 },
+      { field: "month", headerName: "Month", width: 12 },
+      { field: "status", headerName: "Status", width: 14 },
+      { field: "opening_nbv", headerName: "Opening NBV", width: 16, type: "currency" },
+      { field: "depreciation", headerName: "Depreciation", width: 16, type: "currency", showTotal: true },
+      { field: "accumulated", headerName: "Accumulated", width: 16, type: "currency" },
+      { field: "closing_nbv", headerName: "Closing NBV", width: 16, type: "currency" },
+      { field: "method", headerName: "Method", width: 14 },
+      { field: "category", headerName: "Category", width: 20 },
+    ],
+    layout: {
+      pinned: ["month", "status"],
+      groups: [{ id: "nbv", label: "Net book value", fields: ["opening_nbv", "depreciation", "accumulated", "closing_nbv"] }],
+      rowGroupBy: [{ field: "asset_number", title: "Asset", contiguous: true, label: (r) => [r.asset_no, r.item, r.method].filter(Boolean).join(" — "), subtotalLabel: "Total" }],
+      card: { title: (r) => `${r.month} — ${r.status}`, subtitle: (r) => [r.asset_no, r.item].filter(Boolean).join(" · "), figures: ["opening_nbv", "depreciation", "accumulated", "closing_nbv"] },
+    },
+    summaryFields: [
+      { field: "assets", label: "Assets", type: "number" },
+      { field: "posted", label: "Posted", type: "currency" },
+      { field: "projected", label: "Projected", type: "currency" },
+    ],
+    exportOptions: { excel: true, pdf: true },
+  },
+
+  fixedAssetDisposals: {
+    title: "Disposal Gain / Loss",
+    description: "Each fixed asset disposal — cost, accumulated depreciation, NBV, proceeds and gain or loss",
+    apiEndpoint: "/api/reports/fixedAssetDisposals",
+    showSummary: true,
+    filters: [
+      { name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), 0, 1) },
+      { name: "dateTo", label: "To Date", type: "date", required: true, default: new Date() },
+      {
+        name: "kind", label: "Type", type: "select",
+        options: [
+          { value: "all", label: "Sale and scrap" },
+          { value: "SALE", label: "Sale" },
+          { value: "SCRAP", label: "Scrap" },
+        ],
+        default: { value: "all", label: "Sale and scrap" },
+      },
+      {
+        name: "category", label: "Category", type: "select", apiEndpoint: "/api/setup/fixed_asset_categories",
+        valueKey: "id", nameKeys: ["ic_name"], default: { value: "", label: "All Categories" }, clearable: true,
+      },
+      {
+        name: "reversed", label: "Reversed disposals", type: "select",
+        options: [
+          { value: "exclude", label: "Leave out" },
+          { value: "include", label: "Show" },
+        ],
+        default: { value: "exclude", label: "Leave out" },
+      },
+    ],
+    columns: [
+      { field: "dated", headerName: "Date", width: 14, type: "date" },
+      { field: "vr_no", headerName: "Voucher No", width: 12 },
+      { field: "asset_no", headerName: "Asset No", width: 12 },
+      { field: "item", headerName: "Item", width: 26 },
+      { field: "category", headerName: "Category", width: 20 },
+      { field: "kind", headerName: "Type", width: 10 },
+      { field: "party", headerName: "Customer / Account", width: 26 },
+      { field: "cost", headerName: "Cost", width: 16, type: "currency", showTotal: true },
+      { field: "accumulated", headerName: "Accumulated Depreciation", width: 16, type: "currency", showTotal: true },
+      { field: "nbv", headerName: "NBV", width: 16, type: "currency", showTotal: true },
+      { field: "proceeds", headerName: "Proceeds", width: 16, type: "currency", showTotal: true },
+      { field: "gain_loss", headerName: "Gain / (Loss)", width: 16, type: "currency", showTotal: true },
+      { field: "result", headerName: "Result", width: 10 },
+      { field: "status", headerName: "Status", width: 10 },
+    ],
+    layout: {
+      pinned: ["dated", "asset_no"],
+      groups: [
+        { id: "book", label: "Book value", fields: ["cost", "accumulated", "nbv"], foldTo: "nbv" },
+        { id: "result", label: "Result", fields: ["proceeds", "gain_loss", "result"] },
+      ],
+      card: { title: "item", subtitle: (r) => [r.dated, r.asset_no, r.kind].filter(Boolean).join(" · "), figures: ["nbv", "proceeds", "gain_loss", "status"] },
+    },
+    drill: [
+      {
+        label: "Open disposal journal",
+        when: (row) => !!row.jv_tran_id,
+        href: (row) => voucherHref({ tran_id: row.jv_tran_id, tran_code: 3 }),
+      },
+      {
+        label: "Open reversal journal",
+        when: (row) => !!row.reversal_tran_id,
+        href: (row) => voucherHref({ tran_id: row.reversal_tran_id, tran_code: 3 }),
+      },
+    ],
+    summaryFields: [
+      { field: "disposals", label: "Disposals", type: "number" },
+      { field: "totalCost", label: "Cost", type: "currency" },
+      { field: "totalNbv", label: "NBV", type: "currency" },
+      { field: "totalProceeds", label: "Proceeds", type: "currency" },
+      { field: "totalGainLoss", label: "Gain / (Loss)", type: "currency" },
+    ],
+    exportOptions: { excel: true, pdf: true },
+  },
+
   rmc: {
     title: "Raw Material Cost Estimation (RMC)",
     description: "Explodes a finished item's BOM to raw materials, prices them, and derives estimated cost of goods manufactured",
@@ -10991,6 +12049,20 @@ export const REPORT_CONFIG = {
         nameKeys: ["itcd", "item", "code"],
         separator: " - ",
         clearable: "true"
+      },
+      // System Average = monthly opening rates; Input Based = the rates typed on
+      // RMC Input Rates (/accounting/rmc-rates, RmcInputRate), the monthly rate
+      // where none is typed. Only while feature "reports.rmcInputRates" is on.
+      {
+        name: "summaryType",
+        type: "select",
+        label: "Summary Type",
+        feature: "reports.rmcInputRates",
+        options: [
+          { value: "normal", label: "System Average" },
+          { value: "input", label: "Input Based" },
+        ],
+        default: "normal",
       },
       { name: "year", type: "select", label: "Rate Year", options: generateYearOptions(), default: String(new Date().getFullYear()), required: true },
       { name: "month", type: "select", label: "Rate Month", options: generateMonthOptions(), default: String(new Date().getMonth() + 1), required: true },
@@ -12094,6 +13166,16 @@ export const REPORT_CONFIG = {
         width: 13,
         type: "percent",
       },
+      // Returns of earlier months reversed at their own month's cost
+      // (Settings → Features "saleReturn.costAtOriginalMonth")
+      { field: "ret_qty", headerName: "Earlier Returns Qty", width: 14, type: "number", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "ret_source_months", headerName: "Sold In", width: 14, type: "text", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "ret_sale_amount", headerName: "Return Sale Amt", width: 16, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "ret_cost_rate", headerName: "Return Cost Rate", width: 14, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "ret_cost_amount", headerName: "Return Cost", width: 16, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "net_sale_amount", headerName: "Net Sales", width: 16, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "net_cost_amount", headerName: "Net Cost (JV)", width: 16, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
+      { field: "net_gross_profit", headerName: "Net Gross Profit", width: 16, type: "currency", feature: "saleReturn.costAtOriginalMonth" },
       // // Closing
       // { field: "closing_qty",   headerName: "Close Qty",   width: 13, type: "number",   cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
       // { field: "closing_value", headerName: "Close Value", width: 18, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
@@ -12864,6 +13946,9 @@ export const REPORT_CONFIG = {
         type: "number",
         valueGetter: (params) => params.row.remaining_qty ?? 0,
       },
+      // Planned quantities (Production → Planned Quantities, INPUT_FOR_PP)
+      { field: "planned_month_qty", headerName: "Planned (Month)", width: 18, type: "number" },
+      { field: "qtr_qty", headerName: "Qtr Qty (Planned)", width: 18, type: "number" },
     ],
 
     summaryFields: [
@@ -12874,6 +13959,7 @@ export const REPORT_CONFIG = {
       { field: "total_net_required", label: "Total Net Required", type: "number" },
       { field: "total_purchased_qty", label: "Total GRN/Purchased", type: "number" },
       { field: "total_remaining_qty", label: "Total Remaining Gap", type: "number" },
+      { field: "total_qtr_qty", label: "Total Qtr Qty (Planned)", type: "number" },
     ],
 
     exportOptions: { pdf: true, excel: true },
@@ -13218,6 +14304,193 @@ export const REPORT_CONFIG = {
       { field: "deletes", label: "Deletes", type: "number" },
     ],
     exportOptions: { pdf: true, excel: true, csv: true },
+  },
+
+  // ─── SALE ORDER → PLAN → LAB → PROCESS ORDER → DISPATCH (ported from Eastland) ──
+  // Sale Order To Invoice Time Tracking — key "isoTimeline" kept from the port.
+  // lib/reports/isoTimeline.js; Features: saleOrder.planFromOrder (catalog screens).
+  // Times come as ISO strings and are shown in the viewer's own clock.
+  isoTimeline: {
+    title: "Sale Order To Invoice Time Tracking",
+    description: "Sale Order → Production Plan → Lab → Process Order → Dispatch → Invoice, with the total time",
+    apiEndpoint: "/api/reports/isoTimeline",
+    // An urgent order's row blinks until it is invoiced
+    blinkCells: (row) => row.is_urgent === true && !row.invoice_at,
+    filters: [
+      { name: "dateTo", label: "As Of Date", type: "date", default: new Date(), required: true },
+      // Sale Order created From / To — when picked, As Of Date is not applied
+      { name: "soDateFrom", label: "Sale Order Date From", rangeLabel: "Sale Order Date From – To", type: "date", required: false },
+      { name: "soDateTo", label: "Sale Order Date To", type: "date", required: false },
+      {
+        name: "process_status", label: "Process Order Posting", type: "select",
+        options: [{ value: "empty", label: "Empty (Not Posted)" }, { value: "posted", label: "Posted" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "nature", label: "Nature", type: "select",
+        options: [{ value: "FINISHED", label: "FINISHED" }, { value: "PROCESS", label: "PROCESS" }, { value: "MANUFACTURING", label: "MANUFACTURING" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "plan_status", label: "Production Plan", type: "select",
+        options: [{ value: "empty", label: "Empty (Not Planned)" }, { value: "filled", label: "Planned" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "lab_status", label: "Lab Input", type: "select",
+        options: [{ value: "empty", label: "Empty (No Lab Input)" }, { value: "filled", label: "Lab Input Done" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "dispatch_status", label: "Dispatch", type: "select",
+        options: [{ value: "empty", label: "Empty (Not Dispatched)" }, { value: "filled", label: "Dispatched" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "invoice_status", label: "Invoice Generation", type: "select",
+        options: [{ value: "empty", label: "Empty (Not Invoiced)" }, { value: "filled", label: "Invoiced" }],
+        default: { value: "", label: "All" }, clearable: true,
+      },
+      {
+        name: "customer", label: "Customer", type: "select", nameKeys: ["acno", "acname"], separator: " - ",
+        valueKey: "acno", options: "customers", default: { value: "", label: "All Customers" },
+        apiEndpoint: `/api/accounts/acno?${CUSTOMER_GROUP_PARAM}`, clearable: true,
+      },
+      {
+        name: "sale_person", label: "Sales Person", type: "select", multiple: true, options: "salesPersons",
+        // scope=own: a sales person is offered only themselves (lib/auth/salesScope.js)
+        apiEndpoint: "/api/accounts/customer-sales-persons?scope=own", valueKey: "id", nameKey: "name",
+        default: { value: "", label: "All Sales Persons" }, clearable: true,
+      },
+      {
+        name: "so_no", label: "Sale Order No", type: "select", options: "orders",
+        apiEndpoint: "/api/orders/saleOrder?limit=1000", valueKey: "order_no", nameKey: "order_no",
+        default: { value: "", label: "All Sale Orders" }, clearable: true,
+      },
+      {
+        name: "plan_no", label: "Plan No", type: "select", options: "plans",
+        apiEndpoint: "/api/material/requisition?category=DISPATCH&limit=1000", valueKey: "tran_id", nameKey: "tran_id",
+        default: { value: "", label: "All Plan No" }, clearable: true,
+      },
+    ],
+    getColumns: () => [
+      { field: "order_no", headerName: "Sale Order No", width: 25, type: "text" },
+      { field: "customer", headerName: "Customer", width: 100 },
+      { field: "sales_person", headerName: "Sales Person", width: 100 },
+      { field: "code", headerName: "Code", width: 35 },
+      { field: "item", headerName: "Product", width: 100 },
+      { field: "nature", headerName: "Nature", width: 30 },
+      { field: "so_at", headerName: "Sale Order Time", width: 45, valueGetter: (p) => fmtStageTime(p.row.so_at) },
+      { field: "approval_at", headerName: "Approval Time", width: 45, valueGetter: (p) => fmtStageTime(p.row.approval_at) },
+      { field: "plan_no", headerName: "Plan No", width: 25, type: "text" },
+      { field: "plan_at", headerName: "Production Plan", width: 45, valueGetter: (p) => fmtStageTime(p.row.plan_at) },
+      { field: "lab_at", headerName: "Lab Input", width: 45, valueGetter: (p) => fmtStageTime(p.row.lab_at) },
+      { field: "process_order_no", headerName: "Process Order", width: 25, type: "text" },
+      { field: "process_at", headerName: "Process Order Posting", width: 45, valueGetter: (p) => fmtStageTime(p.row.process_at) },
+      { field: "dispatch_no", headerName: "Dispatch No", width: 25, type: "text" },
+      { field: "dispatch_at", headerName: "Dispatch", width: 45, valueGetter: (p) => fmtStageTime(p.row.dispatch_at) },
+      { field: "invoice_no", headerName: "Invoice No", width: 25, type: "text" },
+      { field: "invoice_at", headerName: "Invoice Generation", width: 45, valueGetter: (p) => fmtStageTime(p.row.invoice_at) },
+      { field: "total", headerName: "Total", width: 35 },
+    ],
+    layout: {
+      pinned: ["order_no", "customer"],
+      groups: [
+        { id: "order", label: "Order", fields: ["sales_person", "code", "item", "nature"], foldTo: "code" },
+        { id: "plan", label: "Plan & Lab", fields: ["plan_no", "plan_at", "lab_at"], foldTo: "plan_no" },
+        { id: "production", label: "Process Order", fields: ["process_order_no", "process_at"], foldTo: "process_at" },
+        { id: "dispatch", label: "Dispatch & Invoice", fields: ["dispatch_no", "dispatch_at", "invoice_no", "invoice_at"], foldTo: "invoice_at" },
+      ],
+      views: [
+        { id: "times", label: "Stage times", fields: ["order_no", "customer", "code", "nature", "so_at", "approval_at", "plan_at", "lab_at", "process_at", "dispatch_at", "invoice_at", "total"] },
+        { id: "numbers", label: "Document numbers", fields: ["order_no", "customer", "code", "item", "plan_no", "process_order_no", "dispatch_no", "invoice_no", "total"] },
+      ],
+      defaultView: "times",
+      card: {
+        title: (r) => `SO ${r.order_no} · ${r.code}`,
+        subtitle: (r) => [r.customer, r.nature].filter(Boolean).join(" · "),
+        figures: ["plan_no", "dispatch_no", "invoice_no", "total"],
+      },
+    },
+    drill: [
+      {
+        label: "Open the Sale Order",
+        when: (row) => !!row.order_no,
+        href: (row) => voucherHref({ tran_id: row.order_no, tran_code: 600 }),
+      },
+      {
+        label: "Open the dispatch",
+        when: (row) => !!row.tran_id,
+        href: (row) => voucherHref({ tran_id: row.tran_id, tran_code: 6 }),
+      },
+    ],
+    summaryFields: [
+      { field: "total_orders", label: "Sale Orders", type: "number" },
+      { field: "dispatched", label: "Dispatched", type: "number" },
+      { field: "invoiced", label: "Invoiced", type: "number" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: true },
+  },
+
+  // Pending Report — Process / Manufacturing plan lines whose Process Order is
+  // not posted (lib/reports/pendingReport.js; Features: production.labNature).
+  pendingReport: {
+    title: "Pending Report",
+    description: "Process / Manufacturing plan lines whose Process Order is not posted yet",
+    apiEndpoint: "/api/reports/pendingReport",
+    filters: [
+      { name: "dateFrom", label: "Date From", type: "date", default: new Date(new Date().getFullYear(), new Date().getMonth(), 1), required: true },
+      { name: "dateTo", label: "Date To", type: "date", default: new Date(), required: true },
+      {
+        name: "nature", label: "Nature", type: "select",
+        options: [
+          { value: "MANUFACTURING", label: "MANUFACTURING" },
+          { value: "PROCESS", label: "PROCESS" },
+          { value: "POSTED", label: "Process Order Posted" },
+        ],
+        default: { value: "", label: "MANUFACTURING + PROCESS" }, clearable: true,
+      },
+    ],
+    getColumns: () => [
+      { field: "plan_no", headerName: "Plan No", width: 30, type: "text" },
+      { field: "plan_date", headerName: "Plan Date", width: 35, type: "date" },
+      { field: "order_no", headerName: "Sale Order No", width: 30, type: "text" },
+      { field: "so_date", headerName: "Sale Order Date", width: 35, type: "date" },
+      { field: "customer", headerName: "Customer Name", width: 100 },
+      { field: "sales_person", headerName: "Sales Person", width: 60 },
+      { field: "code", headerName: "Code", width: 40 },
+      { field: "item", headerName: "Product Description", width: 100 },
+      { field: "qty", headerName: "Qty", width: 30, type: "number", showTotal: true },
+      { field: "nature", headerName: "Nature", width: 50 },
+    ],
+    layout: {
+      pinned: ["plan_no", "plan_date"],
+      groups: [{ id: "order", label: "Sale Order", fields: ["order_no", "so_date", "customer", "sales_person"], foldTo: "customer" }],
+      rowGroupBy: [{ field: "plan_no", title: "Plan", label: (r) => `Production Plan #${r.plan_no}`, subtotalLabel: "Total" }],
+      card: {
+        title: (r) => `${r.code} ${r.item}`.trim(),
+        subtitle: (r) => [`Plan #${r.plan_no}`, `SO ${r.order_no}`, r.customer].filter(Boolean).join(" · "),
+        figures: ["qty", "nature"],
+      },
+    },
+    drill: [
+      {
+        label: "Create Process Order",
+        when: (row) => !!row.plan_no && !!row.itcd,
+        href: (row) =>
+          `/accounting/material?${new URLSearchParams({ tab: "production", fromPlan: String(row.plan_no), so: String(row.order_no ?? ""), itcd: String(row.itcd), qty: String(row.qty ?? "") }).toString()}`,
+      },
+      {
+        label: "Open the Sale Order",
+        when: (row) => !!row.order_no,
+        href: (row) => voucherHref({ tran_id: row.order_no, tran_code: 600 }),
+      },
+    ],
+    summaryFields: [
+      { field: "total_lines", label: "Lines", type: "number" },
+      { field: "total_qty", label: "Total Qty", type: "number" },
+    ],
+    exportOptions: { pdf: true, excel: true },
   },
 
   // ─── PROCESS ORDER TIMING REPORT ─────────────────────────────────────────
@@ -13738,10 +15011,15 @@ export const REPORT_CONFIG = {
       { field: "stock_bond", headerName: "Stock Bond", width: 18, type: "number", showTotal: true },
       { field: "stock_transit", headerName: "Stock Transit", width: 20, type: "number", showTotal: true },
       { field: "re_order_level", headerName: "Re Order Level", width: 20, type: "number" },
+      // The item's own re-order level / minimum order qty (Item form). A row whose
+      // total stock is below the item's level is yellow (blinkCellsPurple).
+      { field: "item_re_order", headerName: "Item Re-Order Level", width: 20, type: "number" },
+      { field: "min_order_qty", headerName: "Min Order Qty", width: 18, type: "number" },
       { field: "order_qty", headerName: "Order Qty", width: 18, type: "number", showTotal: true },
       { field: "stock_sufficient_months", headerName: "Stock Sufficient for Months", width: 24, type: "number" },
       ...procurementMonthCols(filters).map((c) => ({ ...c, showTotal: true })),
     ],
+    blinkCellsPurple: (row) => row?.below_item_re_order === true,
 
     // Wide-report layout (rule 15): flat material rows grouped into Local /
     // Imported / Unclassified with subtotals (lib/reports/materialProcurement.js).
@@ -14439,8 +15717,8 @@ export function getAllReportTypes() {
 function getReportCategory(reportType) {
   const categories = {
     stock: ["stock", "stockActivity", "stockActivityView", "stockLedger", "stockMetrics", "tradingMargin"],
-    production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc"],
-    sales: ["sale", "saleOrder", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "sales_matrix_monthwise", "sales_matrix_monthwise_margin", "dispatchWithoutRates"],
+    production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "pendingReport"],
+    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "sales_matrix_monthwise", "sales_matrix_monthwise_margin", "dispatchWithoutRates"],
     purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn","exbondReport", "vendorAging"],
     financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "accountsActivity", "payment", "receipt", "journal"],
     service: ["serviceOrder", "serviceEntry", "serviceInvoice"],

@@ -4,7 +4,7 @@ import { resyncLineSplitAtomic } from "@/lib/ledger/invoiceMatcher";
 import { guard } from "@/lib/auth/route";
 
 // Bulk-reverses every still-active allocation created by a given run.
-export const POST = guard("knockoff.reverse", async (req, { session }) => {
+export const POST = guard("knockoff.reverse", async (req, { session, params }) => {
   try {
     const { id } = await params;
     const runId = Number(id);

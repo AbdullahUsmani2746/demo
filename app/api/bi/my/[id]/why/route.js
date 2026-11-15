@@ -8,7 +8,8 @@ import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
 import { bi, biJson, routeId } from "@/lib/bi/http";
 import { BiError, breakdownChange, breakdownFields } from "@/lib/bi/engine";
-import { canViewDashboard, allowedDatasets, layoutQuestionIds, BUILTIN_DASH_FILTERS } from "@/lib/bi/access";
+import { canViewDashboard, allowedDatasets, layoutQuestionIds, dashFilterFields } from "@/lib/bi/access";
+import { enabledDashFilters } from "@/lib/bi/dashFilters";
 import { isValidPeriod } from "@/lib/bi/periods";
 
 async function loadQuestion(session, ctx, questionId) {
@@ -39,7 +40,7 @@ export const POST = guard(
     const body = await req.json();
     const { dashboard, q } = await loadQuestion(ctx.session, ctx, body?.questionId);
     if (!isValidPeriod(body?.period) || body.period === "all") throw new BiError("Choose a period to compare.");
-    const fields = new Set([...(dashboard.layout?.filters ?? []).map((f) => f.field), ...BUILTIN_DASH_FILTERS]);
+    const fields = dashFilterFields(dashboard.layout, await enabledDashFilters());
     const filters = (Array.isArray(body?.filters) ? body.filters : []).filter((f) => fields.has(f?.field));
     return biJson(await breakdownChange(q.config, { session: ctx.session, period: body.period, field: body.field, filters }));
   }),

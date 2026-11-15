@@ -49,10 +49,15 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { shouldLockField, VOUCHER_CONFIG, serviceLineAmounts } from "./constants";
+import { shouldLockField, VOUCHER_CONFIG, serviceLineAmounts, soLineFree } from "./constants";
+import { effectiveLineType, freeLine } from "@/lib/orders/lineTypes";
 import { orderTypeFlags, zeroRatesOn, ratesEditableOn, withoutGodownOn, withoutGodownConfigured, WITHOUT_GODOWN_DISPATCH } from "@/lib/orders/saleOrderApprovalRules";
 import TransferConfirmation from "./TransferConfirmation";
 import DocumentServicesPanel from "./DocumentServicesPanel";
+import { useFeatures } from "@/hooks/useFeatures";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { useFulfilmentCheck, FulfilmentSummaryBar, FulfilmentLineStrip } from "./FulfilmentCheckPanel";
+import { lineFieldsFor, hasFeatureFields } from "@/lib/features/apply";
 import { groupMasterFields, masterVisualOrder } from "./formLayout";
 import AccountPosition from "./AccountPosition";
 
@@ -77,6 +82,33 @@ import { useFormCookies } from "@/hooks/useFormCookies";
 import { generateDeliveryNotePDF } from "../Template/DeliveryNote";
 import AttachmentDropzone from "@/components/Attachments/AttachmentDropzone";
 import LineAttachmentButton from "@/components/Attachments/LineAttachmentButton";
+// Sale Order line → Production Plan cells (Features: saleOrder.planFromOrder)
+import SaleOrderPlanCell from "./SaleOrderPlanCell";
+
+// Last qty / rate change on a saved line (line field `showLineEdit`): read-only
+// note from OrderDetail.edited_by / edited_at / prev_qty / prev_rate.
+function LineEditNote({ line }) {
+  if (!line?.edited_at) return null;
+  const fmt = (n) => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const changes = [];
+  if (line.prev_qty != null && Number(line.prev_qty) !== Number(line.qty)) {
+    changes.push(`Qty ${fmt(line.prev_qty)} → ${fmt(line.qty)}`);
+  }
+  if (line.prev_rate != null && Number(line.prev_rate) !== Number(line.rate)) {
+    changes.push(`Rate ${fmt(line.prev_rate)} → ${fmt(line.rate)}`);
+  }
+  const isAdded = line.prev_qty == null && line.prev_rate == null;
+  const when = new Date(line.edited_at).toLocaleString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit", hour12: true,
+  });
+  return (
+    <div className="mt-1 text-[11px] font-medium leading-snug text-blue-700">
+      {isAdded ? "Added" : "Edited"} by {line.edited_by_name || "unknown"} · {when}
+      {changes.length > 0 && ` (${changes.join(", ")})`}
+    </div>
+  );
+}
 
 // ── Save Success Dialog ────────────────────────────────────────────────────────
 // Shows a centered modal after a successful save with the document numbers.
@@ -1254,7 +1286,11 @@ const AsyncCreatableSelectCom = ({
 
     setIsLoading(true);
     try {
-      const newData = { [nameKey]: inputValue };
+      // field.createData(text, masterData, lineData): the body to POST when the
+      // new record needs more than its name (Sub Account → the line's A/c).
+      const newData = fieldConfig?.createData
+        ? fieldConfig.createData(inputValue, masterData, lineData)
+        : { [nameKey]: inputValue };
       const response = await axios.post(createEndpoint, newData);
       const newOption = {
         value: String(response.data[valueKey]),
@@ -1385,7 +1421,13 @@ const AsyncCreatableSelectCom = ({
             setSelectedOption(newValue);
             onValueChange(newValue);
           }}
-          onInputChange={(input) => !locked && setInputValue(input)} // ✅ Only allow input changes if not locked
+          onInputChange={(input) => {
+            if (locked) return input; // ✅ Only allow input changes if not locked
+            // field.upperCase: what is typed shows (and is created) in CAPS
+            const v = fieldConfig?.upperCase ? input.toUpperCase() : input;
+            setInputValue(v);
+            return v;
+          }}
           loadOptions={loadOptions}
           defaultOptions
           onCreateOption={locked ? undefined : handleCreate} // ✅ Disable creation if locked
@@ -1413,6 +1455,10 @@ const AsyncCreatableSelectCom = ({
 // (lib/stock/checkStock.js, packing: lib/dispatch/packingConsumption.js).
 function showServerWarnings(data) {
   for (const w of data?.warnings ?? []) toast.warning(w, { duration: 12000 });
+  // Sale Order lines planned on save (Features: saleOrder.planFromOrder)
+  if (data?.plan?.message) {
+    (data.plan.ok ? toast.success : toast.error)(`Production plan: ${data.plan.message}`, { duration: 9000 });
+  }
   // Sale Order sent for approval — say why (Bad Debt customer, No Godown, …)
   if (data?.approvalReasons?.length) {
     toast.warning(
@@ -1423,6 +1469,15 @@ function showServerWarnings(data) {
 }
 
 // Main VoucherForm Component
+// Fulfilment check panel per voucher type (Settings → Features "dispatch.fulfilmentPanel")
+const FULFILMENT_PANEL = {
+  dispatch: { mode: "dispatch" },
+  dispatchEdit: { mode: "dispatch" },
+  transfer: { mode: "transfer", progressType: "requisition" },
+  transferEdit: { mode: "transfer", progressType: "requisition" },
+  fgTransfer: { mode: "transfer", progressType: "requisitionFGTransfer" },
+};
+
 export default function VoucherForm({
   type,
   onClose,
@@ -1441,7 +1496,24 @@ export default function VoucherForm({
 
   const ICON_MAP = getIconMap(currency?.symbol || "-");
 
-  const voucherConfig = VOUCHER_CONFIG[type] || {};
+  // Settings → Features: flows this company has switched on / off (lib/features/catalog.js)
+  const features = useFeatures();
+  // Line / master fields marked `feature: "<key>"` (e.g. Sub Account, Manual DC No) exist only
+  // while that feature is on — unless the saved document already uses them (`featureKeep`);
+  // `requiredBy` makes a field required while a feature has a value (lib/features/apply.js).
+  const voucherConfig = useMemo(() => {
+    const cfg = VOUCHER_CONFIG[type] || {};
+    if (![cfg.lineFields, cfg.deductionFields, cfg.masterFields].some(hasFeatureFields)) return cfg;
+    const saved = editMode ? existingData : null;
+    return {
+      ...cfg,
+      masterFields: lineFieldsFor(cfg.masterFields, features.values, saved),
+      lineFields: lineFieldsFor(cfg.lineFields, features.values, saved),
+      deductionFields: lineFieldsFor(cfg.deductionFields, features.values, saved),
+    };
+    // existingData is read once per document (voucherId), not per new object reference
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, features.values, editMode, existingData?.voucherId, existingData?.master?.order_no]);
   const validationTimersRef = useRef({});
   const [transferConfirmOpen, setTransferConfirmOpen] = useState(false);
   const [masterData, setMasterData] = useState({});
@@ -1450,6 +1522,29 @@ export default function VoucherForm({
   const [selectedRows, setSelectedRows] = useState([]);
   const [totals, setTotals] = useState({});
   const [stockLevels, setStockLevels] = useState({});
+  // Fulfilment check (Settings → Features "dispatch.fulfilmentPanel"): parent
+  // document balance and stock per item on dispatch / transfer lines. A saved
+  // voucher being edited backs out its own qty.
+  const fulfilment = useFulfilmentCheck({
+    config: features.on("dispatch.fulfilmentPanel") && FULFILMENT_PANEL[type]
+      ? { ...FULFILMENT_PANEL[type], tolerance: Number(features.value("dispatch.overDispatchTolerance")) / 100 }
+      : null,
+    masterData,
+    lines: mainLines,
+    isEdit: mode === "edit" || !!editMode,
+  });
+  const fulfilmentStrip = (isMain, line, idx, colSpan) => {
+    if (!isMain || !fulfilment.enabled) return null;
+    const itcd = line?.itcd?.value ?? line?.itcd;
+    if (!fulfilment.byItem?.get(Number(itcd))) return null;
+    return (
+      <tr key={`fulfil-${idx}`} className="border-b border-border/60 bg-muted/30">
+        <td colSpan={colSpan} className="px-2 pb-2 pt-0.5">
+          <FulfilmentLineStrip check={fulfilment} itcd={itcd} />
+        </td>
+      </tr>
+    );
+  };
   const [optionsData, setOptionsData] = useState({});
   const [errors, setErrors] = useState({ validation: {} });
   const [varianceModalData, setVarianceModalData] = useState(null);
@@ -1731,6 +1826,8 @@ export default function VoucherForm({
     exbond: "/api/voucher/grn",
     exbondEdit: "/api/voucher/grn",
     fixedAssetsGrn: "/api/voucher/fixedAssetsGrn",
+    fixedAssetRelocation: "/api/voucher/fixedAssetRelocation",
+    fixedAssetDisposal: "/api/voucher/fixedAssetDisposal",
     dispatch: "/api/voucher/dispatch",
     dispatchEdit: "/api/voucher/dispatch",
     materialIssue: "/api/voucher/materialIssue",
@@ -2333,6 +2430,33 @@ export default function VoucherForm({
       return next;
     });
   }, [allowedGodowns, editMode, godownDefaultFields, masterData?.godown, masterData?.godown2]);
+  // A field with `defaultGodown: "<Production setup key>"` (e.g. the plan's
+  // Required By / Required From) starts at the company's godown from Settings →
+  // Production setup, not a fixed id. Only an untouched default is replaced;
+  // the label comes from the godown list.
+  const { setup: productionSetup, isSuccess: productionSetupReady } = useProductionSetup();
+  useEffect(() => {
+    if (editMode || !allowedGodowns?.length) return;
+    const fields = godownDefaultFields.filter((f) => f.defaultGodown);
+    if (!fields.length) return;
+    const byId = new Map(allowedGodowns.map((g) => [String(g.id), g]));
+    setMasterData((prev) => {
+      let next = prev;
+      for (const f of fields) {
+        const key = f.formName || f.name;
+        const cur = String(prev?.[key]?.value ?? prev?.[key] ?? "");
+        const def = String(f.defaultValue?.value ?? f.defaultValue ?? "");
+        if (cur && cur !== def) continue; // the user's pick (or already set from the setup)
+        const want = productionSetupReady ? String(productionSetup?.[f.defaultGodown] ?? def) : def;
+        const g = byId.get(want);
+        if (!g) continue;
+        const label = `${g.id} - ${g.godown}`;
+        if (cur === want && prev?.[key]?.label === label) continue;
+        next = { ...next, [key]: { value: want, label } };
+      }
+      return next;
+    });
+  }, [allowedGodowns, editMode, godownDefaultFields, productionSetup, productionSetupReady]);
 
   // Main initialization useEffect
   useEffect(() => {
@@ -2787,7 +2911,10 @@ export default function VoucherForm({
   //                                rows instead of reloading the BOM
   //                                ("Reset to BOM" clears it)
   // Everything below is a no-op for every other voucher type.
-  const lineBom = !!voucherConfig.lineBom;
+  // Off on Settings → Features (dispatch.produceOnDispatch): a NEW dispatch only takes
+  // finished goods in stock — no materials panel; the server ignores line.materials too.
+  // Editing a saved dispatch keeps the materials it was saved with.
+  const lineBom = !!voucherConfig.lineBom && (features.on("dispatch.produceOnDispatch") || (editMode && mode !== "create"));
   const issueGodownId = lineBom
     ? String(masterData.godown2?.value ?? masterData.godown2 ?? "")
     : "";
@@ -3142,12 +3269,82 @@ export default function VoucherForm({
   // the server books them as linked Service Invoices
   // (lib/service/documentServices.js). null until the panel has loaded the
   // saved ones (or when it is hidden) → nothing is sent, nothing is touched.
-  const docServiceSource = voucherConfig.documentServices || null; // "GRN" | "DISPATCH"
+  // Off on Settings → Features (documents.servicesPanel): no panel, nothing sent,
+  // existing linked service invoices are left as they are.
+  const docServiceSource = features.on("documents.servicesPanel") ? voucherConfig.documentServices || null : null; // "GRN" | "DISPATCH"
   const docServiceTranId =
     docServiceSource && editMode && mode !== "create"
       ? Number(existingData?.voucherId || existingData?.master?.tran_id) || null
       : null;
   const [docServices, setDocServices] = useState(null);
+
+  // ── Batch no used again (Settings → Features: documents.batchReuseWarning) ──
+  // Sale Order, Features "saleOrder.focTrialWarning": while any free line (Free
+  // of Cost order / Trial line) has an item this customer already had as FOC /
+  // Trial, this holds the message and Save is hidden behind it (the server
+  // refuses the same save). Re-checked when the items, customer or type change.
+  const [focTrialBlock, setFocTrialBlock] = useState(null);
+  const focBlockOn = type === "saleOrder" && features.on("saleOrder.focTrialWarning");
+  const focBlockParty = focBlockOn ? masterData.party_code?.value ?? masterData.party_code ?? "" : "";
+  const focBlockItcds = focBlockOn
+    ? mainLines
+        .filter((l) => soLineFree(masterData, l))
+        .map((l) => l?.itcd?.value ?? l?.itcd)
+        .filter(Boolean)
+        .join(",")
+    : "";
+  const focBlockExclude = focBlockOn && editMode && mode !== "create" ? masterData.order_no ?? "" : "";
+  useEffect(() => {
+    if (!focBlockParty || !focBlockItcds) {
+      setFocTrialBlock(null);
+      return;
+    }
+    let cancelled = false;
+    axios
+      .get("/api/orders/saleOrder/foc-trial-check", {
+        params: { party_code: focBlockParty, itcd: focBlockItcds, ...(focBlockExclude ? { exclude: focBlockExclude } : {}) },
+      })
+      .then(({ data }) => !cancelled && setFocTrialBlock(data?.message || null))
+      .catch(() => {}); // the save is checked by the server anyway
+    return () => {
+      cancelled = true;
+    };
+  }, [focBlockParty, focBlockItcds, focBlockExclude]);
+
+  // Create Dispatch: a line's Batch No already on another dispatch → a warning
+  // toast only; nothing is blocked. Each batch warns once. (From Eastland.)
+  const dispatchBatchOn = type === "dispatch" && mode === "create" && features.on("documents.batchReuseWarning");
+  const dispatchBatches = dispatchBatchOn
+    ? [...new Set(mainLines.map((l) => String(l?.batch_no?.value ?? l?.batch_no ?? "").trim()).filter(Boolean))].join(",")
+    : "";
+  const warnedDispatchBatchRef = useRef(new Set());
+  useEffect(() => {
+    if (!dispatchBatches) return;
+    const toCheck = dispatchBatches.split(",").filter((b) => !warnedDispatchBatchRef.current.has(b));
+    if (toCheck.length === 0) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      axios
+        .get("/api/dispatch/batch-check", { params: { batch_no: toCheck.join(",") }, signal: controller.signal })
+        .then(({ data }) => {
+          const used = data?.used || {};
+          for (const b of toCheck) {
+            warnedDispatchBatchRef.current.add(b);
+            if (used[b]?.length) {
+              toast.warning(`Batch No ${b} is already used`, {
+                description: `This batch no is already on Dispatch# ${used[b].join(", ")}.`,
+                duration: 8000,
+              });
+            }
+          }
+        })
+        .catch(() => {}); // a failed check never matters to the save
+    }, 800);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [dispatchBatches]);
   const servicesPanelRef = useRef(null);
 
   // One debounced search per document type.
@@ -3331,14 +3528,20 @@ export default function VoucherForm({
     if (["saleOrder", "saleOrderEdit"].includes(type) && name === "soOrderType") {
       const next = orderTypeFlags(value);
       const isFree = zeroRatesOn(next);
+      // Trial lines on (Features orders.trialLineBilling): every line takes the
+      // type's line type (Trial → Trial lines …); one line can then be changed in its Type column
+      const lineTypesOn = features.on("orders.trialLineBilling");
+      const nextLineType = effectiveLineType(next, null);
       setMainLines((prevLines) =>
         prevLines.map((line) => {
           const origRate = line.original_rate !== undefined ? line.original_rate : line.rate;
           const origSt = line.original_st_rate !== undefined ? line.original_st_rate : line.st_rate;
+          const free = lineTypesOn ? freeLine(next, { line_type: nextLineType }) : isFree;
           const newLine = {
             ...line,
-            rate: isFree ? 0 : origRate,
-            st_rate: isFree ? 0 : origSt,
+            ...(lineTypesOn ? { line_type: nextLineType } : {}),
+            rate: free ? 0 : origRate,
+            st_rate: free ? 0 : origSt,
             original_rate: origRate,
             original_st_rate: origSt,
           };
@@ -3418,7 +3621,50 @@ export default function VoucherForm({
     }
   };
 
+  const valueOf = (v) => (v && typeof v === "object" ? v.value : v);
+  // Set one value on a line without the field's onChange chain (custom cells).
+  const setLineFieldValue = (index, fieldName, value, isMain) => {
+    const set = isMain ? setMainLines : setDeductionLines;
+    set((prev) => prev.map((l, i) => (i === index ? { ...l, [fieldName]: value } : l)));
+  };
+
+  // Dispatch (Features: dispatch.requirePostedProcessOrder): the Sale Order's
+  // items that are not ready — Process / Manufacturing with no posted Process
+  // Order, or not marked by the Lab (/api/orders/so-nature). The form warns;
+  // the voucher route refuses them.
+  const dispatchReadyOn = type === "dispatch" && features.on("dispatch.requirePostedProcessOrder");
+  const dispatchSoNo = dispatchReadyOn ? Number(masterData?.so_no?.value ?? masterData?.so_no) || null : null;
+  const [dispatchNotReady, setDispatchNotReady] = useState({}); // itcd → reason
+  useEffect(() => {
+    if (!dispatchSoNo) {
+      setDispatchNotReady({});
+      return;
+    }
+    let cancelled = false;
+    axios
+      .get("/api/orders/so-nature", { params: { so_nos: dispatchSoNo } })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const map = {};
+        for (const l of data?.data?.[dispatchSoNo]?.lines || []) {
+          if (l.awaiting_lab) map[l.itcd] = `${l.item} — Awaiting Lab (Nature not marked, Plan #${l.plan_no})`;
+          else if (l.in_production) map[l.itcd] = `${l.item} — ${l.nature}, Process Order not posted (Plan #${l.plan_no})`;
+        }
+        setDispatchNotReady(map);
+        const reasons = Object.values(map);
+        if (reasons.length) toast.warning(`Not ready for dispatch: ${reasons.join("; ")}`, { duration: 12000 });
+      })
+      .catch(() => !cancelled && setDispatchNotReady({}));
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatchSoNo]);
+
   const handleLineChange = async (index, fieldName, value, isMain) => {
+    if (dispatchReadyOn && isMain && fieldName === "itcd") {
+      const reason = dispatchNotReady[value?.value ?? value];
+      if (reason) toast.error(`${reason} — this line will not be saved until it is ready.`, { duration: 9000 });
+    }
     // ✅ Track which field was last edited
     const lineKey = `${isMain ? 'main' : 'deduction'}-${index}`;
     setLastEditedFields(prev => ({
@@ -3710,6 +3956,16 @@ export default function VoucherForm({
             ] = `${field.label} is required`;
           }
 
+          // field.requiredWhen(line, masterData): required only for some
+          // lines (Sub Account → when the line's A/c needs one)
+          if (
+            field.requiredWhen &&
+            !(fieldValue && typeof fieldValue === "object" ? fieldValue.value : fieldValue)?.toString().trim() &&
+            (await field.requiredWhen(line, masterData))
+          ) {
+            newErrors[`main-${index}-${fieldName}`] = `${field.label} is required`;
+          }
+
           // Custom validation - ✅ ADDED: await the async validation
           if (
             field.validate &&
@@ -3741,9 +3997,27 @@ export default function VoucherForm({
       // ✅ REMOVE THE DUPLICATE BLOCK THAT STARTS HERE
     }
 
+    // Deduction lines: only field.requiredWhen is checked here (Sub Account
+    // on an account that needs one) — the rest of their checks are unchanged.
+    for (let index = 0; index < deductionLines.length; index++) {
+      const line = deductionLines[index];
+      if (isLineEmpty(line)) continue;
+      for (const field of voucherConfig.deductionFields || []) {
+        if (!field.requiredWhen) continue;
+        const fieldName = field.formName || field.name;
+        const fieldValue = line[fieldName];
+        if (
+          !(fieldValue && typeof fieldValue === "object" ? fieldValue.value : fieldValue)?.toString().trim() &&
+          (await field.requiredWhen(line, masterData))
+        ) {
+          newErrors[`deduction-${index}-${fieldName}`] = `${field.label} is required`;
+        }
+      }
+    }
+
     // Produce-on-dispatch: materials need the godown they are issued from,
     // and every material row needs an item.
-    if (voucherConfig.lineBom) {
+    if (lineBom) {
       if (editTranId && !editBomApplied) {
         newErrors.godown2 = "This dispatch's materials (BOM) have not loaded yet — wait, or close and reopen it";
       }
@@ -3853,7 +4127,7 @@ export default function VoucherForm({
           godown2: masterData.godown2?.value || masterData.godown2,
         }),
         // Dispatch: the godown BOM materials are issued from.
-        ...(voucherConfig.lineBom && {
+        ...(lineBom && {
           godown2: masterData.godown2?.value || masterData.godown2 || null,
         }),
         pycd: masterData.pycd?.value || masterData.pycd,
@@ -3894,7 +4168,7 @@ export default function VoucherForm({
         // the row's own or the header's). Lines stay in display order — the
         // server links materials to line index + 1.
         .map((line) => {
-          if (!voucherConfig.lineBom) return line;
+          if (!lineBom) return line;
           const { bomItcd, bomQty, materialsEdited, bomMissing, ...rest } = line;
           return {
             ...rest,
@@ -3981,6 +4255,24 @@ export default function VoucherForm({
 
     if (loading.vrNo)
       return toast.error("Please wait for operations to complete");
+
+    // Features "saleOrder.focTrialWarning": an item already given FOC / Trial
+    if (focTrialBlock) return toast.error(focTrialBlock, { duration: 10000 });
+
+    // Features "saleOrder.duplicateItems" = refused: one line per item
+    if (type === "saleOrder" && features.value("saleOrder.duplicateItems") === "refused") {
+      const seen = new Map();
+      const twice = new Set();
+      for (const l of mainLines) {
+        const it = l?.itcd?.value ?? l?.itcd;
+        if (!it) continue;
+        if (seen.has(String(it))) twice.add(l?.itcd?.label || l?.item_name || it);
+        seen.set(String(it), true);
+      }
+      if (twice.size) {
+        return toast.error(`An item may be on one line only — ${[...twice].join(", ")} is on more than one. Put its quantity on one line.`, { duration: 10000 });
+      }
+    }
 
     // Remove empty rows from UI before validating/saving
     const cleanedMain = mainLines.filter((line) => !isLineEmpty(line));
@@ -4467,6 +4759,48 @@ export default function VoucherForm({
       return null;
     }
 
+    // Sale Order → Production Plan cells (Plan Date / Plan Qty + Create)
+    if (fieldConfig.type === "saleOrderPlan") {
+      return (
+        <SaleOrderPlanCell
+          part={fieldConfig.part}
+          line={line}
+          masterData={masterData}
+          editMode={editMode}
+          locked={isLocked || mode === "view"}
+          setValue={(name, v) => setLineFieldValue(index, name, v, isMain)}
+        />
+      );
+    }
+
+    // Production Plan line → Process Order (Features: production.labNature):
+    // opens Create Process Order with this plan, Sale Order, item and qty picked
+    if (fieldConfig.type === "planProcessOrder") {
+      const planNo = Number(valueOf(masterData?.tran_id) ?? existingData?.master?.tran_id) || null;
+      const nature = String(valueOf(line?.nature) ?? "").toUpperCase();
+      const itcd = valueOf(line?.itcd);
+      if (!planNo || !itcd || !["PROCESS", "MANUFACTURING"].includes(nature)) {
+        return <span className="text-xs text-muted-foreground">—</span>;
+      }
+      const qs = new URLSearchParams({
+        tab: "production",
+        fromPlan: String(planNo),
+        so: String(valueOf(line?.so_no) ?? ""),
+        itcd: String(itcd),
+        qty: String(line?.qty ?? ""),
+      });
+      return (
+        <a
+          href={`/accounting/material?${qs.toString()}`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex h-9 items-center whitespace-nowrap rounded-md border border-primary/40 px-2 text-xs font-medium text-primary hover:bg-primary/5"
+        >
+          Process Order
+        </a>
+      );
+    }
+
     // ✅ SIMPLIFIED - Move useEffect logic to parent component
     // In renderInputField function, for the itcd field
     if (fieldConfig.type === "select") {
@@ -4725,7 +5059,9 @@ export default function VoucherForm({
       ["purchaseOrder", "saleOrder"].includes(type) &&
       fieldConfig.name === "rate"
     ) {
-      isReadOnly = isReadOnly || masterData.freeOfCost || masterData.trialProcess;
+      // Sale Order: soLineFree — per line while Trial lines are on (Features
+      // orders.trialLineBilling: Free of Cost order or a Trial line), else the order type
+      isReadOnly = isReadOnly || (type === "saleOrder" ? soLineFree(masterData, line) : masterData.freeOfCost || masterData.trialProcess);
     }
 
     // readOnly may be a predicate, the way `disabled` already can be, so a
@@ -5663,7 +5999,7 @@ export default function VoucherForm({
   // Render table
   // Produce-on-dispatch: the line's materials, as a nested panel under it.
   const withBomRow = (isMain, line, idx, colSpan, row) =>
-    isMain && voucherConfig.lineBom ? (
+    isMain && lineBom ? (
       <React.Fragment key={`main-${idx}`}>
         {row}
         {renderBomRow(line, idx, colSpan)}
@@ -6273,6 +6609,7 @@ export default function VoucherForm({
             </Button>
           </div>
         </div>
+        {isMain && <FulfilmentSummaryBar check={fulfilment} />}
         <div className="max-h-[28rem] overflow-x-auto max-md:max-h-none">
           <table className="vf-grid w-full table-auto text-sm">
             <thead>
@@ -6321,7 +6658,7 @@ export default function VoucherForm({
             </thead>
             <tbody>
               <AnimatePresence>
-                {lines.map((line, idx) => withBomRow(isMain, line, idx, fields.length + 3 + (showLineFiles ? 1 : 0), (
+                {lines.map((line, idx) => [withBomRow(isMain, line, idx, fields.length + 3 + (showLineFiles ? 1 : 0), (
                   <motion.tr
                     key={`${prefix}-${idx}`}
                     initial={{ opacity: 0 }}
@@ -6352,6 +6689,7 @@ export default function VoucherForm({
                           data-label={typeof f.label === "string" ? f.label : f.name}
                         >
                           {renderInputField(line, fieldWithIndex, idx, isMain)}
+                          {isMain && f.showLineEdit && <LineEditNote line={line} />}
                         </td>
                       );
                     })}
@@ -6388,7 +6726,7 @@ export default function VoucherForm({
                       </Button>
                     </td>
                   </motion.tr>
-                )))}
+                )), fulfilmentStrip(isMain, line, idx, fields.length + 3 + (showLineFiles ? 1 : 0))])}
               </AnimatePresence>
             </tbody>
           </table>
@@ -6747,10 +7085,16 @@ export default function VoucherForm({
             </Button>
           )}
 
+          {focTrialBlock ? (
+            <p role="alert" className="w-full basis-full text-xs font-medium text-red-600 sm:w-auto sm:basis-auto sm:max-w-md">
+              {focTrialBlock}
+            </p>
+          ) : null}
           <Button
             type="button"
             onClick={handleSubmit}
-            disabled={saveMutation.isPending || loading.submit || loading.vrNo || isSavingRef.current}
+            disabled={saveMutation.isPending || loading.submit || loading.vrNo || isSavingRef.current || !!focTrialBlock}
+            title={focTrialBlock || undefined}
             className="bg-primary text-white text-sm px-4 py-2 flex items-center gap-2"
           >
             <Save className="h-4 w-4" />

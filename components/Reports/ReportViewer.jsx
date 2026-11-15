@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { REPORT_CONFIG } from "./config";
+import { useFeatures } from "@/hooks/useFeatures";
+import { applyReportFeatures } from "@/lib/features/apply";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx-js-style";
 import { format } from "date-fns";
@@ -184,7 +186,11 @@ const ReportViewer = ({ reportType }) => {
   const isQCReport = reportType === "qc" || reportType === "orderQc";
 
   const [error, setError] = useState(null);
-  const [config, setConfig] = useState(null);
+  const [rawConfig, setConfig] = useState(null);
+  // Settings → Features: filters / options / columns marked `feature: "<key>"`
+  // show only while that feature is on (lib/features/apply.js).
+  const { values: featureValues } = useFeatures();
+  const config = useMemo(() => applyReportFeatures(rawConfig, featureValues), [rawConfig, featureValues]);
   // Print Preview States
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewPdfUrl, setPreviewPdfUrl] = useState("");

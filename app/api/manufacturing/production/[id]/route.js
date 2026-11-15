@@ -7,7 +7,9 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { guard } from "@/lib/auth/route";
 import { checkPeriodLock } from "@/lib/periodLock";
-import { normalizeOrder, validateOrder, replaceLines, validateOrderReferences, loadLines, effectiveOutputs, linesReady, saveOutputYields, updatePostedYields } from '@/lib/manufacturing/processOrder';
+import { normalizeOrder, validateOrder, replaceLines, validateOrderReferences, loadLines, effectiveOutputs, linesReady, saveOutputYields, updatePostedYields, orderFeatureError, yieldEditError } from '@/lib/manufacturing/processOrder';
+import { getProductionSetup } from '@/lib/production/setup';
+import { feature } from '@/lib/features/server';
 import { recordScopeError } from '@/lib/auth/documentScope';
 
 // GET: Fetch all production plans with pagination, sorting, and filtering
@@ -115,11 +117,13 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
 
     if (Array.isArray(data.outputs) && (data.type === 'new' || data.type === 'reprocessing')) {
       const order = normalizeOrder(data);
+      // Settings → Production setup (default godowns of rows saved without one)
+      const setup = await getProductionSetup();
+      const { outputsByPlan } = await loadLines([planId]);
+      const storedOutputs = effectiveOutputs(currentPlan, outputsByPlan.get(planId), setup);
       if (currentPlan.status === 'Posted') {
         const errors = validateOrder(order);
         if (errors.length) return NextResponse.json({ error: errors.join('; ') }, { status: 422 });
-        const { outputsByPlan } = await loadLines([planId]);
-        const storedOutputs = effectiveOutputs(currentPlan, outputsByPlan.get(planId));
         if (order.outputs.length !== storedOutputs.length || order.outputs.some((output, index) => {
           const stored = storedOutputs[index];
           return !stored || output.line_no !== stored.line_no || output.finished_id !== stored.finished_id ||
@@ -137,7 +141,7 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
             Math.abs(Number(detail.material_percentage) - Number(stored.material_percentage)) > 1e-6 ||
             (detail.material_desc || '') !== (stored.material_desc || '') ||
             detail.output_line !== (issue?.output_line ?? 1) ||
-            (detail.material_id && detail.godown != null && Number(detail.godown) !== Number(issue?.godown ?? 2)) ||
+            (detail.material_id && detail.godown != null && Number(detail.godown) !== Number(issue?.godown ?? setup.productionGodown)) ||
             (detail.material_id && detail.unit && detail.unit !== (issue?.unit || 'KG'));
         });
         if (detailsChanged) return NextResponse.json({ error: 'Posted material and instruction lines are locked.' }, { status: 409 });
@@ -148,10 +152,9 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
           .filter((output, index) => output.actual_yield != null && Number(output.actual_yield) !== Number(storedOutputs[index].actual_yield ?? storedOutputs[index].qty))
           .map((output) => ({ line_no: output.line_no, finished_id: output.finished_id, qty: output.actual_yield }));
         if (changes.length) {
-          const sentDate = currentPlan.sent_to_production_date || currentPlan.dated;
-          if (sentDate && Date.now() - new Date(sentDate).getTime() > 24 * 60 * 60 * 1000) {
-            return NextResponse.json({ error: 'Actual yield cannot be edited after 24 hours of posting.' }, { status: 400 });
-          }
+          // Settings → Features "production.yieldEditWindow" (default 24 hours)
+          const windowError = await yieldEditError(currentPlan.sent_to_production_date || currentPlan.dated);
+          if (windowError) return NextResponse.json({ error: windowError }, { status: 400 });
           if (changes.some((change) => !(change.qty > 0))) {
             return NextResponse.json({ error: 'Actual yield must be greater than zero.' }, { status: 422 });
           }
@@ -173,6 +176,11 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
       }
       const errors = validateOrder(order);
       if (errors.length) return NextResponse.json({ error: errors.join('; ') }, { status: 422 });
+      // Settings → Features: no more production items than the order had (one
+      // when several are off) / a BOM on every new or changed production item.
+      const recipeMode = data.type === 'new' && (await feature('production.processOrderSource')) === 'recipe';
+      const featureError = await orderFeatureError(order, { type: data.type, recipeMode, storedOutputs });
+      if (featureError) return NextResponse.json({ error: featureError }, { status: 422 });
       const referenceCheck = await validateOrderReferences(order);
       if (referenceCheck.error) return NextResponse.json({ error: referenceCheck.error }, { status: 422 });
       for (const godown of referenceCheck.godowns) {
@@ -232,7 +240,7 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
         productionPlanDetail: updated.productionPlanDetail.map((detail) => ({
           ...detail,
           output_line: detail.issueLine?.output_line || 1,
-          issue_godown: detail.issueLine?.godown ?? null,
+          issue_godown: detail.material_id ? detail.issueLine?.godown ?? setup.productionGodown : null,
           issue_unit: detail.issueLine?.unit || 'KG',
         })),
       }, { status: 200 });
@@ -240,10 +248,9 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
 
     // Check 24 hour restriction if it's already Posted and actual_yield is being updated
     if (currentPlan.status === 'Posted' && actual_yield !== undefined && parseFloat(actual_yield) !== currentPlan.actual_yield) {
-      const sentDate = currentPlan.sent_to_production_date || currentPlan.dated;
-      if (sentDate && (new Date() - new Date(sentDate)) > 24 * 60 * 60 * 1000) {
-        return NextResponse.json({ error: "Actual yield cannot be edited after 24 hours of posting." }, { status: 400 });
-      }
+      // Settings → Features "production.yieldEditWindow" (default 24 hours)
+      const windowError = await yieldEditError(currentPlan.sent_to_production_date || currentPlan.dated);
+      if (windowError) return NextResponse.json({ error: windowError }, { status: 400 });
     }
 
     await prisma.productionPlanMaster.update({

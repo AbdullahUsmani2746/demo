@@ -13,6 +13,7 @@ import { fmtMoney } from "@/lib/hr/salary/calc";
 import { fiscalYearOf, slabTax } from "@/lib/hr/payroll/compute";
 import { api, BRAND_BTN, NativeSelect } from "@/components/HR/shared";
 import { Card } from "@/components/HR/payroll/ui";
+import { useFeatures } from "@/hooks/useFeatures";
 
 const fyLabel = (y) => `${y}–${String(Number(y) + 1).slice(2)}`;
 const SLAB_COLS = [["from_amount", "From (Rs a year)"], ["to_amount", "Up to"], ["fixed_amount", "Fixed tax"], ["rate_percent", "Rate on the excess"]];
@@ -20,7 +21,7 @@ const SLAB_COLS = [["from_amount", "From (Rs a year)"], ["to_amount", "Up to"], 
 export function TaxTab({ meta }) {
   const qc = useQueryClient();
   const canEdit = meta.rights.payrollManage;
-  const [year, setYear] = useState(fiscalYearOf(meta.today.slice(0, 7)));
+  const [year, setYear] = useState(fiscalYearOf(meta.today.slice(0, 7), meta.settings.taxYearStartMonth || 7));
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [tryIncome, setTryIncome] = useState(1800000);
@@ -57,7 +58,7 @@ export function TaxTab({ meta }) {
         icon={Receipt}
         actions={
           <NativeSelect value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-36" aria-label="Fiscal year">
-            {Array.from({ length: 5 }, (_, i) => fiscalYearOf(meta.today.slice(0, 7)) + 1 - i).map((y) => <option key={y} value={y}>FY {fyLabel(y)}</option>)}
+            {Array.from({ length: 5 }, (_, i) => fiscalYearOf(meta.today.slice(0, 7), meta.settings.taxYearStartMonth || 7) + 1 - i).map((y) => <option key={y} value={y}>FY {fyLabel(y)}</option>)}
           </NativeSelect>
         }
         bodyClassName="p-4 sm:p-5 space-y-3"
@@ -133,17 +134,23 @@ const RULES = [
   { title: "Days & attendance", keys: [["payrollDaysDivisor", "days"], ["payNoAttendanceFull", "1 / 0"]] },
   { title: "Overtime", keys: [["otRatePercent", "%"], ["otHoursPerDay", "hours"], ["otBaseGross", "1 / 0"]] },
   { title: "EOBI", keys: [["eobiMinWage", "Rs"], ["eobiEmployeePercent", "%"], ["eobiEmployerPercent", "%"]] },
-  { title: "Income tax", keys: [["taxSurchargeThreshold", "Rs"], ["taxSurchargePercent", "%"]] },
+  { title: "Income tax", keys: [["taxSurchargeThreshold", "Rs"], ["taxSurchargePercent", "%"], ["taxYearStartMonth", "month"]] },
+  { title: "Provident fund", feature: "hr.providentFund", keys: [["pfEmployeePercent", "%"], ["pfEmployerPercent", "%"], ["pfBaseGross", "1 / 0"], ["pfEligibleMonths", "months"], ["pfVestingMonths", "months"]] },
+  { title: "Provident fund loans & withdrawals", feature: "hr.pfLoans", keys: [["pfLoanLimitPercent", "%"], ["pfLoanMaxInstallments", "months"]] },
+  { title: "Gratuity", feature: "hr.gratuity", keys: [["gratuityBaseGross", "1 / 0"], ["gratuityDaysPerYear", "days"], ["gratuityMonthDays", "days"], ["gratuityMinServiceMonths", "months"], ["gratuityPartYear", "0–2"], ["gratuityProvisionMonthly", "1 / 0"]] },
+  { title: "Leaving & final settlement", feature: "hr.leavingProcess", keys: [["noticeDaysResignation", "days"], ["noticeDaysTermination", "days"], ["noticeRecovery", "1 / 0"], ["noticePayTermination", "1 / 0"], ["leaveEncash", "0–2"], ["leaveEncashDivisor", "days"], ["leaveEncashMaxDays", "days"]] },
 ];
 
 export function PayrollRulesTab({ meta }) {
   const qc = useQueryClient();
   const canEdit = meta.rights.shifts || meta.rights.payrollManage;
+  const features = useFeatures();
+  const RULES_SHOWN = RULES.filter((g) => !g.feature || features.on(g.feature));
   const { data } = useQuery({ queryKey: ["hr-settings"], queryFn: () => api("/api/hr/settings") });
   const [v, setV] = useState(meta.settings);
   const [busy, setBusy] = useState(false);
   useEffect(() => setV(meta.settings), [meta.settings]);
-  const keys = RULES.flatMap((g) => g.keys.map(([k]) => k));
+  const keys = RULES_SHOWN.flatMap((g) => g.keys.map(([k]) => k));
   const dirty = keys.some((k) => Number(v[k]) !== meta.settings[k]);
   const save = async () => {
     setBusy(true);
@@ -165,13 +172,13 @@ export function PayrollRulesTab({ meta }) {
         {canEdit && <Button className={`${BRAND_BTN} w-full shrink-0 sm:w-auto`} onClick={save} disabled={busy || !dirty}>{busy && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}Save rules</Button>}
       </div>
       <div className="grid gap-4 md:grid-cols-2">
-        {RULES.map((g) => (
+        {RULES_SHOWN.map((g) => (
           <Card key={g.title} title={g.title} icon={SlidersHorizontal} bodyClassName="divide-y divide-border/60 px-4 sm:px-5">
             {g.keys.map(([k, unit]) => (
               <div key={k} className="flex items-center justify-between gap-3 py-3">
                 <Label htmlFor={`rule-${k}`} className="min-w-0 text-sm text-foreground/90">{data?.defs?.[k]?.label ?? k}</Label>
                 <div className="relative w-32 shrink-0 sm:w-36">
-                  <Input id={`rule-${k}`} type="number" value={v[k] ?? ""} disabled={!canEdit} onChange={(e) => setV({ ...v, [k]: e.target.value })} className="pr-12 tabular-nums" />
+                  <Input id={`rule-${k}`} type="number" step={data?.defs?.[k]?.decimals ? "0.01" : "1"} value={v[k] ?? ""} disabled={!canEdit} onChange={(e) => setV({ ...v, [k]: e.target.value })} className="pr-12 tabular-nums" />
                   <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{unit}</span>
                 </div>
               </div>

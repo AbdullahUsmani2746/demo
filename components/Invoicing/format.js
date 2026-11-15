@@ -171,7 +171,8 @@ export const liveIssues = (row, draft) => {
     if (e.line.density_missing) {
       out.push({ type: "NO_DENSITY", line_id: l.line_id, message: `Enter the density (KG per LTR) for "${l.item}"` });
     }
-    if (!row.free_of_cost && num(e.rate) <= 0 && billedQty(e.line, e.ack) > 0) {
+    // A line sent on Trial / Rate Negotiation is priced 0 by the server (l.trial)
+    if (!row.free_of_cost && !l.trial && num(e.rate) <= 0 && billedQty(e.line, e.ack) > 0) {
       out.push({ type: "NO_RATE", line_id: l.line_id, message: `No rate for "${l.item}" — enter one` });
     }
   }

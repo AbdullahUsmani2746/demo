@@ -1,6 +1,7 @@
 // /app/api/forms/products/route.js
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
+import { feature } from "@/lib/features/server";
 
 export async function GET(request) {
   try {
@@ -49,8 +50,12 @@ export async function GET(request) {
       }
 
       // Build customer product query
+      // Settings → Features "saleOrder.priceListOnly": only items ticked on the
+      // customer's Sales Items (checked ≠ false) are offered
+      const onlyTicked = await feature("saleOrder.priceListOnly");
       const customerWhere = {
         acno: parseInt(customerAcno),
+        ...(onlyTicked && { OR: [{ checked: true }, { checked: null }] }),
         ...(search && itemIds.length > 0 && { itcd: { in: itemIds } }),
         ...(itcdParam && !isNaN(itcdParam) && { itcd: parseInt(itcdParam ) })
       };

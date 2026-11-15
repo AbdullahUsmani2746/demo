@@ -9,6 +9,13 @@ import {
   Layers, CheckCircle, AlertCircle, BarChart2, ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import {
+  isFinishedCategory,
+  isSemiFinishedCategory,
+  isRawMaterialCategory,
+  isPackingCategory,
+} from "@/lib/production/setupConfig";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -23,14 +30,13 @@ const MONTHS = [
   "January","February","March","April","May","June",
   "July","August","September","October","November","December",
 ];
-const CATEGORY_MAP = {
-  1: "Finished",
-  2: "Semi Finished",
-  3: "Raw Material",
-  4: "Packaging Material",
-};
-
-const getCategoryName = (id) => CATEGORY_MAP[id] || "Unknown";
+// Category kinds come from Settings → Production setup
+const categoryName = (setup, id) =>
+  isFinishedCategory(setup, id) ? "Finished"
+    : isSemiFinishedCategory(setup, id) ? "Semi Finished"
+      : isRawMaterialCategory(setup, id) ? "Raw Material"
+        : isPackingCategory(setup, id) ? "Packaging Material"
+          : "Unknown";
 const ml  = (m, y) => `${MONTHS[m - 1]} ${y}`;
 const fmt = (v) => Number(v).toLocaleString("en-PK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -107,6 +113,11 @@ const ItemCell = ({ itcd, code, name, extra }) => (
 // ══════════════════════════════════════════════════════════════════════════════
 const FutureCostingBOMView = () => {
   const { bomItems, items: allItems, loading } = useGrandMasterBOM();
+  const { setup } = useProductionSetup();
+  const getCategoryName = useCallback((id) => categoryName(setup, id), [setup]);
+  // made in production (has a BOM) vs. bought in (a BOM leaf)
+  const isMade = useCallback((id) => isFinishedCategory(setup, id) || isSemiFinishedCategory(setup, id), [setup]);
+  const isLeaf = useCallback((id) => isRawMaterialCategory(setup, id) || isPackingCategory(setup, id), [setup]);
 
   const [tab, setTab] = useState("detail"); // "detail" | "summary"
 
@@ -215,7 +226,7 @@ const FutureCostingBOMView = () => {
           };
 
           // If child is Finished (1) or Semi-Finished (2), drill into its active BOM
-          if ([1, 2].includes(childIcId) && findActiveBOM(childId)) {
+          if (isMade(childIcId) && findActiveBOM(childId)) {
             const childHierarchy = buildBOMHierarchy(
               childId, level + 1, [...path, productId], childPct, childQty
             );
@@ -227,7 +238,7 @@ const FutureCostingBOMView = () => {
       }
       return node;
     },
-    [bomItems, allItems, findActiveBOM]
+    [bomItems, allItems, findActiveBOM, getCategoryName, isMade]
   );
 
   // ── Rebuild hierarchy when product/data changes ───────────────────────────
@@ -260,7 +271,7 @@ const FutureCostingBOMView = () => {
       const childProduct = (allItems || []).find((f) => f.itcd === childId);
       const childIcId    = childProduct?.ic_id;
 
-      if (childIcId === 3 || childIcId === 4) {
+      if (isLeaf(childIcId)) {
         // Leaf — raw material or packaging: collect it
         if (result.has(childId)) {
           result.get(childId).qty += childQty;
@@ -275,7 +286,7 @@ const FutureCostingBOMView = () => {
             qty:         childQty,
           });
         }
-      } else if (childIcId === 1 || childIcId === 2) {
+      } else if (isMade(childIcId)) {
         // Intermediate — drill into its active BOM and merge results up
         const sub = flattenToRawMaterials(childId, childQty, seen);
         sub.forEach((subItem, subItcd) => {
@@ -290,11 +301,11 @@ const FutureCostingBOMView = () => {
     });
 
     return result;
-  }, [bomItems, allItems, findActiveBOM]);
+  }, [bomItems, allItems, findActiveBOM, getCategoryName, isMade, isLeaf]);
 
   // ── Product options ───────────────────────────────────────────────────────
   const productOptions = (allItems || [])
-    .filter((it) => [1, 2].includes(it.ic_id) && findActiveBOM(it.itcd))
+    .filter((it) => isMade(it.ic_id) && findActiveBOM(it.itcd))
     .map((it) => ({ value: it.itcd, label: `${it.itcd} - ${it.item} - ${it.code} (${getCategoryName(it.ic_id)})` }));
 
   // ── "/" focuses the search box (Ctrl+K is the header's menu search) ──────
@@ -728,7 +739,7 @@ const FutureCostingBOMView = () => {
         (allItems || []).forEach((it) => { itemMaster[it.itcd] = it; });
 
         const summaryRows = (allItems || [])
-          .filter((it) => [1, 2].includes(it.ic_id))
+          .filter((it) => isMade(it.ic_id))
           .filter((it) => findActiveBOM(it.itcd))
           .map((it) => {
             const leavesMap = flattenToRawMaterials(it.itcd);
@@ -904,7 +915,7 @@ const FutureCostingBOMView = () => {
                                 <ItemCell itcd={row.itcd} code={row.code} name={row.name} />
                               </td>
                               <td data-label="Category" className={cn(TD, "text-center max-md:text-left")}>
-                                <Chip tone={row.categoryId === 1 ? "brand" : "muted"}>{row.category}</Chip>
+                                <Chip tone={isFinishedCategory(setup, row.categoryId) ? "brand" : "muted"}>{row.category}</Chip>
                               </td>
                               <td data-label="Raw Mat." className={cn(TD, CELL_EDGE, "text-center tabular-nums max-md:text-left")}>{row.totalMaterials}</td>
                               <td data-label="With Rates" className={cn(TD, "text-center tabular-nums max-md:text-left")}>{row.withRates}</td>

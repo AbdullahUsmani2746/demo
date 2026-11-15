@@ -238,6 +238,8 @@ model ACNO {
   taxes                 TaxLaws?                @relation("ACNO_TaxSetup", fields: [tax_law_code], references: [tax_law_code])
   checksInHand          ChecksInHand[]          @relation("ChecksInHandCustomer")
   checksDepositedHere   ChecksInHand[]          @relation("ChecksInHandDepositBank")
+  subAccounts           subAccount[]
+  taxLawAccounts        TaxLaws[]               @relation("TaxLawAccount")
 
   @@index([macno])
   @@index([acname])
@@ -355,6 +357,8 @@ model SALES_ITEM_CUST {
   dated       DateTime? @default(now())
   acnoDetails ACNO      @relation(fields: [acno], references: [acno])
   item        Item      @relation(fields: [itcd], references: [itcd])
+  checked     Boolean?  @default(true) // shown on the Sale Order / ISO price list
+  updated_by  String?   @db.VarChar(50)
 
   @@index([acno])
   @@index([itcd])
@@ -473,6 +477,7 @@ model ItemCategory {
   mainCategoryId       Int?
   items                Item[]
   mainCategory         MainCategory? @relation(fields: [mainCategoryId], references: [id])
+  grn_direct_rate      Boolean       @default(false) // its items take the GRN rate (Features: grn.directRateByItem)
 
   @@index([ic_name])
   @@index([sync_status])
@@ -642,6 +647,11 @@ model Item {
   TransactionsPacking   Transactions[]               @relation("PackingRelation")
   productionPlanDetail  productionPlanDetail[]
   productionPlanMaster  productionPlanMaster[]
+  rmcInputRate          RmcInputRate?
+  grn_direct_rate        Boolean  @default(false) // rate entered on the GRN, not taken from the PO (Features: grn.directRateByItem)
+  re_order_level         Float?
+  minimum_order_quantity Float?
+  inputForPP             InputForPP[]
 
   @@index([ic_id])
   @@index([itcd])
@@ -981,6 +991,8 @@ model OrderMaster {
   qualityMaster           QualityMaster[]
   transactionsMasterPO    TransactionsMaster[] @relation("OrderPO")
   transactionsMasterSO    TransactionsMaster[] @relation("OrderSO")
+  created_at   DateTime? @default(now())
+  updated_at   DateTime? @default(now()) @updatedAt
 
   @@index([dated])
   @@index([party_code])
@@ -1013,6 +1025,15 @@ model OrderDetail {
   items        Item?       @relation(fields: [itcd], references: [itcd])
   orderMaster  OrderMaster @relation(fields: [order_no], references: [order_no])
   service      Service?    @relation(fields: [service_id], references: [id])
+  line_type    String?   @default("NORMAL") @db.VarChar(10) // NORMAL / TRIAL / RATE_NEG (Features: orders.trialLineBilling)
+  plan_date    DateTime? // Sale Order line → Production Plan (Features: saleOrder.planFromOrder)
+  plan_qty     Float?
+  prev_qty     Float? // line edit audit: value before the last edit
+  prev_rate    Float?
+  edited_by    String?   @db.VarChar(50)
+  edited_at    DateTime?
+  created_at   DateTime? @default(now())
+  updated_at   DateTime? @default(now()) @updatedAt
 
   @@index([order_no])
   @@index([itcd])
@@ -1086,6 +1107,7 @@ model productionPlanMaster {
   item                    Item?                     @relation(fields: [finished_id], references: [itcd])
   receipe                 RECEIPE_MASTER?           @relation(fields: [receipe_id], references: [receipe_id])
   transactionMaster       TransactionsMaster?       @relation(fields: [transaction_id], references: [tran_id])
+  batch_required          Boolean?            @default(false) // reprocessing waits for Send to Production (Features: processOrder.batchRequiredReprocessing)
 
   @@index([finished_id])
   @@index([receipe_id])
@@ -1325,6 +1347,8 @@ model TransactionsMaster {
   user                  User?                  @relation("UserTransactions", fields: [user_id], references: [id])
   transactions          Transactions[]
   productionPlanMasters productionPlanMaster[]
+  dispatch_part    Int?      @default(1) // 1234-1, 1234-2 …: billing part of trial items (Features: orders.trialLineBilling)
+  invoiced_at      DateTime?
 
   @@unique([dated, tran_code, vr_no])
   @@index([dated])
@@ -1424,6 +1448,13 @@ model Transactions {
   splitFromLine         Transactions?      @relation("LineSplit", fields: [split_from_line_id], references: [id])
   splitSlices           Transactions[]     @relation("LineSplit")
   transactionsMaster    TransactionsMaster @relation(fields: [tran_id], references: [tran_id])
+  line_type        String? @db.VarChar(10) // dispatch line: TRIAL / RATE_NEG from its Sale Order line; null = normal
+  plan_no          Int? // dispatch line: Production Plan it came from
+  process_order_no Int? // dispatch line: Process Order that produced it
+  sub_account      String? @db.VarChar(250) // voucher line sub account (Features: vouchers.subAccounts)
+  cost_rate        Float? // sale return: cost the stock comes back at
+  tax_law_code     Int? // line withholding tax law (Features: tax.lineWht)
+  taxLaws               TaxLaws?           @relation(fields: [tax_law_code], references: [tax_law_code])
 
   @@index([tran_id])
   @@index([acno])
@@ -1739,6 +1770,8 @@ model Employee {
   hrSalaryStructures      HrSalaryStructure[]
   hrLoans                 HrLoan[]
   hrPayslips              HrPayslip[]
+  hrSeparations           HrSeparation[]
+  hrSettlements           HrSettlement[]
 
   @@index([company_id])
   @@index([designationId])
@@ -1871,6 +1904,8 @@ model ReqMaster {
   details        ReqDetail[]
   godown2Details Godown?     @relation("SecondaryReqGodown", fields: [issued_by], references: [id])
   godownDetails  Godown?     @relation("PrimaryReqGodown", fields: [issued_for], references: [id])
+  created_at   DateTime? @default(now())
+  updated_at   DateTime? @default(now()) @updatedAt
 
   @@index([status])
   @@index([plan_id])
@@ -1897,6 +1932,11 @@ model ReqDetail {
   item         Item?     @relation(fields: [itcd], references: [itcd])
   service      Service?  @relation(fields: [s_id], references: [id])
   master       ReqMaster @relation(fields: [tran_id], references: [tran_id])
+  nature       String?   @db.VarChar(25) // Lab: FINISHED / PROCESS / MANUFACTURING (Features: production.labNature)
+  nature_at    DateTime?
+  rejected_qty Float?    @default(0) // cumulative qty rejected from the remaining balance
+  created_at   DateTime? @default(now())
+  updated_at   DateTime? @default(now()) @updatedAt
 
   @@index([tran_id])
   @@index([itcd])
@@ -1916,10 +1956,13 @@ model TaxLaws {
   tax_law_code        Int      @id @default(autoincrement())
   tax_code            Int
   section_description String   @db.VarChar(255)
-  rate_filer          Int
-  rate_non_filer      Int
+  rate_filer          Float
+  rate_non_filer      Float
   taxSetup            TaxSetup @relation(fields: [tax_code], references: [tax_code])
   acno                ACNO[]   @relation("ACNO_TaxSetup")
+  tax_acno            Int? // payable account of this withholding tax
+  taxAcno             ACNO?          @relation("TaxLawAccount", fields: [tax_acno], references: [acno])
+  transactions        Transactions[]
 
   @@index([tax_code])
   @@index([section_description])
@@ -2554,6 +2597,7 @@ enum KnockoffSourceType {
   RECEIPT
   PAYMENT
   JV
+  RETURN // Sale / Purchase Return naming no invoice, FIFO-matched (Features: knockoff.matchReturns)
 }
 
 enum KnockoffRunStatus {
@@ -2984,6 +3028,7 @@ model HrLeaveType {
   max_days_per_request Float? // null = no limit
   comp_off             Boolean          @default(false) // spent from comp-off days earned (lib/hr/leave/compOff.js), not a yearly entitlement
   comp_off_valid_days  Int              @default(30) // a comp-off day must be taken within this many days of earning it
+  encashable           Boolean          @default(false) // balance paid out in the final settlement (rule: HR → Payroll → Rules)
   gender               String?          @db.VarChar(10) // Male | Female | null = everyone
   color                String           @default("#0284c7") @db.VarChar(9)
   sort                 Int              @default(0)
@@ -3166,6 +3211,7 @@ model HrLoanRecovery {
   source     String   @db.VarChar(10) // PAYROLL | CASH
   reference  String?  @db.VarChar(60)
   payroll_id Int? // hr_payroll_runs.id when recovered by payroll
+  settlement_id Int? // hr_settlements.id when recovered by a final settlement (source SETTLEMENT)
   tran_id    Int? // CASH: the Receipt voucher (lib/hr/vouchers.js)
   cash_acno  Int? // CASH: cash / bank account it was received into
   created_by String?  @db.VarChar(50)
@@ -3275,6 +3321,9 @@ model HrPayslip {
   income_tax       Float        @default(0)
   eobi_employee    Float        @default(0)
   eobi_employer    Float        @default(0)
+  pf_employee      Float        @default(0) // provident fund, employee share (deducted) — feature hr.providentFund
+  pf_employer      Float        @default(0) // provident fund, employer share (cost)
+  gratuity         Float        @default(0) // gratuity provision of the month (feature hr.gratuity, monthly accrual)
   warnings         String[]     @default([])
   run              HrPayrollRun @relation(fields: [run_id], references: [id], onDelete: Cascade)
   employee         Employee     @relation(fields: [employee_id], references: [id])
@@ -3296,4 +3345,278 @@ model HrTaxSlab {
 
   @@index([fiscal_year])
   @@map("hr_tax_slabs")
+}
+
+// ── HR · Leaving & final settlement (prisma/sql/2026-11-21_hr_payroll_additions.sql) ──
+
+/// A resignation / termination / retirement (feature hr.leavingProcess).
+/// pending (Approvals, hrSeparation) → approved (clearance) → completed
+/// (Employee.dor + status set) · rejected · cancelled.
+model HrSeparation {
+  id                  Int            @id @default(autoincrement())
+  employee_id         Int
+  kind                String         @db.VarChar(12) // RESIGNATION | TERMINATION | RETIREMENT
+  notice_date         DateTime       @db.Date // day notice was given
+  notice_days         Int            @default(0) // notice required (setting at the time)
+  last_working_day    DateTime       @db.Date // becomes Employee.dor on completion
+  waive_notice        Boolean        @default(false) // short notice neither recovered nor paid
+  reason              String?        @db.VarChar(500)
+  status              String         @default("pending") @db.VarChar(10)
+  clearance           Json           @default("[]") // [{ key, label, done, by, at, note }] from setting hr.leaving.clearance_items
+  approval_request_id Int?
+  requested_by        String         @db.VarChar(50)
+  requested_at        DateTime       @default(now())
+  decided_by          String?        @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?        @db.VarChar(500)
+  completed_by        String?        @db.VarChar(50)
+  completed_at        DateTime?
+  updated_at          DateTime       @default(now()) @updatedAt
+  employee            Employee       @relation(fields: [employee_id], references: [id])
+  settlements         HrSettlement[]
+
+  @@index([employee_id])
+  @@index([status])
+  @@map("hr_separations")
+}
+
+/// Full & final settlement of a separation.
+/// DRAFT → PENDING (Approvals, hrSettlement) → APPROVED → POSTED (JV, HR_SETTLEMENT)
+/// → paid (Payment voucher, HR_SETTLEMENT_PAY) · REVERSED (mirror journal).
+model HrSettlement {
+  id                  Int          @id @default(autoincrement())
+  separation_id       Int
+  employee_id         Int
+  dor                 DateTime     @db.Date
+  salary_from         DateTime?    @db.Date // first day of the last salary it pays (payroll leaves these months out)
+  status              String       @default("DRAFT") @db.VarChar(10)
+  inputs              Json         @default("{}") // { unpaid_days, tax, adjustments[] } entered by HR
+  data                Json         @default("{}") // breakdown (lib/hr/leaving/settlement.js)
+  total_earnings      Float        @default(0)
+  total_deductions    Float        @default(0)
+  net                 Float        @default(0)
+  approval_request_id Int?
+  jv_tran_id          Int?
+  reversal_tran_id    Int?
+  pay_tran_id         Int?
+  pay_acno            Int?
+  paid_on             DateTime?    @db.Date
+  pay_reversal_tran_id Int?
+  created_by          String?      @db.VarChar(50)
+  created_at          DateTime     @default(now())
+  submitted_by        String?      @db.VarChar(50)
+  submitted_at        DateTime?
+  decided_by          String?      @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?      @db.VarChar(500)
+  posted_by           String?      @db.VarChar(50)
+  posted_at           DateTime?
+  paid_by             String?      @db.VarChar(50)
+  reversed_by         String?      @db.VarChar(50)
+  reversed_at         DateTime?
+  reverse_reason      String?      @db.VarChar(500)
+  updated_at          DateTime     @default(now()) @updatedAt
+  separation          HrSeparation @relation(fields: [separation_id], references: [id], onDelete: Restrict)
+  employee            Employee     @relation(fields: [employee_id], references: [id])
+
+  @@index([separation_id])
+  @@index([employee_id])
+  @@index([status])
+  @@map("hr_settlements")
+}
+
+
+// Sub accounts of a ledger account (Features: vouchers.subAccounts) — from Eastland
+model subAccount {
+  id      Int    @id @default(autoincrement())
+  acno    Int
+  acname  String @db.VarChar(250)
+  account ACNO   @relation(fields: [acno], references: [acno], onDelete: Restrict)
+
+  @@index([acno])
+}
+
+// Raw-material input rate per item for the RMC "Input Based" view — from Eastland
+model RmcInputRate {
+  id         Int      @id @default(autoincrement())
+  itcd       Int      @unique
+  rate       Float    @default(0)
+  updated_by String?  @db.VarChar(50)
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+  item       Item     @relation(fields: [itcd], references: [itcd])
+}
+
+// Planned quantity per item, monthly or quarterly (Production Planning "Qtr Qty") — from Accounting
+model InputForPP {
+  id          Int      @id @default(autoincrement())
+  itcd        Int
+  period_type String   @default("MONTHLY") // MONTHLY | QUARTERLY
+  month       Int      @default(0) // 1-12 for MONTHLY rows, 0 for QUARTERLY
+  quarter     Int      @default(0) // 1-4 for QUARTERLY rows, 0 for MONTHLY
+  year        Int
+  qty         Float
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now()) @updatedAt
+  item        Item     @relation(fields: [itcd], references: [itcd])
+
+  @@unique([itcd, period_type, month, year, quarter], name: "itcd_period_type_month_year_quarter")
+  @@index([itcd])
+  @@index([month, year])
+  @@index([quarter, year])
+  @@map("INPUT_FOR_PP")
+}
+// ── Fixed Assets (prisma/sql/2026-11-20_fixed_assets.sql, lib/fixedAssets/*) ──
+// Company defaults live in Settings key "fixedAssetSettings"
+// (lib/fixedAssets/settingsDefs.js); account defaults in Account Settings
+// (section FIXED_ASSETS). No Prisma relations on purpose — ids are joined in
+// lib/fixedAssets so these tables never touch the shared models.
+
+// Per fixed-asset CATEGORY (ItemCategory whose main category starts "FIXED
+// ASSET"): depreciation defaults and posting accounts. Empty = the company
+// default (Settings / Account Settings).
+model FaCategoryDefault {
+  ic_id              Int      @id
+  method             String?  @db.VarChar(4) // SL | RB
+  useful_life_months Int?
+  rb_rate            Float? // reducing balance % a year
+  salvage_pct        Float? // % of cost
+  cost_acno          Int?
+  accdep_acno        Int?
+  depexp_acno        Int?
+  gainloss_acno      Int?
+  updated_by         String?  @db.VarChar(120)
+  updated_at         DateTime @default(now()) @updatedAt
+
+  @@map("fa_category_defaults")
+}
+
+// One row per asset unit (Fixed Assets GRN line, qty 1, asset_no). Method /
+// life / rate / salvage empty = the category default, then the company one;
+// editable until the asset's first depreciation is posted.
+model FixedAsset {
+  id                  Int       @id @default(autoincrement())
+  asset_no            Int       @unique
+  itcd                Int
+  ic_id               Int?
+  grn_tran_id         Int?
+  grn_line_id         Int?      @unique
+  vendor_acno         Int?
+  description         String?   @db.VarChar(250)
+  cost                Float     @default(0)
+  in_service_date     DateTime  @db.Date
+  method              String?   @db.VarChar(4) // SL | RB
+  useful_life_months  Int?
+  rb_rate             Float?
+  salvage_value       Float?
+  opening_accumulated Float     @default(0) // brought forward (assets taken on with history)
+  department_id       Int?
+  employee_id         Int?
+  location_id         Int? // WorkLocation
+  status              String    @default("IN_USE") @db.VarChar(10) // IN_USE | DISPOSED
+  disposed_on         DateTime? @db.Date
+  capitalisation_tran_id Int? // FA_CAPITALISATION journal of its GRN
+  remarks             String?   @db.VarChar(500)
+  created_by          String?   @db.VarChar(120)
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @default(now()) @updatedAt
+
+  @@index([itcd])
+  @@index([ic_id])
+  @@index([grn_tran_id])
+  @@index([status])
+  @@map("fixed_assets")
+}
+
+// Holder history: registration, relocation, disposal (and its reversal).
+model FixedAssetMovement {
+  id                 Int      @id @default(autoincrement())
+  asset_id           Int
+  kind               String   @db.VarChar(20) // ADDITION | RELOCATION | DISPOSAL | DISPOSAL_REVERSAL | HOLDER_CHANGE
+  dated              DateTime @db.Date
+  tran_id            Int?
+  from_department_id Int?
+  from_employee_id   Int?
+  from_location_id   Int?
+  to_department_id   Int?
+  to_employee_id     Int?
+  to_location_id     Int?
+  remarks            String?  @db.VarChar(500)
+  created_by         String?  @db.VarChar(120)
+  created_at         DateTime @default(now())
+
+  @@index([asset_id])
+  @@index([tran_id])
+  @@index([dated])
+  @@map("fixed_asset_movements")
+}
+
+// One monthly depreciation run = one system journal (rmk4 FA_DEPRECIATION).
+// A month has at most one POSTED run (partial unique index in the SQL file).
+model FixedAssetDepreciationRun {
+  id               Int       @id @default(autoincrement())
+  period           String    @db.VarChar(7) // YYYY-MM
+  status           String    @default("POSTED") @db.VarChar(10) // POSTED | REVERSED
+  posting_date     DateTime  @db.Date
+  jv_tran_id       Int?
+  reversal_tran_id Int?
+  total            Float     @default(0)
+  asset_count      Int       @default(0)
+  rules            Json? // the settings the run was worked out with
+  posted_by        String?   @db.VarChar(120)
+  posted_at        DateTime  @default(now())
+  reversed_by      String?   @db.VarChar(120)
+  reversed_at      DateTime?
+  reverse_reason   String?   @db.VarChar(500)
+
+  @@index([period])
+  @@index([status])
+  @@map("fixed_asset_depreciation_runs")
+}
+
+model FixedAssetDepreciationLine {
+  id          Int    @id @default(autoincrement())
+  run_id      Int
+  asset_id    Int
+  period      String @db.VarChar(7)
+  factor      Float  @default(1) // share of the month charged (first / last month rule)
+  opening_nbv Float
+  amount      Float
+  closing_nbv Float
+  ic_id       Int?
+  depexp_acno Int?
+  accdep_acno Int?
+
+  @@unique([run_id, asset_id])
+  @@index([asset_id])
+  @@index([period])
+  @@map("fixed_asset_depreciation_lines")
+}
+
+// A disposal line (tran_code 15) worked out: cost, accumulated, NBV,
+// proceeds, gain / loss and its system journal (rmk4 FA_DISPOSAL).
+model FixedAssetDisposal {
+  id               Int       @id @default(autoincrement())
+  asset_id         Int
+  tran_id          Int // the Fixed Asset Disposal voucher
+  dated            DateTime  @db.Date
+  kind             String    @db.VarChar(6) // SALE | SCRAP
+  party_acno       Int?
+  proceeds         Float     @default(0)
+  cost             Float
+  accumulated      Float // at disposal, incl. month_charge
+  month_charge     Float     @default(0) // depreciation of the disposal month (last-month rule)
+  nbv              Float
+  gain_loss        Float // + gain, - loss
+  jv_tran_id       Int?
+  reversal_tran_id Int?
+  reversed_by      String?   @db.VarChar(120)
+  reversed_at      DateTime?
+  reverse_reason   String?   @db.VarChar(500)
+  created_at       DateTime  @default(now())
+
+  @@index([asset_id])
+  @@index([tran_id])
+  @@index([dated])
+  @@map("fixed_asset_disposals")
 }

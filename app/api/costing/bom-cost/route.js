@@ -2,6 +2,7 @@ import prisma from "@/lib/prisma";
 import { getOpeningOne, getOpening } from "@/lib/openingStock";
 import { NextResponse } from "next/server";
 import { guard } from "@/lib/auth/route";
+import { getProductionSetup, isSemiFinishedCategory } from "@/lib/production/setup";
 
 // ── Get unit cost for a raw-material item ──────────────────────────────────────
 // Priority:
@@ -81,6 +82,7 @@ async function getItemUnitCost(itemId, month, year) {
 //   ic_id=2 (semi-finished): ProductionCostEntry this period -> opening rate
 //   ic_id=3 (raw material):  weighted avg = (opening*rate + period purchases) / qty
 async function getPlanMaterials(plan, month, year) {
+  const setup = await getProductionSetup();
   const details = await prisma.productionPlanDetail.findMany({
     where:   { plan_id: plan.id },
     include: {
@@ -100,7 +102,7 @@ async function getPlanMaterials(plan, month, year) {
     let unitCost   = 0;
     let costSource = "not_found";
 
-    if (icId === 2) {
+    if (isSemiFinishedCategory(setup, icId)) {
       // Semi-finished: blend opening stock + production cost for this period.
       // If the item has opening_qty from last month AND was produced this month,
       // the correct rate is: (opening_qty × opening_rate + prod_qty × prod_cost) / (opening_qty + prod_qty)

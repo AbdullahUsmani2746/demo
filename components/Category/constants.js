@@ -1,5 +1,8 @@
 import axios from "axios";
 import { screenStockMode } from "@/lib/stock/policyClient";
+import { featureNow, featureAsync } from "@/lib/features/client";
+import { resolveProductionSetup } from "@/lib/production/setupConfig";
+import { effectiveLineType, freeLine, LINE_TYPE, LINE_TYPE_OPTIONS } from "@/lib/orders/lineTypes";
 import {
   CUSTOMER_GROUP_PARAM,
   VENDOR_GROUP_PARAM,
@@ -59,6 +62,57 @@ const contraAccountsEndpoint = (masterData) => {
 
 // Journal lines: any account except the blocked control accounts.
 const journalAccountsEndpoint = `/api/accounts/acno?${BLOCKED_VOUCHER_PARAM}`;
+
+// ── Sub Account (Payment / Receipt / Journal lines) ───────────────────────
+// A name kept under the line's account (Finance → Sub Accounts, model
+// subAccount); the name is what is saved (Transactions.sub_account). Shown
+// only while Settings → Features "vouchers.subAccounts" is on; required when
+// the account's main account is in Account Settings "sub_account_groups"
+// (the server checks the same: lib/vouchers/subAccounts.js).
+const lineAcnoOf = (line) => line?.acno?.value ?? line?.acno;
+// Payment / receipt line Tax Law (Settings → Features "tax.lineWht"): the server
+// sets the WHT rate by the line account's filer status and books the deduction
+// on the law's payable account (lib/tax/lineWht.js).
+const taxLawLineField = {
+  name: "taxLaws",
+  formName: "tax_law_code",
+  label: "Tax Law",
+  type: "select",
+  feature: "tax.lineWht",
+  featureKeep: (saved) => (saved?.lines || saved?.transactions || []).some?.((l) => l?.tax_law_code),
+  options: "taxLaws",
+  apiEndpoint: "/api/setup/tax_laws",
+  nameKey: "section_description",
+  valueKey: "tax_law_code",
+  clearable: true,
+};
+
+const subAccountLineField = {
+  name: "sub_account",
+  label: "Sub Account",
+  type: "select",
+  feature: "vouchers.subAccounts",
+  apiEndpoint: (masterData, line) => {
+    const acno = lineAcnoOf(line);
+    return acno ? `/api/sub-accounts?acno=${encodeURIComponent(acno)}` : null;
+  },
+  createEndpoint: "/api/sub-accounts",
+  // a new name is saved in CAPS under the line's A/c
+  createData: (text, masterData, line) => ({ acno: lineAcnoOf(line), acname: String(text).toUpperCase() }),
+  upperCase: true,
+  requiredWhen: async (line) => {
+    const acno = lineAcnoOf(line);
+    if (!acno) return false;
+    try {
+      const res = await axios.get("/api/sub-accounts", { params: { acno, required: 1 } });
+      return res.data?.required === true;
+    } catch {
+      return false;
+    }
+  },
+  nameKey: "acname",
+  valueKey: "acname",
+};
 
 // ── LTR ⇄ KG line fields (Sale Order and Dispatch) ────────────────────────
 // Stock is KG. A line may be transacted in litres, in which case the litres
@@ -138,6 +192,85 @@ export const createUnitField = (config = {}) => ({
   },
   ...config,
 });
+
+// ── Finished-goods categories (Settings → Production setup) for config
+// callbacks that cannot use hooks/useProductionSetup.js. Sync read: the stored
+// setup once loaded (fetched on first use, refreshed every minute), the
+// defaults (resolveProductionSetup) until then. ──────────────────────────
+let productionSetupCache = { at: 0, setup: null, loading: false };
+export function finishedCategoryIdsNow() {
+  const stale = Date.now() - productionSetupCache.at > 60_000;
+  if (stale && !productionSetupCache.loading && typeof window !== "undefined") {
+    productionSetupCache.loading = true;
+    axios
+      .get("/api/settings/production-setup")
+      .then((r) => { productionSetupCache = { at: Date.now(), setup: r.data?.values ?? null, loading: false }; })
+      .catch(() => { productionSetupCache = { ...productionSetupCache, at: Date.now(), loading: false }; });
+  }
+  const ids = (productionSetupCache.setup ?? resolveProductionSetup(null)).finishedCategoryIds || [];
+  return ids.length ? ids : resolveProductionSetup(null).finishedCategoryIds;
+}
+
+// A godown field's default from Settings → Production setup: the stored value
+// once Form.jsx has loaded it (field.defaultGodown), the setup's default until
+// then — never a fixed id here.
+const setupGodownDefault = (key) => {
+  const id = String(resolveProductionSetup(null)[key]);
+  return { value: id, label: id };
+};
+
+// Production Plan line Nature (Settings → Features "production.labNature")
+const PLAN_NATURE_OPTIONS = ["FINISHED", "PROCESS", "MANUFACTURING"].map((v) => ({ value: v, label: v }));
+
+// ── Sale Order line Type (Settings → Features "orders.trialLineBilling") ──
+// A line's rate is 0 and locked when it is free: with line types on, a Free of
+// Cost order or a Trial line (lib/orders/lineTypes.js); otherwise (SMS) a Free
+// of Cost / Trial Process order.
+const trialLinesOn = () => featureNow("orders.trialLineBilling") === true;
+export const soLineFree = (master, line) => (trialLinesOn() ? freeLine(master, line) : zeroRatesOn(master));
+
+// To Trial: rate 0 (the customer rate is kept to come back to). Back to
+// Normal / Rate Negotiation: the kept rate, or the customer's rate from Sales
+// Items when the line was saved at 0. Shown only while the feature is on.
+const saleOrderLineTypeField = () => ({
+  name: "line_type",
+  label: "Type",
+  type: "normalSelect",
+  options: LINE_TYPE_OPTIONS,
+  defaultValue: LINE_TYPE.NORMAL,
+  feature: "orders.trialLineBilling",
+  width: "150px",
+  // Free of Cost is the whole order — every line free, no line type
+  readOnly: (line, master) => master?.freeOfCost === true,
+  onChange: async (value, line, allLines, master) => {
+    const line_type = value?.value ?? value ?? LINE_TYPE.NORMAL;
+    const origRate = line.original_rate !== undefined ? line.original_rate : line.rate;
+    const origSt = line.original_st_rate !== undefined ? line.original_st_rate : line.st_rate;
+    if (line_type === LINE_TYPE.TRIAL) {
+      return { line_type, rate: 0, st_rate: 0, original_rate: origRate, original_st_rate: origSt };
+    }
+    let rate = Number(origRate) || 0;
+    let st_rate = Number(origSt) || 0;
+    const itcd = line?.itcd?.value ?? line?.itcd;
+    const party = master?.party_code?.value ?? master?.party_code;
+    if (!(rate > 0) && itcd && party) {
+      try {
+        const { data } = await axios.get(`/api/forms/customers/rates?acno=${party}&itcd=${itcd}`);
+        const c = data?.customers?.[0] || {};
+        rate = Number(c.rate) || 0;
+        st_rate = Number(c.gst_rate) || st_rate;
+      } catch {
+        /* keep 0 — the rate can be typed */
+      }
+    }
+    return { line_type, rate, st_rate, original_rate: rate, original_st_rate: st_rate };
+  },
+});
+
+// Settings → Features "saleOrder.litreUnits": the Unit / Qty (LTR) columns of a
+// Sale Order exist while it is on — or when the saved order already has a LTR line.
+const savedHasLitreLine = (saved) => (saved?.lines || []).some((l) => isLitreUnit(l?.unit));
+const LITRE_FEATURE = { feature: "saleOrder.litreUnits", featureKeep: savedHasLitreLine };
 
 // The Sale Order carries no packing grid, but OrderDetail still stores
 // no_of_packs / qty_per_pack — the field this replaced set them to 1 × qty.
@@ -427,10 +560,12 @@ export const checkDocumentStatus = async (entry, type) => {
           const orderedItems = Object.keys(orderedItemWiseQty);
           if (orderedItems.length === 0) allItemsFullyDispatched = false;
 
+          // Band: Settings → Features "dispatch.overDispatchTolerance" (SMS 10 %)
+          const pct = Number(await featureAsync("dispatch.overDispatchTolerance")) || 0;
           for (const itemId of orderedItems) {
             const orderedQty = orderedItemWiseQty[itemId] || 0;
             const dispatchedQty = itemWiseDispatched[itemId] || 0;
-            const maxAllowed = orderedQty * 1.1;
+            const maxAllowed = orderedQty * (1 + pct / 100);
             if (dispatchedQty < maxAllowed) {
               allItemsFullyDispatched = false;
             }
@@ -444,7 +579,7 @@ export const checkDocumentStatus = async (entry, type) => {
 
           return {
             status: exceedsVariance
-              ? "Over Dispatched (Exceeds 10%)"
+              ? `Over Dispatched (Exceeds ${pct}%)`
               : isFullyDispatched
                 ? "Fully Dispatched"
                 : "Pending",
@@ -452,7 +587,7 @@ export const checkDocumentStatus = async (entry, type) => {
             // ðŸ”’ Lock only when ALL items dispatched >= max allowed
             allowEdit: !isFullyDispatched,
 
-            details: `Dispatched: ${totalDispatched}/${totalOrdered} (Max +10% allowed)`,
+            details: `Dispatched: ${totalDispatched}/${totalOrdered} (Max +${pct}% allowed)`,
           };
         }
 
@@ -842,8 +977,11 @@ export const createQtyFieldWithAvailable = (config = {}) => {
           const orderedQty = Number(bd.orderedQty) || 0;
           const alreadyDispatched = Number(bd.alreadyDispatched) || 0;
           if (orderedQty > 0) {
-            const maxAllowed = orderedQty * 1.1;   // +10%
-            const minAllowed = orderedQty * 0.9;   // -10% (warn only)
+            // ± band: Settings → Features "dispatch.overDispatchTolerance" (SMS 10 %; the server checks the same)
+            const band = (Number(await featureAsync("dispatch.overDispatchTolerance")) || 0) / 100;
+            const pct = Math.round(band * 100);
+            const maxAllowed = orderedQty * (1 + band);
+            const minAllowed = orderedQty * (1 - band); // warn only
             const totalWillBe = alreadyDispatched + totalItemQtyInForm;
 
             if (totalWillBe > maxAllowed) {
@@ -858,11 +996,11 @@ export const createQtyFieldWithAvailable = (config = {}) => {
                 totalWillBe,
                 maxAllowed,
                 exceedBy,
-                message: `Exceeds Sale Order +10% limit. Ordered ${orderedQty.toFixed(2)} KG, already dispatched ${alreadyDispatched.toFixed(2)} KG, total in dispatch ${totalItemQtyInForm.toFixed(2)} KG → total ${totalWillBe.toFixed(2)} KG, max allowed ${maxAllowed.toFixed(2)} KG (Exceed by: ${exceedBy} KG).`,
+                message: `Exceeds the Sale Order by more than ${pct} %. Ordered ${orderedQty.toFixed(2)} KG, already dispatched ${alreadyDispatched.toFixed(2)} KG, total in dispatch ${totalItemQtyInForm.toFixed(2)} KG → total ${totalWillBe.toFixed(2)} KG, max allowed ${maxAllowed.toFixed(2)} KG (Exceed by: ${exceedBy} KG).`,
               };
             }
             if (totalWillBe < minAllowed && alreadyDispatched === 0) {
-              console.warn(`Dispatch below SO -10% (short by ${(minAllowed - totalWillBe).toFixed(2)} KG) — allowed.`);
+              console.warn(`Dispatch below SO -${pct}% (short by ${(minAllowed - totalWillBe).toFixed(2)} KG) — allowed.`);
             }
           }
         }
@@ -1311,7 +1449,8 @@ const DISPATCH_ISSUE_GODOWN_FIELD = {
   createEndpoint: "/api/setup/godowns",
   nameKeys: ["id", "godown"],
   valueKey: "id",
-  defaultValue: { value: "2", label: "2 - PLANT" },
+  defaultValue: setupGodownDefault("productionGodown"),
+  defaultGodown: "productionGodown", // Settings → Production setup
 };
 
 // Dispatch / Dispatch Edit carry quantities only: rate and GST % are set on
@@ -1875,12 +2014,14 @@ export const documentTotal = (entry) =>
 // rmk5. Shown read-only, and only when there is one.
 // The user's own paper-book number, kept next to the system number
 // (TransactionsMaster.manual_no; only a dispatch / GRN stores it).
-const MANUAL_DC_NO_FIELD = { name: "manual_no", label: "Manual DC No", type: "text", uppercase: true };
+// Dispatch Manual DC No / City / Route exist while Settings → Features
+// "dispatch.extraFields" is on (the server keeps stored values when it is off).
+const MANUAL_DC_NO_FIELD = { name: "manual_no", label: "Manual DC No", type: "text", uppercase: true, feature: "dispatch.extraFields" };
 const MANUAL_GRN_NO_FIELD = { name: "manual_no", label: "Manual GRN No", type: "text", uppercase: true };
 // Dispatch: the city the vehicle is taking the goods to (TransactionsMaster.city).
-const DISPATCH_CITY_FIELD = { name: "city", label: "City (Destination)", type: "text", uppercase: true, group: "logistics" };
+const DISPATCH_CITY_FIELD = { name: "city", label: "City (Destination)", type: "text", uppercase: true, group: "logistics", feature: "dispatch.extraFields" };
 // Dispatch: the route the vehicle takes (TransactionsMaster.route), shown under City.
-const DISPATCH_ROUTE_FIELD = { name: "route", label: "Route", type: "text", uppercase: true, group: "logistics" };
+const DISPATCH_ROUTE_FIELD = { name: "route", label: "Route", type: "text", uppercase: true, group: "logistics", feature: "dispatch.extraFields" };
 
 const LEGACY_DOC_FIELD = {
   name: "rmk5",
@@ -1932,6 +2073,15 @@ const grnLinesFromPo = async (poNo) => {
     })
     .filter((l) => l.qty > 0);
 
+  // Direct-rate items (grn.directRateByItem) start at the PO rate, editable.
+  if (lines.length && (await featureAsync("grn.directRateByItem"))) {
+    const direct = await grnDirectRateSet(lines.map((l) => l.itcd.value));
+    const rateOf = new Map((po.orderDetails || []).map((d) => [String(d.itcd), parseFloat(d.rate) || ""]));
+    for (const l of lines) {
+      l.direct_rate = direct.has(l.itcd.value);
+      if (l.direct_rate) l.rate = rateOf.get(l.itcd.value) ?? "";
+    }
+  }
   return { po, lines };
 };
 
@@ -1941,6 +2091,11 @@ const grnItemChanged = async (value, formData) => {
   const itcd = selVal(value);
   if (!itcd) return {};
   const out = { mm: itcd };
+  // Settings → Features "grn.directRateByItem": a ticked item gets a GRN Rate
+  if (await featureAsync("grn.directRateByItem")) {
+    out.direct_rate = (await grnDirectRateSet([itcd])).has(String(itcd));
+    out.rate = "";
+  }
   const poNo = selVal(formData?.po_no);
   if (poNo) {
     try {
@@ -1949,11 +2104,25 @@ const grnItemChanged = async (value, formData) => {
         (x) => String(x.itcd) === String(itcd),
       );
       if (d) out.po_qty = parseFloat(d.qty) || 0;
+      // A direct-rate item starts at the PO rate; the user may change it.
+      if (d && out.direct_rate) out.rate = parseFloat(d.rate) || "";
     } catch (error) {
       console.error("Error fetching PO line:", error);
     }
   }
   return out;
+};
+
+// Items whose GRN rate is typed on the GRN (item or category ticked) — a Set of itcd strings.
+const grnDirectRateSet = async (itcds) => {
+  const ids = [...new Set((itcds || []).map(String).filter(Boolean))];
+  if (!ids.length) return new Set();
+  try {
+    const res = await axios.get(`/api/forms/items/grn-direct-rate?itcds=${ids.join(",")}`);
+    return new Set((res.data?.itcds || []).map(String));
+  } catch {
+    return new Set();
+  }
 };
 
 // ── Invoiced status of a physical document ───────────────────────────────
@@ -2094,7 +2263,9 @@ const DISPATCH_UNIT_FIELD = {
   ],
   defaultValue: UNIT_KG,
   width: "90px",
-  readOnly: (line, master) => hasValue(master?.so_no),
+  // Litres switched off (Features "saleOrder.litreUnits"): no choice — KG,
+  // or LTR only where the Sale Order line already is (set by the item onChange).
+  readOnly: (line, master) => hasValue(master?.so_no) || featureNow("saleOrder.litreUnits") !== true,
   onChange: (value, line) => {
     const unit = isLitreUnit(value || line?.unit) ? UNIT_LTR : UNIT_KG;
     return {
@@ -2277,6 +2448,15 @@ const saleReturnItemChanged = async (value, formData) => {
     out.ltr_rate = it.data?.ltr_rate ?? null;
   } catch (error) {
     console.error("Error fetching item:", error);
+  }
+  // Return of an old dispatch: prefill the system-start cost rate (saleReturn.requireDispatchLink)
+  if (String(formData?.ref_dispatch_no ?? "").trim() && featureNow("saleReturn.requireDispatchLink")) {
+    try {
+      const r = await axios.get(`/api/voucher/sale-return-cost?start_rate_itcd=${itcd}`);
+      out.cost_rate = Number(r.data?.rate) > 0 ? Number(r.data.rate) : "";
+    } catch {
+      /* typed by the user */
+    }
   }
   const dispatchNo = selVal(formData?.dispatch_no);
   if (hasValue(dispatchNo)) {
@@ -2557,6 +2737,8 @@ export const VOUCHER_CONFIG = {
         // },
         // ],
       },
+      subAccountLineField,
+      taxLawLineField, // Settings → Features "tax.lineWht" (lib/tax/lineWht.js)
       { name: "invoice_no", label: "Invoice No", type: "text" },
       { name: "wht_rate", label: "WHT Rate", type: "number" },
       { name: "chno", label: "Cheque No", type: "text" },
@@ -2693,6 +2875,7 @@ export const VOUCHER_CONFIG = {
         // },
         // ],
       },
+      subAccountLineField,
       { name: "invoice_no", label: "Invoice No", type: "text" },
       { name: "wht_rate", label: "WHT Rate", type: "number" },
       { name: "chno", label: "Cheque No", type: "text" },
@@ -2904,6 +3087,8 @@ export const VOUCHER_CONFIG = {
         // },
         // ],
       },
+      subAccountLineField,
+      taxLawLineField, // Settings → Features "tax.lineWht" (lib/tax/lineWht.js)
       // { name: "invoice_no", label: "Invoice No", type: "text" },
       {
         name: "invoice_no",
@@ -3048,6 +3233,7 @@ export const VOUCHER_CONFIG = {
         // },
         // ],
       },
+      subAccountLineField,
       {
         name: "invoice_no",
         formName: "invoice_no",
@@ -3208,6 +3394,7 @@ export const VOUCHER_CONFIG = {
         // },
         // ],
       },
+      subAccountLineField,
       { name: "invoice_no", label: "Invoice No", type: "text" },
       { name: "narration1", label: "Narration1", type: "text" },
       {
@@ -5236,7 +5423,9 @@ export const VOUCHER_CONFIG = {
         nameKeys: ["dispatch_no", "invoice_no", "acno.acname"],
         // " - " keeps a picked label from being re-fetched (Form.jsx).
         valueKey: "dispatch_no",
-        required: true,
+        // Required on the form while "saleReturn.requireDispatchLink" is off (as
+        // before); on, the server requires it OR the Old Dispatch No below.
+        requiredBy: { key: "saleReturn.requireDispatchLink", value: false },
         lockInEdit: true,
         getPlaceholder: () => "Search dispatch no",
         onChange: async (value, formData) => {
@@ -5282,6 +5471,16 @@ export const VOUCHER_CONFIG = {
         required: true,
       },
       { name: "rmk4", label: "Vehicle No", type: "text", uppercase: true },
+      // A dispatch from before the system started (not in the system): its old
+      // number + the warehouse; lines carry their cost rate (saleReturn.requireDispatchLink).
+      {
+        name: "ref_dispatch_no",
+        label: "Old Dispatch No (before system start)",
+        type: "text",
+        feature: "saleReturn.requireDispatchLink",
+        featureKeep: (saved) => Boolean(saved?.master?.ref_dispatch_no),
+        disabled: (formData) => hasValue(selVal(formData?.dispatch_no)),
+      },
       LEGACY_DOC_FIELD,
       { name: "rmk", label: "Narration", type: "textarea", fullWidth: true },
     ],
@@ -5297,6 +5496,17 @@ export const VOUCHER_CONFIG = {
         valueKey: "itcd",
         required: true,
         onChange: async (value, line, allLines, formData) => saleReturnItemChanged(value, formData),
+      },
+      // Old dispatch only: the cost the goods come back at — the system-start
+      // rate (prefilled; the server sets it) or typed when the item has none.
+      {
+        name: "cost_rate",
+        label: "Cost Rate",
+        type: "number",
+        width: "110px",
+        feature: "saleReturn.requireDispatchLink",
+        featureKeep: (saved) => (saved?.lines || saved?.transactions || []).some?.((l) => l?.cost_rate != null),
+        readOnly: (line, master) => !String(master?.ref_dispatch_no ?? "").trim(),
       },
       { name: "batch_no", label: "Batch No", type: "text" },
       // The unit the dispatch was made in (KG / LTR).
@@ -7411,6 +7621,10 @@ export const VOUCHER_CONFIG = {
       {
         name: "itcd",
         label: "Product",
+        // showLineEdit: under the product, who last added / changed this
+        // line's qty or rate and when (OrderDetail.edited_by / edited_at /
+        // prev_qty / prev_rate, written by the order PUT) — read-only info.
+        showLineEdit: true,
         type: "select",
         options: "products",
         minWidth: "450px",
@@ -7427,7 +7641,11 @@ export const VOUCHER_CONFIG = {
             formData?.party_code?.value || formData?.party_code;
 
           if (!customerAcno) return "/api/forms/products?includeAll=false";
-          if (formData?.freeOfCost || formData?.trialProcess) return "/api/forms/products?includeAll=true";
+          // Settings → Features "saleOrder.priceListOnly": the customer's ticked
+          // price list on every order (Free of Cost / Trial included)
+          if ((formData?.freeOfCost || formData?.trialProcess) && !featureNow("saleOrder.priceListOnly")) {
+            return "/api/forms/products?includeAll=true";
+          }
 
           return `/api/forms/products?customer=${customerAcno}`;
         },
@@ -7490,11 +7708,14 @@ export const VOUCHER_CONFIG = {
             const fetchedRate = data.rate || 0;
             const fetcheddate_rate = data.dated || "";
 
+            // a new line takes the order's line type (line types on); Free of Cost / Trial → rate 0
+            const free = soLineFree(formData, line);
             return {
               mm: value,
-              rate: zeroRatesOn(formData) ? 0 : fetchedRate,
+              ...(trialLinesOn() ? { line_type: effectiveLineType(formData, line) } : {}),
+              rate: free ? 0 : fetchedRate,
               original_rate: fetchedRate,
-              st_rate: zeroRatesOn(formData) ? 0 : (line.st_rate || data.gst_rate || 0), // AUTO TAX RATE
+              st_rate: free ? 0 : (line.st_rate || data.gst_rate || 0), // AUTO TAX RATE
               original_st_rate: data.gst_rate || 0,
               // KG unless the user switches this line to LTR.
               unit: UNIT_KG,
@@ -7582,8 +7803,10 @@ export const VOUCHER_CONFIG = {
       // Qty (LTR) the figure the customer ordered and the one the rate prices;
       // Qty (KG) is then derived from the item's LTR Rate and is what will
       // move stock at dispatch. See lib/units/litres.js.
-      createUnitField(),
-      createQtyLtrField(),
+      // Trial / Rate Negotiation per line (Features: orders.trialLineBilling)
+      saleOrderLineTypeField(),
+      createUnitField(LITRE_FEATURE),
+      createQtyLtrField(LITRE_FEATURE),
       createQtyKgField(),
       {
         name: "rate",
@@ -7598,7 +7821,8 @@ export const VOUCHER_CONFIG = {
         // readOnly: (line, master) => !ratesEditableOn(master) || zeroRatesOn(master),
         // Rate is now editable on create and edit. Still locked on Free of
         // Cost / Trial Process orders, whose rates the API forces to 0.
-        readOnly: (line, master) => zeroRatesOn(master),
+        // With line types on: per line (Free of Cost order or a Trial line).
+        readOnly: (line, master) => soLineFree(master, line),
         subtitleField: "dated",
         subtitleLabel: "",
         subtitleValue: (v) => new Date(v).toLocaleDateString('en-US')
@@ -7653,6 +7877,10 @@ export const VOUCHER_CONFIG = {
         },
         readOnly: true,
       },
+      // Sale Order line → Production Plan (Features: saleOrder.planFromOrder):
+      // Plan Date + Plan Qty / Create (components/Category/SaleOrderPlanCell.jsx)
+      { name: "plan_date", label: "Plan Date", type: "saleOrderPlan", part: "date", feature: "saleOrder.planFromOrder" },
+      { name: "plan_qty", label: "Plan Qty", type: "saleOrderPlan", part: "qty", feature: "saleOrder.planFromOrder" },
     ],
     totals: {
       totalQty: {
@@ -8249,6 +8477,18 @@ export const VOUCHER_CONFIG = {
       // Packs × qty per pack; against a PO capped at its balance + 10%,
       // giving back this GRN's own saved qty on edit.
       createGrnQtyField({ label: "Qty (KG)" }),
+      // Rate typed on the GRN — only items / categories ticked "Rate entered on
+      // the GRN" (Settings → Features "grn.directRateByItem", lib/grn/directRate.js).
+      // Becomes the Purchase Invoicing default; the GRN still posts no amounts.
+      {
+        name: "rate",
+        label: "GRN Rate",
+        type: "number",
+        feature: "grn.directRateByItem",
+        featureKeep: (saved) => (saved?.lines || saved?.transactions || []).some?.((l) => Number(l?.rate) > 0),
+        readOnly: (line) => !line?.direct_rate && !(Number(line?.rate) > 0),
+        width: "110px",
+      },
       { name: "narration1", label: "Narration", type: "textarea" },
     ],
 
@@ -9305,6 +9545,9 @@ export const VOUCHER_CONFIG = {
           return null;
         },
       },
+      // Cost of ONE unit — each asset row carries it (rate × 1); the Fixed
+      // Asset Register takes it as the asset's cost (lib/fixedAssets/register.js).
+      { name: "rate", label: "Unit Cost", type: "number" },
       // Per-asset register fields: Make/Warranty/Life Pattern/Life Span.
       { name: "narration2", label: "Make", type: "text" },
       { name: "narration3", label: "Warranty Period", type: "text" },
@@ -9361,6 +9604,194 @@ export const VOUCHER_CONFIG = {
     allowPrintSaveButton: true,
     allowPrint: false,
     allowEdit: true,
+    allowView: true,
+    allowCreate: true,
+    allowCheck: false,
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // FIXED ASSET RELOCATION (tran_code 16) / DISPOSAL (tran_code 15) — ported
+  // from Accounting. Saved by lib/fixedAssets/voucher.js (called from the
+  // voucher route): one line per asset (party_name = asset number). Never
+  // edited or deleted: a relocation is history (post another), a disposal is
+  // reversed from Fixed Assets → Register. Relocation needs Settings →
+  // Features "fixedAssets.relocation"; a disposal posts its gain / loss
+  // journal while "fixedAssets.disposalPosting" is on.
+  // ──────────────────────────────────────────────────────────────────────────
+  fixedAssetRelocation: {
+    label: "Fixed Asset Relocation",
+    buttonText: "Create Fixed Asset Relocation",
+    ModalHeading: "Create Fixed Asset Relocation",
+    ModalHeadingEdit: "Fixed Asset Relocation",
+    tran_code: 16,
+    hasDeductionBlock: false,
+    masterFields: [
+      { name: "dated", label: "Date", type: "date", required: true },
+      { name: "rmk", label: "Reason / Narration", type: "textarea" },
+    ],
+    lineFields: [
+      {
+        name: "party_name",
+        label: "Asset No",
+        type: "select",
+        options: "assets",
+        apiEndpoint: "/api/fixed-assets/picker?status=IN_USE",
+        nameKeys: ["asset_label", "item", "holder"],
+        separator: [" — "],
+        valueKey: "asset_no",
+        required: true,
+        wide: true,
+        onChange: async (value) => {
+          const no = value?.value ?? value;
+          if (!no) return {};
+          try {
+            const res = await axios.get(`/api/fixed-assets/picker?asset_no=${encodeURIComponent(no)}`);
+            const a = (res.data?.data || [])[0];
+            return a ? { itcd: { value: String(a.itcd), label: a.item || "" } } : {};
+          } catch {
+            return {};
+          }
+        },
+      },
+      {
+        name: "itcd",
+        label: "Product",
+        type: "select",
+        options: "products",
+        apiEndpoint: "/api/setup/fixed_asset_items",
+        nameKeys: ["code", "item"],
+        separator: ["-"],
+        valueKey: "itcd",
+        readOnly: true,
+      },
+      {
+        name: "narration4",
+        label: "New Department",
+        type: "select",
+        options: "departments",
+        apiEndpoint: "/api/setup/departments",
+        nameKeys: ["dept_name"],
+        valueKey: "id",
+      },
+      {
+        name: "narration5",
+        label: "New Employee",
+        type: "select",
+        options: "employees",
+        apiEndpoint: (masterData, lineData) => {
+          const dept = lineData?.narration4?.value ?? lineData?.narration4 ?? "";
+          return dept ? `/api/setup/employees?departmentId=${dept}` : `/api/setup/employees`;
+        },
+        nameKeys: ["firstName", "surname"],
+        separator: [" "],
+        valueKey: "id",
+      },
+      {
+        name: "narration3",
+        label: "New Location",
+        type: "select",
+        options: "workLocations",
+        apiEndpoint: "/api/setup/work_locations",
+        nameKeys: ["location_name"],
+        valueKey: "id",
+      },
+    ],
+    tableFields: [
+      { name: "dated", label: "Date", type: "date" },
+      { name: "user_id", label: "Entered By", type: "text", options: true, value1: "user", value2: "name" },
+      { name: "rmk", label: "Narration", type: "text" },
+      { name: "status", label: "Status", type: "status" },
+    ],
+    allowDelete: false,
+    allowPrintSaveButton: true,
+    allowPrint: false,
+    allowEdit: false,
+    allowView: true,
+    allowCreate: true,
+    allowCheck: false,
+  },
+
+  fixedAssetDisposal: {
+    label: "Fixed Asset Disposal",
+    buttonText: "Create Fixed Asset Disposal",
+    ModalHeading: "Create Fixed Asset Disposal",
+    ModalHeadingEdit: "Fixed Asset Disposal",
+    tran_code: 15,
+    hasDeductionBlock: false,
+    masterFields: [
+      { name: "dated", label: "Date", type: "date", required: true },
+      {
+        name: "rmk1",
+        label: "Disposal Type",
+        type: "normalSelect",
+        options: [
+          { value: "SALE", label: "Sale" },
+          { value: "SCRAP", label: "Scrap" },
+        ],
+        defaultValue: { value: "SALE", label: "Sale" },
+        required: true,
+      },
+      {
+        // Receives the proceeds: a customer (sale) or the cash / bank account.
+        name: "pycd",
+        label: "Customer / Cash-Bank (proceeds)",
+        type: "select",
+        options: "accounts",
+        apiEndpoint: "/api/accounts/acno?group=customers,cash_bank",
+        nameKeys: ["acno", "acname"],
+        valueKey: "acno",
+      },
+      { name: "rmk", label: "Reason / Narration", type: "textarea" },
+    ],
+    lineFields: [
+      {
+        name: "party_name",
+        label: "Asset No",
+        type: "select",
+        options: "assets",
+        apiEndpoint: "/api/fixed-assets/picker?status=IN_USE",
+        nameKeys: ["asset_label", "item", "nbv_text"],
+        separator: [" — "],
+        valueKey: "asset_no",
+        required: true,
+        wide: true,
+        onChange: async (value) => {
+          const no = value?.value ?? value;
+          if (!no) return {};
+          try {
+            const res = await axios.get(`/api/fixed-assets/picker?asset_no=${encodeURIComponent(no)}`);
+            const a = (res.data?.data || [])[0];
+            return a ? { itcd: { value: String(a.itcd), label: a.item || "" } } : {};
+          } catch {
+            return {};
+          }
+        },
+      },
+      {
+        name: "itcd",
+        label: "Product",
+        type: "select",
+        options: "products",
+        apiEndpoint: "/api/setup/fixed_asset_items",
+        nameKeys: ["code", "item"],
+        separator: ["-"],
+        valueKey: "itcd",
+        readOnly: true,
+      },
+      // Proceeds for this asset (0 for a scrap with nothing received).
+      { name: "rate", label: "Proceeds", type: "number" },
+    ],
+    tableFields: [
+      { name: "dated", label: "Date", type: "date" },
+      { name: "user_id", label: "Entered By", type: "text", options: true, value1: "user", value2: "name" },
+      { name: "rmk1", label: "Type", type: "text" },
+      { name: "pycd", label: "Customer / Account", type: "text", options: true, value1: "acno", value2: "acname" },
+      { name: "status", label: "Status", type: "status" },
+    ],
+    allowDelete: false,
+    allowPrintSaveButton: true,
+    allowPrint: false,
+    allowEdit: false,
     allowView: true,
     allowCreate: true,
     allowCheck: false,
@@ -9486,6 +9917,8 @@ export const VOUCHER_CONFIG = {
         nameKey: "order_no",
         valueKey: "order_no",
         lockInEdit: true,
+        // Required while Features "dispatch.withoutSaleOrder" = refused
+        requiredBy: { key: "dispatch.withoutSaleOrder", value: "refused" },
         // Customer + the order's open lines; the godown is left alone.
         onChange: async (value, formData) => dispatchSaleOrderChanged(value, formData),
       }),
@@ -9715,8 +10148,9 @@ export const VOUCHER_CONFIG = {
       //     (lineData?.itcd?.value || lineData?.itcd) ? "Select batch" : "Select item first",
       //   visibility: { dependsOn: "itcd", condition: "truthy" },
       // },
-      // Optional, typed — same rule on Create and New / Edit Dispatch.
-      { name: "batch_no", label: "Batch No", type: "text" },
+      // Optional, typed — same rule on Create and New / Edit Dispatch;
+      // required while Features "dispatch.batchRequired" is on.
+      { name: "batch_no", label: "Batch No", type: "text", requiredBy: { key: "dispatch.batchRequired" } },
       {
         name: "no_of_pack",
         label: "No of Packs",
@@ -9915,6 +10349,7 @@ export const VOUCHER_CONFIG = {
         nameKey: "order_no",
         valueKey: "order_no",
         lockInEdit: false,
+        requiredBy: { key: "dispatch.withoutSaleOrder", value: "refused" },
         // Same as Create Dispatch: customer + open (non-closed) lines; the
         // godown is never overwritten.
         onChange: async (value, formData) => dispatchSaleOrderChanged(value, formData),
@@ -10131,11 +10566,12 @@ export const VOUCHER_CONFIG = {
       //     (lineData?.itcd?.value || lineData?.itcd) ? "Select batch" : "Select item first",
       //   visibility: { dependsOn: "itcd", condition: "truthy" },
       // },
-      // Typed, like Create Dispatch
+      // Typed, like Create Dispatch (required while "dispatch.batchRequired" is on)
       {
         name: "batch_no",
         label: "Batch No",
         type: "text",
+        requiredBy: { key: "dispatch.batchRequired" },
       },
       {
         name: "no_of_pack",
@@ -10879,7 +11315,9 @@ export const VOUCHER_CONFIG = {
         label: "Finished Good Item",
         type: "select",
         options: "products",
-        apiEndpoint: "/api/setup/items?ic_id=1",
+        // Items of the finished-goods categories of Settings → Production setup
+        // (never a fixed category id) — finishedCategoryIdsNow()
+        apiEndpoint: () => `/api/setup/items?ic_id=${finishedCategoryIdsNow().join(",")}`,
         createEndpoint: "/api/setup/items",
         nameKey: "item",
         valueKey: "itcd",
@@ -11228,7 +11666,8 @@ export const VOUCHER_CONFIG = {
         createEndpoint: "/api/setup/godowns",
         nameKeys: ["id", "godown"],
         valueKey: "id",
-        defaultValue: { value: "2", label: "2 - PLANT" },
+        defaultValue: setupGodownDefault("productionGodown"),
+        defaultGodown: "productionGodown", // Settings → Production setup
         required: true,
       },
 
@@ -11242,7 +11681,8 @@ export const VOUCHER_CONFIG = {
         nameKeys: ["id", "godown"],
         valueKey: "id",
         required: true,
-        defaultValue: { value: "1", label: "1-FACTORY" },
+        defaultValue: setupGodownDefault("planFromGodown"),
+        defaultGodown: "planFromGodown",
         validate: (value, masterData) => {
           if (value === masterData?.issued_by?.value) {
             return "Godown 'Required From' and 'Required By' cannot be the same.";
@@ -11418,6 +11858,16 @@ export const VOUCHER_CONFIG = {
       //     value: "SERVICE",
       //   },
       // },
+      // Lab's Nature (Features: production.labNature) — a change of a saved
+      // Nature goes through the approval rules on "Production Plan"
+      {
+        name: "nature",
+        label: "Nature",
+        type: "normalSelect",
+        options: PLAN_NATURE_OPTIONS,
+        feature: "production.labNature",
+        width: "170px",
+      },
       {
         name: "stock",
         label: "Stock",
@@ -11526,7 +11976,8 @@ export const VOUCHER_CONFIG = {
         createEndpoint: "/api/setup/godowns",
         nameKey: "godown",
         valueKey: "id",
-        defaultValue: { value: "2", label: "PLANT" },
+        defaultValue: setupGodownDefault("productionGodown"),
+        defaultGodown: "productionGodown", // Settings → Production setup
         required: true,
         lockInEdit: true,
       }),
@@ -11542,7 +11993,8 @@ export const VOUCHER_CONFIG = {
         valueKey: "id",
         required: true,
         lockInEdit: true,
-        defaultValue: { value: "1", label: "FACTORY" },
+        defaultValue: setupGodownDefault("planFromGodown"),
+        defaultGodown: "planFromGodown",
         validate: (value, masterData) => {
           if (value === masterData?.issued_by?.value) {
             return "Godown 'Required From' and 'Required By' cannot be the same.";
@@ -11729,6 +12181,18 @@ export const VOUCHER_CONFIG = {
       //     value: "SERVICE",
       //   },
       // },
+      // Lab's Nature (Features: production.labNature) — a change of a saved
+      // Nature goes through the approval rules on "Production Plan"
+      {
+        name: "nature",
+        label: "Nature",
+        type: "normalSelect",
+        options: PLAN_NATURE_OPTIONS,
+        feature: "production.labNature",
+        width: "170px",
+      },
+      // Process / Manufacturing line → Create Process Order with this plan picked
+      { name: "process_order_link", label: "Process Order", type: "planProcessOrder", feature: "production.labNature", readOnly: true },
       {
         name: "stock",
         label: "Stock",

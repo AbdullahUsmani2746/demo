@@ -12,13 +12,13 @@ import { employeeFilter, employeeName, hrRights, HR_PERMS, sessionEmployeeId } f
 import { loanActor } from "@/lib/hr/loans/access";
 import { hrRoute, jsonBody } from "@/lib/hr/route";
 import { activate, loanData, logEvent, thisMonth } from "@/lib/hr/loans/service";
-import { dueInMonth, LOAN_KINDS, LOAN_STATUS, outstandingOf, recoveredTotal } from "@/lib/hr/loans/schedule";
+import { dueInMonth, isRefundable, LOAN_KINDS, LOAN_STATUS, loanApprovalType, outstandingOf, recoveredTotal } from "@/lib/hr/loans/schedule";
 import { fmtMoney } from "@/lib/hr/salary/calc";
 import { createHrRequest } from "@/lib/hr/approvals";
 import { EMPLOYEE_SELECT, employeeLite } from "@/lib/hr/attendance/sheet";
 import { dayKeyOfDb } from "@/lib/hr/time";
 
-const ALL = [HR_PERMS.loanApply, HR_PERMS.loanView, HR_PERMS.loanManage, HR_PERMS.loanApprove];
+const ALL = [HR_PERMS.loanApply, HR_PERMS.loanView, HR_PERMS.loanManage, HR_PERMS.loanApprove, HR_PERMS.pfLoanApprove];
 
 export const GET = hrRoute(ALL, async (req, { session }) => {
   const sp = new URL(req.url).searchParams;
@@ -80,14 +80,19 @@ export const POST = hrRoute([HR_PERMS.loanApply, HR_PERMS.loanManage], async (re
     },
     include: { employee: { select: { firstName: true, middleName: true, surname: true } } },
   });
-  await logEvent(loan.id, "applied", `${fmtMoney(d.amount)} · ${fmtMoney(d.installment)} × ${d.count} from ${d.start_month}${d.reason ? ` — ${d.reason}` : ""}`, session.user.id);
-  const what = `${employeeName(loan.employee)} · ${LOAN_KINDS[d.kind].label} ${fmtMoney(d.amount)} · ${fmtMoney(d.installment)}/month from ${d.start_month}`;
+  const refundable = isRefundable(d.kind);
+  const plan = refundable ? `${fmtMoney(d.installment)} × ${d.count} from ${d.start_month}` : "not paid back";
+  await logEvent(loan.id, "applied", `${fmtMoney(d.amount)} · ${plan}${d.reason ? ` — ${d.reason}` : ""}`, session.user.id);
+  const what = `${employeeName(loan.employee)} · ${LOAN_KINDS[d.kind].label} ${fmtMoney(d.amount)}${refundable ? ` · ${fmtMoney(d.installment)}/month from ${d.start_month}` : ""}`;
+  // PF loans / withdrawals have their own approvers (hr.pfloan.approve).
+  const docType = loanApprovalType(d.kind);
+  const mayApprove = docType === "hrPfLoan" ? who.rights.pfLoanApprove : who.rights.loanApprove;
 
-  if (b.approve_now && !who.self && who.rights.loanApprove) {
+  if (b.approve_now && !who.self && mayApprove) {
     await activate(loan.id, { actor: session.user.id, note: "Approved when entered" });
     return NextResponse.json({ id: loan.id, status: "active", message: `#A-${loan.id} recorded and approved — ${what}.` }, { status: 201 });
   }
-  const request = await createHrRequest({ docType: "hrLoan", payload: { loan_id: loan.id }, summary: `${what}${d.reason ? ` — ${d.reason}` : ""}`, session });
+  const request = await createHrRequest({ docType, payload: { loan_id: loan.id }, summary: `${what}${d.reason ? ` — ${d.reason}` : ""}`, session });
   await prisma.hrLoan.update({ where: { id: loan.id }, data: { approval_request_id: request.id } });
   return NextResponse.json({ id: loan.id, status: "pending", message: `#A-${loan.id} sent for approval — ${what}.` }, { status: 201 });
 });

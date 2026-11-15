@@ -304,7 +304,10 @@ function LineGrid({ row, editable, draft, issues, totals, onLineChange, filesOf,
                   ) : null}
                 </td>
                 <td data-label="Rate" className={cn(TD, "text-right")}>
-                  {editable ? (
+                  {line.trial && editable ? (
+                    // Sent on Trial / Rate Negotiation: priced 0 here, billed later from its own part
+                    <SourceBadge source="trial" />
+                  ) : editable ? (
                     <div className="flex items-center justify-end gap-1.5 max-md:justify-start">
                       <SourceBadge source={e.edited ? "edited" : line.rate_source} />
                       <Input

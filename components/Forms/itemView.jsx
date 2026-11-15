@@ -224,6 +224,7 @@ export default function ItemView() {
             <Row label="Unit">{item.unit}</Row>
             <Row label="Import type">{importType}</Row>
             <Row label="Re-order level">{item.re_order}</Row>
+            <Row label="Minimum order qty">{item.minimum_order_quantity}</Row>
             <Row label="Wastage %">{item.wastage_percentage}</Row>
             <Row label="LTR rate">{item.ltr_rate}</Row>
             <Row label="Packing material">{nameOf(packingMaterials, item.packing_material_code, "itcd", "item")}</Row>

@@ -15,7 +15,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import SearchableSelect from "@/components/ui/searchable-select";
 import { cn } from "@/lib/utils";
-import { addMonths, LOAN_KINDS } from "@/lib/hr/loans/schedule";
+import { addMonths, isRefundable, LOAN_KINDS } from "@/lib/hr/loans/schedule";
+import { useFeatures } from "@/hooks/useFeatures";
 import { fmtMoney } from "@/lib/hr/salary/calc";
 import { api, BRAND_BTN } from "@/components/HR/shared";
 import { DIALOG, DIALOG_FOOTER } from "@/components/HR/payroll/ui";
@@ -29,6 +30,11 @@ export default function ApplyLoanDialog({ open, onClose, meta, forOthers = false
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  // PF loan / withdrawal only with features hr.providentFund + hr.pfLoans.
+  const features = useFeatures();
+  const pfOn = features.on("hr.providentFund") && features.on("hr.pfLoans");
+  const kinds = Object.entries(LOAN_KINDS).filter(([, v]) => !v.pf || pfOn);
+  const KIND_HINT = { ADVANCE: "Usually back next month", LOAN: "Paid back over months", PF_LOAN: "From your provident fund, paid back over months", PF_WDL: "From your provident fund, not paid back" };
 
   useEffect(() => {
     if (open) setF({ employee_id: "", kind: "ADVANCE", amount: "", installment: "", count: 1, start_month: addMonths(month, 1), reason: "", approve_now: false });
@@ -77,6 +83,7 @@ export default function ApplyLoanDialog({ open, onClose, meta, forOthers = false
   };
   if (!f) return null;
   const p = preview?.data;
+  const refundable = isRefundable(f.kind);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -94,11 +101,11 @@ export default function ApplyLoanDialog({ open, onClose, meta, forOthers = false
               </div>
             )}
             <div className="grid grid-cols-2 gap-2">
-              {Object.entries(LOAN_KINDS).map(([k, v]) => (
+              {kinds.map(([k, v]) => (
                 <button key={k} type="button" aria-pressed={f.kind === k} onClick={() => setF({ ...f, kind: k, count: k === "ADVANCE" ? 1 : Math.max(f.count, 6), installment: "" })}
                   className={cn("min-h-[44px] rounded-lg border px-3 py-2.5 text-left transition-colors", f.kind === k ? "border-primary bg-primary/5 ring-1 ring-primary" : "border-border hover:border-primary/40")}>
                   <p className="text-sm font-semibold text-foreground">{v.label}</p>
-                  <p className="text-[11px] text-muted-foreground">{k === "ADVANCE" ? "Usually back next month" : "Paid back over months"}</p>
+                  <p className="text-[11px] text-muted-foreground">{KIND_HINT[k]}</p>
                 </button>
               ))}
             </div>
@@ -107,24 +114,24 @@ export default function ApplyLoanDialog({ open, onClose, meta, forOthers = false
                 <Label className="text-xs text-muted-foreground">Amount (Rs)</Label>
                 <Input type="number" min={1} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} className="tabular-nums" autoFocus />
               </div>
-              <div className="space-y-1.5">
+              {refundable && <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">First recovery month</Label>
                 <Input type="month" min={month} value={f.start_month} onChange={(e) => setF({ ...f, start_month: e.target.value })} />
-              </div>
-              <div className="space-y-1.5">
+              </div>}
+              {refundable && <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">Over how many months</Label>
                 <Input type="number" min={1} value={f.count} onChange={(e) => setF({ ...f, count: e.target.value, installment: "" })} />
-              </div>
-              <div className="space-y-1.5">
+              </div>}
+              {refundable && <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">Monthly instalment</Label>
                 <Input type="number" min={1} value={f.installment !== "" ? f.installment : installment || ""} onChange={(e) => setF({ ...f, installment: e.target.value })} className="tabular-nums" />
-              </div>
+              </div>}
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Reason</Label>
               <Textarea rows={2} maxLength={500} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} placeholder="The approver sees it" />
             </div>
-            {forOthers && meta.rights.loanApprove && (
+            {forOthers && (LOAN_KINDS[f.kind]?.pf ? meta.rights.pfLoanApprove : meta.rights.loanApprove) && (
               <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-[#2f5139]/25 bg-[#edf2ee]/60 px-3 py-2.5">
                 <span className="text-sm text-foreground/90">Approve now <span className="block text-xs text-muted-foreground">Recorded as approved — no request goes to the inbox</span></span>
                 <Switch checked={f.approve_now} onCheckedChange={(v) => setF({ ...f, approve_now: v })} />
@@ -137,7 +144,12 @@ export default function ApplyLoanDialog({ open, onClose, meta, forOthers = false
               <p className="flex gap-2 text-sm text-red-700"><AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />{preview.error}</p>
             ) : p ? (
               <>
-                <p className="truncate text-2xl font-bold tabular-nums text-foreground">{fmtMoney(installment)}<span className="text-sm font-normal text-muted-foreground"> × {p.count}</span></p>
+                {p.pf && <p className="text-xs text-muted-foreground">PF balance {fmtMoney(p.pf.fund)} · {p.pf.percent}% limit · {fmtMoney(p.pf.available)} available</p>}
+                {refundable ? (
+                  <p className="truncate text-2xl font-bold tabular-nums text-foreground">{fmtMoney(installment)}<span className="text-sm font-normal text-muted-foreground"> × {p.count}</span></p>
+                ) : (
+                  <p className="truncate text-2xl font-bold tabular-nums text-foreground">{fmtMoney(Number(f.amount))}<span className="block text-xs font-normal text-muted-foreground">paid once — not recovered from salary</span></p>
+                )}
                 {p.gross ? <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Wallet className="h-3.5 w-3.5" />{((installment / p.gross) * 100).toFixed(0)}% of gross salary {fmtMoney(p.gross)}</p> : null}
                 <ul className="max-h-40 overflow-auto space-y-0.5 text-[11px] border-t border-primary/15 pt-2 tabular-nums">
                   {p.plan.map((r) => <li key={r.month} className="flex justify-between gap-2"><span>{r.month}</span><span>{fmtMoney(r.planned)} · left {fmtMoney(r.balance)}</span></li>)}

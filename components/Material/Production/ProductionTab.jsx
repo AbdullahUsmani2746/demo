@@ -212,7 +212,26 @@ const ProductionTab = () => {
     setShowModal(true);
   }, []);
 
+  // ?fromPlan=<plan no>&so=&itcd=&qty= — "Process Order" on a Production Plan
+  // line / the Pending Report (Features: production.labNature): opens Create
+  // Process Order with those picked (ProcessOrderForm `prefill`).
+  const [planPrefill, setPlanPrefill] = useState(null);
+  const urlFromPlan = urlParams?.get("fromPlan");
+  useEffect(() => {
+    const req_no = Number(urlFromPlan) || null;
+    if (!req_no) return;
+    setPlanPrefill({
+      req_no,
+      sale_ord_no: Number(urlParams.get("so")) || null,
+      itcd: Number(urlParams.get("itcd")) || null,
+      qty: Number(urlParams.get("qty")) || null,
+    });
+    openModal(MODAL_MODES.CREATE);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlFromPlan]);
+
   const closeModal = useCallback(() => {
+    setPlanPrefill(null);
     setShowModal(false);
     setModalMode(MODAL_MODES.CREATE);
     setEditingItem(null);
@@ -856,6 +875,7 @@ const ProductionTab = () => {
                 }
                 onCancel={closeModal}
                 isSubmitting={isCreating || isUpdating}
+                prefill={modalMode === MODAL_MODES.CREATE ? planPrefill : null}
               />
             </div>
           </div>

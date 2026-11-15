@@ -108,4 +108,6 @@ export const RATE_SOURCES = {
   original: { label: "Original", tone: "amber" },
   none: { label: "No rate", tone: "red" },
   edited: { label: "Edited", tone: "primary" },
+  // A dispatch line sent on Trial / Rate Negotiation (Features: orders.trialLineBilling)
+  trial: { label: "On trial · 0", tone: "amber" },
 };

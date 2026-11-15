@@ -2,9 +2,9 @@
 
 // components/Audit/AuditTimeline.jsx — the Audit Trail results: days, then entries;
 // adjacent entries from one save are boxed together ("One save · N changes").
-import { Bot, ChevronRight, Layers } from "lucide-react";
+import { Bot, ChevronRight, Info, Layers, Package, Repeat } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ACTION_META, fmtDayHeading, fmtShort, fmtTime, groupTimeline, humanize, initialsOf } from "./format";
+import { ACTION_META, fmtDayHeading, fmtShort, fmtTime, fmtValue, groupTimeline, humanize, initialsOf, isDiff, itemText, recordNo } from "./format";
 
 export function ActionChip({ action, className }) {
   const m = ACTION_META[action] ?? ACTION_META.update;
@@ -32,21 +32,102 @@ export function UserAvatar({ row, size = "md" }) {
 export const whoOf = (row) => (row.source === "system" || !row.user_id ? row.user_name || "System" : row.user_name || row.user_id);
 export const isChild = (row) => row.doc_model && row.doc_id != null && (row.doc_model !== row.model_name || String(row.doc_id) !== String(row.record_id));
 
+/** What the row is about: its item (code + name), account and Sale Order. */
+export function RowSubject({ row, className }) {
+  const { item, account, iso } = row;
+  if (!item && !account && !iso) return null;
+  return (
+    <p className={cn("mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs", className)}>
+      {item && (
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-md bg-[#800000]/[0.06] px-1.5 py-0.5 text-slate-800">
+          <Package className="h-3 w-3 shrink-0 text-[#800000]/70" aria-hidden="true" />
+          {item.code && <span className="shrink-0 font-semibold tabular-nums">{item.code}</span>}
+          <span className="min-w-0 truncate">{item.name ?? `Item ${item.itcd}`}</span>
+        </span>
+      )}
+      {account && (
+        <span className="min-w-0 max-w-full truncate text-slate-600">
+          <span className="font-medium">A/c</span> {account.name ?? account.acno}
+        </span>
+      )}
+      {iso && row.doc_model !== "OrderMaster" && (
+        <span className="shrink-0 text-slate-600">
+          <span className="font-medium">SO</span> <span className="tabular-nums">{iso}</span>
+        </span>
+      )}
+    </p>
+  );
+}
+
+/** The row in words (lib/audit/explain.js): what happened, why, and a re-save tag. */
+export function RowStory({ row, full = false }) {
+  if (!row.story) return null;
+  return (
+    <div className="mt-1.5 space-y-1">
+      {row.resave && (
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset",
+            row.resave.same ? "bg-slate-100 text-slate-600 ring-slate-300" : "bg-amber-50 text-amber-800 ring-amber-600/20",
+          )}
+        >
+          <Repeat className="h-3 w-3" aria-hidden="true" />
+          {row.resave.same ? "Re-saved · no change" : "Re-saved · changed"}
+        </span>
+      )}
+      <p className={cn("text-sm text-slate-800 [overflow-wrap:anywhere]", !full && "line-clamp-3", row.resave?.same && "text-slate-500")}>{row.story}</p>
+      {row.why && (
+        <p className="flex items-start gap-1 text-xs text-slate-500">
+          <Info className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+          {/* clamp the text, not the flex row (line-clamp sets its own display) */}
+          <span className={cn("min-w-0", !full && "line-clamp-2")}>
+            <span className="font-medium text-slate-600">Why: </span>
+            {row.why}
+          </span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 function DiffPreview({ row }) {
   if (row.action === "update" && Array.isArray(row.changes) && row.changes.length) {
-    const shown = row.changes.slice(0, 3);
-    const more = row.changes.length - shown.length;
+    const diffs = row.changes.filter(isDiff);
+    // { field, value } entries say which line it is (SO, Product) — not a change
+    const notes = row.changes.filter((c) => !isDiff(c) && c?.field !== "SO");
+    const shown = diffs.slice(0, 3);
+    const more = diffs.length - shown.length;
     return (
       <ul className="mt-1.5 flex flex-col gap-1 text-xs sm:flex-row sm:flex-wrap sm:gap-x-3">
+        {notes.map((c) => (
+          <li key={`n-${c.field}`} className="flex min-w-0 max-w-full items-baseline gap-1">
+            <span className="shrink-0 font-medium text-slate-600">{humanize(c.field)}:</span>
+            <span className="min-w-0 truncate text-slate-800">{fmtValue(c.value)}</span>
+          </li>
+        ))}
         {shown.map((c) => (
           <li key={c.field} className="flex min-w-0 max-w-full items-baseline gap-1">
             <span className="shrink-0 font-medium text-slate-600">{humanize(c.field)}:</span>
-            <span className="min-w-0 truncate text-red-700/80 line-through decoration-red-300">{fmtShort(c.old, 28)}</span>
+            <span className="min-w-0 truncate text-red-700/80 line-through decoration-red-300">{fmtShort(c.old, 28, c.old_label)}</span>
             <span className="shrink-0 text-slate-400" aria-label="changed to">→</span>
-            <span className="min-w-0 truncate font-medium text-emerald-700">{fmtShort(c.new, 28)}</span>
+            <span className="min-w-0 truncate font-medium text-emerald-700">{fmtShort(c.new, 28, c.new_label)}</span>
           </li>
         ))}
         {more > 0 && <li className="font-medium text-slate-500">+{more} more</li>}
+      </ul>
+    );
+  }
+  if (Array.isArray(row.changes) && row.changes.length && !row.snapshot) {
+    // An added / removed order line, listed as { field, value }
+    const notes = row.changes.filter((c) => !isDiff(c) && c?.field !== "SO").slice(0, 4);
+    return (
+      <ul className="mt-1.5 flex flex-col gap-1 text-xs sm:flex-row sm:flex-wrap sm:gap-x-3">
+        {notes.map((c) => (
+          <li key={c.field} className="flex min-w-0 max-w-full items-baseline gap-1">
+            <span className="shrink-0 font-medium text-slate-600">{humanize(c.field)}:</span>
+            <span className="min-w-0 truncate text-slate-800">{fmtValue(c.value)}</span>
+          </li>
+        ))}
       </ul>
     );
   }
@@ -68,7 +149,7 @@ function Entry({ row, onOpen, inBatch }) {
           "group flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:bg-slate-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#800000]/30 sm:px-4",
           inBatch && "sm:pl-5",
         )}
-        aria-label={`${ACTION_META[row.action]?.label ?? row.action} ${row.model_label} ${row.record_id} by ${whoOf(row)} at ${fmtTime(row.dated)} — open details`}
+        aria-label={`${ACTION_META[row.action]?.label ?? row.action} ${row.model_label} ${recordNo(row)} ${itemText(row.item)} by ${whoOf(row)} at ${fmtTime(row.dated)} — open details`}
       >
         <span className="hidden w-11 shrink-0 pt-1.5 text-xs font-medium tabular-nums text-slate-500 sm:block">{fmtTime(row.dated)}</span>
         <UserAvatar row={row} />
@@ -79,7 +160,7 @@ function Entry({ row, onOpen, inBatch }) {
             <span className="ml-auto text-xs tabular-nums text-slate-500 sm:hidden">{fmtTime(row.dated)}</span>
           </div>
           <p className="mt-0.5 min-w-0 text-sm text-slate-700">
-            <span className="font-medium">{row.model_label}</span> <span className="tabular-nums text-slate-500">#{row.record_id}</span>
+            <span className="font-medium">{row.model_label}</span> <span className="tabular-nums text-slate-500">{recordNo(row)}</span>
             {child && (
               <span className="text-slate-500">
                 {" "}
@@ -87,7 +168,8 @@ function Entry({ row, onOpen, inBatch }) {
               </span>
             )}
           </p>
-          <DiffPreview row={row} />
+          <RowSubject row={row} />
+          {row.story ? <RowStory row={row} /> : <DiffPreview row={row} />}
         </div>
         <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-slate-300 transition-colors group-hover:text-slate-500" aria-hidden="true" />
       </button>

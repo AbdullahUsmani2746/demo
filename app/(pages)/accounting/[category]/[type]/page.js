@@ -201,6 +201,22 @@ const CONFIG = {
       icon: TrendingUp,
       gradient: "from-primary to-primary",
     },
+    fixedAssetRelocation: {
+      label: "Fixed Asset Relocation",
+      totalText: "Total Relocations",
+      stats: ["total"],
+      apiPath: "fixedAssetRelocation",
+      icon: TrendingUp,
+      gradient: "from-primary to-primary",
+    },
+    fixedAssetDisposal: {
+      label: "Fixed Asset Disposal",
+      totalText: "Total Disposals",
+      stats: ["total"],
+      apiPath: "fixedAssetDisposal",
+      icon: TrendingUp,
+      gradient: "from-primary to-primary",
+    },
     serviceEntry: {
       label: "Service Entry",
       stats: ["total"],
@@ -305,14 +321,14 @@ const CONFIG = {
       icon: TrendingUp,
       gradient: "from-primary to-primary",
     },
-    dispatchTransfer:{
+    dispatchTransfer: {
       label: "Production Plan",
       stats: ["total"],
       apiPath: "requisition",
       icon: BarChart3,
       gradient: "from-primary to-primary",
     },
-    productionPlan:{
+    productionPlan: {
       label: "Production Plan",
       stats: ["total"],
       apiPath: "requisition",

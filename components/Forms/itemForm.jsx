@@ -41,6 +41,9 @@ import {
 } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { useFeatures } from "@/hooks/useFeatures";
+import { isFinishedCategory, isPackingCategory } from "@/lib/production/setupConfig";
 
 const fetchDropdownData = async (endpoint) => {
   const response = await fetch(endpoint);
@@ -195,6 +198,8 @@ export default function ItemForm() {
     customer_code: "",
     ltr_rate: "",
     re_order: "",
+    minimum_order_quantity: "",
+    grn_direct_rate: false,
     is_Card: false,
     alternate_id: "",
     unit: "KG",
@@ -313,6 +318,8 @@ export default function ItemForm() {
           customer_code: itemData.customer_code ? String(itemData.customer_code) : "",
           ltr_rate: itemData.ltr_rate !== null && itemData.ltr_rate !== undefined ? itemData.ltr_rate : "",
           re_order: itemData.re_order !== null && itemData.re_order !== undefined ? itemData.re_order : "",
+          minimum_order_quantity: itemData.minimum_order_quantity ?? "",
+          grn_direct_rate: itemData.grn_direct_rate === true,
           fineness: itemData.fineness || "",
           gloss: itemData.gloss || "",
           color_bulk: itemData.color_bulk || "",
@@ -346,7 +353,10 @@ export default function ItemForm() {
     if (firstFieldRef.current) firstFieldRef.current.focus();
   }, []);
 
-  const isPackingMaterialEnabled = React.useMemo(() => formData.ic_id === 1 || formData.ic_id === "1", [formData.ic_id]);
+  // Settings → Production setup: finished goods carry a packing material
+  const { setup } = useProductionSetup();
+  const features = useFeatures();
+  const isPackingMaterialEnabled = React.useMemo(() => isFinishedCategory(setup, formData.ic_id), [formData.ic_id, setup]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -462,6 +472,10 @@ export default function ItemForm() {
         customer_code: data.customer_code ? parseInt(data.customer_code) : null,
         ltr_rate: data.ltr_rate !== "" && data.ltr_rate !== null && data.ltr_rate !== undefined ? parseFloat(data.ltr_rate) : null,
         re_order: data.re_order !== "" && data.re_order !== null && data.re_order !== undefined ? parseInt(data.re_order) : null,
+        minimum_order_quantity:
+          data.minimum_order_quantity !== "" && data.minimum_order_quantity != null ? parseFloat(data.minimum_order_quantity) : null,
+        // Settings → Features "grn.directRateByItem": while off the tick is not sent (the stored one is kept)
+        grn_direct_rate: features.on("grn.directRateByItem") ? data.grn_direct_rate === true : undefined,
         alternate_id: data.alternate_id && String(data.alternate_id).trim() ? parseInt(String(data.alternate_id)) : null,
         packing_material_code: data.packing_material_code ? parseInt(data.packing_material_code) : undefined,
         valid_from: data.valid_from ? new Date(data.valid_from).toISOString() : null,
@@ -583,12 +597,12 @@ export default function ItemForm() {
   const packingMaterialOptions = useMemo(
     () =>
       packingMaterials
-        .filter((material) => material.ic_id === 4)
+        .filter((material) => isPackingCategory(setup, material.ic_id))
         .map((material) => ({
           value: String(material.itcd),
           label: material.item,
         })),
-    [packingMaterials],
+    [packingMaterials, setup],
   );
   const importTypeOptions = useMemo(
     () => [
@@ -853,9 +867,25 @@ export default function ItemForm() {
                 />
               </Field>
 
-              <Field label="Re-Order Level">
+              <Field label="Re-Order Level" hint="Stock below this is flagged (Material Procurement, BI)">
                 <Input name="re_order" type="number" value={formData.re_order} onChange={handleChange} placeholder="0" className={inputCls} />
               </Field>
+
+              <Field label="Minimum Order Qty" hint="Smallest quantity to order (Material Procurement)">
+                <Input name="minimum_order_quantity" type="number" step="0.01" min="0" value={formData.minimum_order_quantity} onChange={handleChange} placeholder="0" className={inputCls} />
+              </Field>
+
+              {features.on("grn.directRateByItem") && (
+                <Field label="Rate entered on the GRN" hint="The GRN rate, not the PO rate, is invoiced">
+                  <label className="flex h-10 cursor-pointer items-center justify-between gap-3 rounded-lg border border-input bg-background px-3">
+                    <span className="text-sm text-muted-foreground">{formData.grn_direct_rate ? "Yes" : "No (or as its category)"}</span>
+                    <Switch
+                      checked={formData.grn_direct_rate === true}
+                      onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, grn_direct_rate: checked }))}
+                    />
+                  </label>
+                </Field>
+              )}
 
               <Field label="Wastage %">
                 <Input name="wastage_percentage" type="number" step="0.01" min="0" max="100" value={formData.wastage_percentage} onChange={handleChange} placeholder="0.00" className={inputCls} />

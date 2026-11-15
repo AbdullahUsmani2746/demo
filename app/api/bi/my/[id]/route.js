@@ -9,6 +9,7 @@ import { bi, biJson, routeId } from "@/lib/bi/http";
 import { BiError, runQuestion } from "@/lib/bi/engine";
 import { canViewDashboard, allowedDatasets, layoutQuestionIds, readDashFilters } from "@/lib/bi/access";
 import { datasetByKey } from "@/lib/bi/datasets";
+import { enabledDashFilters, publicDashFilters } from "@/lib/bi/dashFilters";
 import { isValidPeriod } from "@/lib/bi/periods";
 import { resultLabel } from "@/lib/bi/followups";
 
@@ -69,7 +70,9 @@ export const GET = guard(
     // Fixed periods and picked dates ("custom:2026-11-01:2026-11-12") — lib/bi/periods.js
     const period = asked && isValidPeriod(asked) ? asked : dashboard.default_period || "mtd";
     const refresh = url.searchParams.get("refresh") === "1";
-    const filters = readDashFilters(url, dashboard.layout);
+    // Built-in filters switched on (Book, Item Category, Series — lib/bi/dashFilters.js)
+    const builtin = await enabledDashFilters();
+    const filters = readDashFilters(url, dashboard.layout, builtin);
 
     const ids = layoutQuestionIds(dashboard.layout);
     const [questions, allowed] = await Promise.all([
@@ -115,6 +118,7 @@ export const GET = guard(
       dashboard: { id: dashboard.id, name: dashboard.name, description: dashboard.description, layout: dashboard.layout, default_period: dashboard.default_period },
       period,
       filters,
+      builtinFilters: publicDashFilters(builtin),
       results,
       generatedAt: new Date().toISOString(),
     });

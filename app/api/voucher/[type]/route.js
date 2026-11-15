@@ -5,6 +5,7 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { setAuditActor } from '@/lib/audit/context'
 import { reserveAssetNumbers } from '@/app/api/assets/generate-asset-no/route'
+import { FIXED_ASSET_TRAN_CODES, saveFixedAssetVoucher, registerGrnAssets, fixedAssetDocumentError, faErrorBody } from '@/lib/fixedAssets/voucher'
 import {
   isLitreUnit,
   resolveLineQuantities,
@@ -63,6 +64,24 @@ import { documentLabel } from "@/lib/periodLockCatalog";
 import { guardedSave } from "@/lib/voucher/saveGuard";
 import { approvalGate, runApprovedRequest } from "@/lib/approvals/rules";
 import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
+import { feature } from "@/lib/features/server";
+import { markGrnDirectRates } from "@/lib/grn/directRate";
+import { saleReturnLinkError } from "@/lib/saleReturns/dispatchLink";
+import { applyLineWht } from "@/lib/tax/lineWht";
+import { allocateOrderLines } from "@/lib/orders/lineAllocation";
+import { stampDispatchLineTypes, trialDispatchLockError } from "@/lib/dispatch/trialBilling";
+import {
+  stripExtraFields,
+  withoutSaleOrderError,
+  batchRequiredError,
+  dispatchLitreError,
+  overDispatchError,
+  overDispatchBand,
+  packingConsumptionOn,
+} from "@/lib/dispatch/dispatchChecks";
+import { applySubAccounts, cleanSubAccount, SUB_ACCOUNT_TRAN_CODES } from "@/lib/vouchers/subAccounts";
+// Features: dispatch.requirePostedProcessOrder / plan links on dispatch lines
+import { dispatchReadyError, stampDispatchPlanLinks } from "@/lib/production/planNature";
 import { attachEnteredBy, ENTERED_BY_USER_SELECT, userDisplayName } from "@/lib/audit/enteredBy";
 import {
   withoutGodownId,
@@ -377,8 +396,20 @@ const ALLOWED_LINE_FIELDS = new Set([
   "wht_rate", "st_rate", "godown", "invoice_no", "sub_tran_id", "currency",
   "gross_amount", "fc_amount", "no_of_pack", "qty_per_pack", "returnable",
   "st_amount", "additional_tax",
+  // Sale return of an old dispatch: its cost rate (saleReturn.requireDispatchLink,
+  // lib/saleReturns/dispatchLink.js). Payment / receipt line tax law (tax.lineWht).
+  "cost_rate", "tax_law_code",
+  // Receipt / payment / journal line Sub Account (feature "vouchers.subAccounts",
+  // settled by applySubAccounts in lib/vouchers/subAccounts.js before mapping).
+  "sub_account",
   // Files on the line (URLs). A save recreates the lines, so they ride along.
   "attachments",
+  // Dispatch line: TRIAL / RATE_NEG of its Sale Order line (orders.trialLineBilling).
+  // Set only by the server (stampDispatchLineTypes) — what a client sends is dropped.
+  "line_type",
+  // Dispatch line: Production Plan / Process Order it came from — set only by
+  // the server (stampDispatchPlanLinks, lib/production/planNature.js).
+  "plan_no", "process_order_no",
   // ack_qty (acknowledged qty) is deliberately NOT here: only Invoicing
   // (lib/invoicing/core.js) writes it. Saving / editing a document recreates
   // its lines, so an acknowledgement made against the old qty is dropped
@@ -406,6 +437,15 @@ const RATE_DEFERRED_TYPES = new Set([
 
 // Dispatch-only behaviour: issue godown, packing consumption, produce-on-dispatch BOM.
 const DISPATCH_TYPES = new Set(["dispatch", "dispatchEdit"]);
+
+// Transactions.line_type (a dispatch line's trial type) is set only by
+// stampDispatchLineTypes — never taken from the request.
+// The same for plan_no / process_order_no (stampDispatchPlanLinks).
+const dropLineType = (line) => {
+  if (!line || typeof line !== "object") return line;
+  const { line_type, plan_no, process_order_no, ...rest } = line;
+  return rest;
+};
 
 // An invoiced physical document (invoice_no set, or imported 'L' history) is
 // locked: editing or deleting it would strip the pricing and the ledger rows
@@ -752,7 +792,9 @@ function mapLine(line, tran_id, tran_code, itemAccountMap, { deferred = false } 
     const pricedQty = pricedQtyOf(line);
 
     if (deferred) {
-      base.rate = 0;
+      // GRN direct rate (grn.directRateByItem, lib/grn/directRate.js): the
+      // typed rate is kept as the invoicing default — still no amounts.
+      base.rate = line.__directRate ? Math.max(0, parseOptionalFloat(line.rate) || 0) : 0;
       base.st_rate = 0;
       base.damt = 0;
       base.camt = 0;
@@ -769,6 +811,10 @@ function mapLine(line, tran_id, tran_code, itemAccountMap, { deferred = false } 
       base.camt = pricedQty * parseOptionalFloat(line.rate);
     }
   }
+
+  // Sub Account: receipt / payment / journal only (lib/vouchers/subAccounts.js)
+  if (SUB_ACCOUNT_TRAN_CODES.has(tran_code)) base.sub_account = cleanSubAccount(line.sub_account);
+  else delete base.sub_account;
 
   delete base.type;
   base.attachments = cleanAttachments(line.attachments);
@@ -789,6 +835,7 @@ function mapDeduction(deduction, tran_id) {
     ccno: parseOptionalInt(deduction.ccno?.value) || null,
     currency: parseOptionalInt(deduction.currency),
     invoice_no: deduction.invoice_no?.value || null,
+    sub_account: cleanSubAccount(deduction.sub_account),
   };
   return filterFields(base, ALLOWED_LINE_FIELDS);
 }
@@ -949,7 +996,9 @@ async function checkOrderStatus(masterData) {
 
     if (!orderNo) return;
 
-    const TOLERANCE = 0.10; // ±10%
+    // ± band (Features: dispatch.overDispatchTolerance, SMS 10 %): a line is
+    // fully dispatched once within it of the ordered qty.
+    const TOLERANCE = await overDispatchBand();
 
     // Order Master
     const orderMaster = await prisma.orderMaster.findUnique({
@@ -969,21 +1018,21 @@ async function checkOrderStatus(masterData) {
 
     console.log("Order:", orderNo);
 
-    // Har order detail check karo
-    for (const detail of orderMaster.orderDetails) {
+    // Quantity moved per item against this order (same rows as before), split
+    // over the order's lines of that item in line order (lib/orders/lineAllocation.js)
+    // — with the same item on two lines, each used to get the whole total.
+    const issuedPerItem = new Map();
+    for (const itcd of new Set(orderMaster.orderDetails.map((d) => d.itcd).filter((v) => v != null))) {
       const issued = await prisma.transactions.aggregate({
-        where: {
-          itcd: detail.itcd,
-          transactionsMaster: {
-            so_no: orderNo,
-          },
-        },
-        _sum: {
-          qty: true,
-        },
+        where: { itcd, transactionsMaster: { so_no: orderNo } },
+        _sum: { qty: true },
       });
+      issuedPerItem.set(Number(itcd), issued._sum.qty || 0);
+    }
+    const issuedPerLine = allocateOrderLines(orderMaster.orderDetails, issuedPerItem);
 
-      const issuedQty = issued._sum.qty || 0;
+    for (const detail of orderMaster.orderDetails) {
+      const issuedQty = issuedPerLine.get(detail.id) || 0;
       const orderQty = detail.qty || 0;
 
       const minQty = orderQty * (1 - TOLERANCE);
@@ -1268,6 +1317,9 @@ export const POST = guardBy(
     // An amount without an account is refused before it can be held for approval
     const accountError = bodyAccountError(body, tran_code);
     if (accountError) return NextResponse.json({ message: accountError }, { status: 422 });
+    // …and so is a missing / unknown Sub Account (createVoucher repeats the check)
+    const subAccountError = await applySubAccounts({ tranCode: tran_code, lines: body.lines, deductions: body.deductions });
+    if (subAccountError) return NextResponse.json({ message: subAccountError }, { status: 422 });
 
     const held = await approvalGate({ type, tranCode: tran_code, action: "create", body, session: ctx.session });
     if (held) return held;
@@ -1306,6 +1358,28 @@ async function createVoucher(req, { params, actingSession = null }) {
     const { master, deductions = [] } = body;
     let { lines } = body;
 
+    // Settings → Features (lib/features/catalog.js). Switched off = the request
+    // cannot use the flow, whatever a screen sends.
+    if (DISPATCH_TYPES.has(type) && !(await feature("dispatch.produceOnDispatch"))) {
+      lines = lines.map(({ materials, ...line }) => line); // a dispatch takes finished goods in stock only
+    }
+    // A line's trial type is the server's to set (stampDispatchLineTypes below)
+    lines = lines.map(dropLineType);
+    if (DISPATCH_TYPES.has(type)) await stripExtraFields(master); // dispatch.extraFields off → not written
+    // Ported from Accounting (Settings → Features): GRN direct rate, sale return
+    // dispatch link + old-dispatch cost rate, withholding tax per line.
+    await markGrnDirectRates(lines, { tranCode: tran_code });
+    if (tran_code === 10) {
+      const linkError = await saleReturnLinkError(master, lines);
+      if (linkError) return NextResponse.json({ message: linkError }, { status: 422 });
+    }
+    const whtError = await applyLineWht({ tranCode: tran_code, lines, deductions });
+    if (whtError) return NextResponse.json({ message: whtError }, { status: 422 });
+    if (!(await feature("documents.servicesPanel"))) delete body.services; // no services booked from the document
+    // Sub Accounts (feature "vouchers.subAccounts"): off → none written; on → checked, and required where set up
+    const subAccountError = await applySubAccounts({ tranCode: tran_code, lines, deductions });
+    if (subAccountError) return NextResponse.json({ message: subAccountError }, { status: 422 });
+
     const isLocked = await checkAccountLock(master?.pycd);
 
     if (isLocked) {
@@ -1320,6 +1394,12 @@ async function createVoucher(req, { params, actingSession = null }) {
     const lockError = await checkPeriodLock(master?.dated, tran_code, { action: "create" });
     if (lockError) {
       return NextResponse.json({ message: lockError }, { status: 422 });
+    }
+
+    // Fixed Asset Disposal (15) / Relocation (16): lib/fixedAssets/voucher.js
+    if (FIXED_ASSET_TRAN_CODES.has(tran_code)) {
+      const fa = await saveFixedAssetVoucher({ tran_code, body, session });
+      return NextResponse.json(fa.body, { status: fa.status });
     }
 
     delete master.orderDetails;
@@ -1337,6 +1417,17 @@ async function createVoucher(req, { params, actingSession = null }) {
     const soPendingError = await pendingSaleOrderError(tran_code, cleanMaster.so_no);
     if (soPendingError) {
       return NextResponse.json({ message: soPendingError }, { status: 422 });
+    }
+
+    // Settings → Features on a dispatch (lib/dispatch/dispatchChecks.js)
+    if (DISPATCH_TYPES.has(type)) {
+      const featureError =
+        (await withoutSaleOrderError(cleanMaster.so_no)) ||
+        (await batchRequiredError(lines)) ||
+        (await dispatchLitreError(lines, { soNo: cleanMaster.so_no })) ||
+        // Process / Manufacturing plan line without a posted Process Order, or not marked by the Lab
+        (await dispatchReadyError({ soNo: cleanMaster.so_no, lines }));
+      if (featureError) return NextResponse.json({ message: featureError }, { status: 422 });
     }
 
     const { withoutGodown, error: withoutGodownError } = await applyWithoutGodown(tran_code, cleanMaster);
@@ -1363,7 +1454,8 @@ async function createVoucher(req, { params, actingSession = null }) {
     // this dispatch (lib/dispatch/packingConsumption.js). Short stock follows
     // the stock check policy "packing" (Settings → Stock checking).
     // Nothing is packed for a Despatch Without Godown — no consumption.
-    const packing = DISPATCH_TYPES.has(type) && !withoutGodown ? packingNeeds(lines) : new Map();
+    // Settings → Features "dispatch.packingConsumption" off → none for a new dispatch.
+    const packing = DISPATCH_TYPES.has(type) && !withoutGodown && (await packingConsumptionOn()) ? packingNeeds(lines) : new Map();
     const warnings = [];
     if (packing.size) {
       const packingLockError = await checkPeriodLock(cleanMaster.dated, 7, { action: "create" });
@@ -1398,6 +1490,18 @@ async function createVoucher(req, { params, actingSession = null }) {
         );
       }
       lines = unitLines;
+    }
+
+    if (DISPATCH_TYPES.has(type)) {
+      // Over the Sale Order by more than the band (dispatch.overDispatchTolerance)
+      const overError = await overDispatchError({ soNo: cleanMaster.so_no, lines });
+      if (overError) return NextResponse.json({ message: overError }, { status: 422 });
+      // Each line remembers its Sale Order line's Trial / Rate Negotiation type
+      lines = await stampDispatchLineTypes({
+        soNo: cleanMaster.so_no, lines, enabled: await feature("orders.trialLineBilling"),
+      });
+      // Plan No / Process Order No of each line's Sale Order item
+      lines = await stampDispatchPlanLinks({ soNo: cleanMaster.so_no, lines });
     }
 
     // Stock check policy (Settings → Stock checking, lib/stock/checkStock.js)
@@ -1498,11 +1602,19 @@ async function createVoucher(req, { params, actingSession = null }) {
           data: [...expandedLines, ...mappedDeductions],
         });
 
-        return createdMaster;
+        // Feature "fixedAssets.autoRegisterFromGrn": the units join the
+        // Fixed Asset Register (+ capitalisation journal) in this same save.
+        const registration = await registerGrnAssets(tx, createdMaster.tran_id, session);
+        return { ...createdMaster, registration };
+      }, { timeout: 60_000, maxWait: 20_000 }).catch((error) => {
+        const known = faErrorBody(error);
+        if (known) return { refused: known };
+        throw error;
       });
+      if (faMasterData.refused) return NextResponse.json(faMasterData.refused.body, { status: faMasterData.refused.status });
 
       return NextResponse.json(
-        { message: "Voucher updated", voucherId: faMasterData.tran_id, vrNo: faMasterData.vr_no, grnNo: faMasterData.grn_no, dispatchNo: faMasterData.dispatch_no },
+        { message: "Voucher updated", voucherId: faMasterData.tran_id, vrNo: faMasterData.vr_no, grnNo: faMasterData.grn_no, dispatchNo: faMasterData.dispatch_no, registration: faMasterData.registration },
         { status: 201 }
       );
     }
@@ -1710,6 +1822,8 @@ export const PUT = guardBy(
         (await documentScopeError(ctx.session, tran_code, stored)) ||
         (await documentScopeError(ctx.session, tran_code, body.master, body.lines));
       if (storedScopeError) return NextResponse.json({ message: storedScopeError }, { status: 403 });
+      const subAccountError = await applySubAccounts({ tranCode: tran_code, lines: body.lines, deductions: body.deductions, storedTranId: tranId });
+      if (subAccountError) return NextResponse.json({ message: subAccountError }, { status: 422 });
       const held = await approvalGate({
         type,
         tranCode: tran_code,
@@ -1744,7 +1858,7 @@ async function updateVoucher(req, { params, actingSession = null }) {
     const storedVoucher = putTranId
       ? await prisma.transactionsMaster.findUnique({
           where: { tran_id: putTranId },
-          select: { tran_code: true, dated: true, invoice_no: true, invoice_series: true, vendor_bill_no: true, godown: true, godown2: true, pycd: true, rmk1: true, rmk4: true },
+          select: { tran_code: true, dated: true, invoice_no: true, invoice_series: true, vendor_bill_no: true, godown: true, godown2: true, pycd: true, rmk1: true, rmk4: true, so_no: true, dispatch_no: true, dispatch_part: true },
         })
       : null;
     if (putTranId && !storedVoucher) {
@@ -1754,6 +1868,12 @@ async function updateVoucher(req, { params, actingSession = null }) {
     if (mismatchError) return NextResponse.json({ message: mismatchError }, { status: 422 });
     const autoError = autoVoucherError(storedVoucher);
     if (autoError) return NextResponse.json({ message: autoError }, { status: 422 });
+    // Fixed assets: a registered GRN, a disposal, a relocation (lib/fixedAssets/voucher.js)
+    const faDocError = await fixedAssetDocumentError(storedVoucher, putTranId);
+    if (faDocError) return NextResponse.json({ message: faDocError }, { status: 422 });
+    // A trial billing part, or a dispatch whose trial items were billed on parts
+    const trialLockError = await trialDispatchLockError(storedVoucher);
+    if (trialLockError) return NextResponse.json({ message: trialLockError }, { status: 422 });
     const putLockError = await checkPeriodLock(
       [storedVoucher?.dated, putBody?.master?.dated],
       tran_code,
@@ -1768,9 +1888,28 @@ async function updateVoucher(req, { params, actingSession = null }) {
     if (validationError) {
       return NextResponse.json({ message: validationError }, { status: 400 });
     }
+    // Settings → Features: services panel off → the edit leaves linked service
+    // invoices as they are. (Produce on dispatch switched off applies to new
+    // dispatches; an edit keeps the materials the dispatch was saved with.)
+    if (!(await feature("documents.servicesPanel"))) delete body.services;
 
     const { master, deductions = [] } = body;
     let { lines } = body;
+    // A line's trial type is the server's to set (stampDispatchLineTypes below)
+    lines = lines.map(dropLineType);
+    // dispatch.extraFields off → Manual DC No / City / Route left as stored
+    if (DISPATCH_TYPES.has(type)) await stripExtraFields(master);
+    // Ported from Accounting (Settings → Features) — see createVoucher.
+    await markGrnDirectRates(lines, { tranCode: tran_code, storedTranId: putTranId });
+    if (tran_code === 10) {
+      const linkError = await saleReturnLinkError(master, lines, { storedTranId: putTranId });
+      if (linkError) return NextResponse.json({ message: linkError }, { status: 422 });
+    }
+    const whtError = await applyLineWht({ tranCode: tran_code, lines, deductions, isEdit: true });
+    if (whtError) return NextResponse.json({ message: whtError }, { status: 422 });
+    // Sub Accounts: off → a line keeps only the sub account it was saved with
+    const subAccountError = await applySubAccounts({ tranCode: tran_code, lines, deductions, storedTranId: putTranId });
+    if (subAccountError) return NextResponse.json({ message: subAccountError }, { status: 422 });
 
     const isLocked = await checkAccountLock(master?.pycd);
 
@@ -1821,6 +1960,18 @@ async function updateVoucher(req, { params, actingSession = null }) {
       return NextResponse.json({ message: soPendingError }, { status: 422 });
     }
 
+    // Settings → Features on a dispatch, as on create — what the stored
+    // dispatch already had may stay (lib/dispatch/dispatchChecks.js)
+    if (DISPATCH_TYPES.has(type)) {
+      const featureError =
+        (await withoutSaleOrderError(cleanMaster.so_no, storedVoucher)) ||
+        (await batchRequiredError(lines, tran_id)) ||
+        (await dispatchLitreError(lines, { soNo: cleanMaster.so_no, tranId: tran_id })) ||
+        // items the stored dispatch already had are not refused
+        (await dispatchReadyError({ soNo: cleanMaster.so_no, lines, tranId: tran_id }));
+      if (featureError) return NextResponse.json({ message: featureError }, { status: 422 });
+    }
+
     const { withoutGodown, error: withoutGodownError } = await applyWithoutGodown(tran_code, cleanMaster);
     if (withoutGodownError) {
       return NextResponse.json({ message: withoutGodownError }, { status: 422 });
@@ -1859,7 +2010,10 @@ async function updateVoucher(req, { params, actingSession = null }) {
     // this dispatch (lib/dispatch/packingConsumption.js). Short stock follows
     // the stock check policy "packing" (Settings → Stock checking).
     // Nothing is packed for a Despatch Without Godown — no consumption.
-    const packing = DISPATCH_TYPES.has(type) && !withoutGodown ? packingNeeds(lines) : new Map();
+    // "dispatch.packingConsumption" off → only a dispatch that already has its
+    // automatic packing issue keeps it in step (packingConsumptionOn).
+    const packingOn = DISPATCH_TYPES.has(type) && !withoutGodown && (await packingConsumptionOn(Number(tran_id)));
+    const packing = packingOn ? packingNeeds(lines) : new Map();
     const warnings = [];
     if (packing.size) {
       const packingLockError = await checkPeriodLock(cleanMaster.dated, 7, { action: "update" });
@@ -1891,6 +2045,17 @@ async function updateVoucher(req, { params, actingSession = null }) {
         );
       }
       lines = unitLines;
+    }
+
+    if (DISPATCH_TYPES.has(type)) {
+      const overError = await overDispatchError({ soNo: cleanMaster.so_no, lines, excludeTranId: Number(tran_id) });
+      if (overError) return NextResponse.json({ message: overError }, { status: 422 });
+      // An edit keeps the trial type each item was first dispatched with
+      lines = await stampDispatchLineTypes({
+        soNo: cleanMaster.so_no, tranId: Number(tran_id), lines, enabled: await feature("orders.trialLineBilling"),
+      });
+      // An edit keeps each item's Plan No / Process Order No
+      lines = await stampDispatchPlanLinks({ soNo: cleanMaster.so_no, tranId: Number(tran_id), lines });
     }
 
     // Stock check policy, as on create; the voucher's own saved lines are
@@ -2086,9 +2251,15 @@ export const DELETE = guardBy(
 
     const autoError = autoVoucherError(master);
     if (autoError) return NextResponse.json({ message: autoError }, { status: 422 });
+    const faDocError = await fixedAssetDocumentError(master, tran_id);
+    if (faDocError) return NextResponse.json({ message: faDocError }, { status: 422 });
 
     const invoicedError = invoicedDocumentError(master, type);
     if (invoicedError) return NextResponse.json({ message: invoicedError }, { status: 422 });
+
+    // A trial billing part, or a dispatch whose trial items were billed on parts
+    const trialLockError = await trialDispatchLockError(master);
+    if (trialLockError) return NextResponse.json({ message: trialLockError }, { status: 422 });
 
     // A GRN / dispatch keeps its service invoices — they are removed first.
     const servicesError = await documentServicesDeleteError(tran_id, tran_code);

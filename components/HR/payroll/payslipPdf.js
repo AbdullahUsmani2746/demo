@@ -1,6 +1,8 @@
 // components/HR/payroll/payslipPdf.js — payslips as a PDF (one A4 page each).
 // Browser only: jspdf + jspdf-autotable are loaded when a payslip is printed.
 
+import { LOAN_KINDS } from "@/lib/hr/loans/schedule";
+
 const money = (n) => (Number(n) || 0).toLocaleString("en-PK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const BRAND = [128, 0, 0];
 
@@ -48,8 +50,9 @@ function page(doc, autoTable, { company, month, slip }) {
   const ded = [];
   for (const x of d.deductions) if (x.amount) ded.push([x.name, money(x.amount)]);
   if (d.eobi.employee) ded.push(["EOBI", money(d.eobi.employee)]);
+  if (d.pf?.employee) ded.push(["Provident fund", money(d.pf.employee)]);
   if (d.tax.month) ded.push(["Income tax", money(d.tax.month)]);
-  for (const l of d.loans) if (l.amount) ded.push([`${l.kind === "LOAN" ? "Loan" : "Advance"} #A-${l.loan_id}`, money(l.amount)]);
+  for (const l of d.loans) if (l.amount) ded.push([`${LOAN_KINDS[l.kind]?.short ?? "Loan"} #A-${l.loan_id}`, money(l.amount)]);
   for (const x of d.adjustments.filter((a) => a.kind === "DEDUCTION")) ded.push([x.label, money(x.amount)]);
   const rows = Math.max(earn.length, ded.length);
   const body = [];

@@ -5,12 +5,14 @@ import { buildProductionBarcode } from "@/lib/productionBarcode.js";
 import { getServerSession } from 'next-auth'
 import prisma from "@/lib/prisma";
 import { authOptions } from '@/lib/auth';
-import { resolveProductionGodown, GODOWN_DEFAULT } from "@/lib/productionGodown";
+import { resolveProductionGodown } from "@/lib/productionGodown";
+import { getProductionSetup } from "@/lib/production/setup";
 import { recordScopeError } from "@/lib/auth/documentScope";
 import { guard } from "@/lib/auth/route";
 import { checkPeriodLock } from "@/lib/periodLock";
+import { feature } from "@/lib/features/server";
 import { resolveItemAccounts } from "@/lib/accounts/itemAccounts";
-import { normalizeOrder, validateOrder, saveLines, effectiveOutputs, validateOrderReferences, buildPosting, postPlan, assertIssueStock } from '@/lib/manufacturing/processOrder';
+import { normalizeOrder, validateOrder, saveLines, effectiveOutputs, validateOrderReferences, buildPosting, postPlan, assertIssueStock, orderFeatureError, postingDate } from '@/lib/manufacturing/processOrder';
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -97,6 +99,8 @@ export async function GET(request) {
         })
       : [];
     const outputItemOf = new Map(outputItems.map((i) => [i.itcd, i]));
+    // Settings → Production setup: default output / issue godowns
+    const setup = await getProductionSetup();
 
     const saleOrderNos = plans
       .map((p) => p.sale_ord_no)
@@ -145,6 +149,7 @@ export async function GET(request) {
       outputs: effectiveOutputs(
         plan,
         (plan.outputs || []).map((output) => ({ ...output, item: outputItemOf.get(output.finished_id) || null })),
+        setup,
       ),
       productionPlanDetail: plan.productionPlanDetail.map((detail) => ({
         id: detail.id,
@@ -155,7 +160,7 @@ export async function GET(request) {
         material_qty: detail.material_qty,
         sno: detail.sno || null,
         output_line: detail.issueLine?.output_line || 1,
-        issue_godown: detail.issueLine?.godown ?? null,
+        issue_godown: detail.material_id ? detail.issueLine?.godown ?? setup.productionGodown : null,
         issue_unit: detail.issueLine?.unit || 'KG',
         item: detail.item ? {
           itcd: detail.item.itcd,
@@ -183,7 +188,7 @@ export async function GET(request) {
             material_qty: detail.material_qty,
             sno: detail.sno || null,
         output_line: detail.issueLine?.output_line || 1,
-        issue_godown: detail.issueLine?.godown ?? null,
+        issue_godown: detail.material_id ? detail.issueLine?.godown ?? setup.productionGodown : null,
         issue_unit: detail.issueLine?.unit || 'KG',
             type: detail.material_id ? "material" : "instruction",
           }))
@@ -212,6 +217,22 @@ export const POST = guard("materialInput.create", async (request) => {
     }
 
     const data = await request.json();
+    // Settings → Features (production.processOrderSource): when process orders
+    // are made from recipes, a new one must name an active recipe.
+    const recipeMode = data.type === "new" && (await feature("production.processOrderSource")) === "recipe";
+    if (recipeMode) {
+      const receipeId = Number(data.receipe_id);
+      const recipe = Number.isInteger(receipeId) && receipeId > 0
+        ? await prisma.rECEIPE_MASTER.findUnique({ where: { receipe_id: receipeId }, select: { finished_id: true, status: true } })
+        : null;
+      if (!recipe) {
+        return NextResponse.json({ error: "Choose the recipe — new process orders are made from a recipe (Settings → Features)." }, { status: 422 });
+      }
+      const firstItem = Number(data.outputs?.[0]?.finished_id ?? data.finished_id);
+      if (firstItem && recipe.finished_id !== firstItem) {
+        return NextResponse.json({ error: "The recipe is for another item than the first production item." }, { status: 422 });
+      }
+    }
     // Process Order screen: one or more production items, each with its own
     // issuances (lib/manufacturing/processOrder.js). "new" is saved as
     // Completed and posted by Send to Production; "reprocessing" posts its
@@ -223,10 +244,22 @@ export const POST = guard("materialInput.create", async (request) => {
       if (errors.length) {
         return NextResponse.json({ error: errors.join("; ") }, { status: 422 });
       }
+      // Settings → Features: one production item per order / a BOM on every item
+      const featureError = await orderFeatureError(order, { type: orderType, recipeMode });
+      if (featureError) return NextResponse.json({ error: featureError }, { status: 422 });
       if (!data.dated || Number.isNaN(new Date(data.dated).getTime())) {
         return NextResponse.json({ error: "Plan date is required" }, { status: 400 });
       }
-      const lockError = await checkPeriodLock(data.dated, 8, { action: "create" });
+      // Reprocessing posts at once: its vouchers' date ("production.postingDate") is lock-checked too.
+      // Settings → Features "processOrder.batchRequiredReprocessing": a reprocessing
+      // order saved with "Wait for Send to Production" (batch_required) is saved like
+      // a new order and posts only on Send to Production.
+      const waitForSend = orderType === "reprocessing" && data.batch_required === true
+        && (await feature("processOrder.batchRequiredReprocessing"));
+      const postsNow = orderType === "reprocessing" && !waitForSend;
+      const sentAt = new Date();
+      const postOn = postsNow ? await postingDate(data.dated, sentAt) : null;
+      const lockError = await checkPeriodLock(postOn ? [data.dated, postOn] : data.dated, 8, { action: "create" });
       if (lockError) return NextResponse.json({ error: lockError }, { status: 422 });
 
       const referenceCheck = await validateOrderReferences(order);
@@ -255,13 +288,14 @@ export const POST = guard("materialInput.create", async (request) => {
             m2m: Boolean(data.m2m),
             req_no: data.req_no ? Number(data.req_no) : null,
             sale_ord_no: data.sale_ord_no ? Number(data.sale_ord_no) : null,
+            batch_required: Boolean(waitForSend),
             status: "Completed",
           },
         });
         const barcode = buildProductionBarcode({ id: master.id, dated: data.dated, type: orderType });
         await tx.productionPlanMaster.update({ where: { id: master.id }, data: { barcode } });
         await saveLines(tx, master.id, order);
-        if (orderType === "reprocessing") {
+        if (postsNow) {
           const plan = await tx.productionPlanMaster.findUnique({
             where: { id: master.id },
             include: { productionPlanDetail: true, item: true },
@@ -269,7 +303,7 @@ export const POST = guard("materialInput.create", async (request) => {
           const posting = await buildPosting(tx, plan);
           // Stock check policy "processOrder" (Settings → Stock checking).
           stockWarnings.push(...(await assertIssueStock(tx, posting)));
-          await postPlan(tx, plan, posting, { userId: session.user.id, m2m: plan.m2m });
+          await postPlan(tx, plan, posting, { userId: session.user.id, m2m: plan.m2m, when: sentAt, dated: postOn });
         }
         return tx.productionPlanMaster.findUnique({
           where: { id: master.id },
@@ -317,7 +351,7 @@ export const POST = guard("materialInput.create", async (request) => {
 
 
     // Validate required fields based on type
-    if (type === "new" && !bom_id) {
+    if (type === "new" && !bom_id && !recipeMode) {
       return NextResponse.json(
         { error: "BOM ID is required for new production" },
         { status: 400 },
@@ -345,8 +379,10 @@ export const POST = guard("materialInput.create", async (request) => {
         );
     }
 
-    // Period lock validation
-    const lockError = await checkPeriodLock(dated, 8, { action: "create" });
+    // Period lock validation — SF / reprocessing post at once, dated as
+    // Settings → Features "production.postingDate" says.
+    const legacyPostOn = (type === "sf" || type === "reprocessing") ? await postingDate(dated) : null;
+    const lockError = await checkPeriodLock(legacyPostOn ? [dated, legacyPostOn] : dated, 8, { action: "create" });
     if (lockError) {
         return NextResponse.json({ error: lockError }, { status: 422 });
     }
@@ -481,16 +517,18 @@ export const POST = guard("materialInput.create", async (request) => {
 
 
 
-        const currentDate = new Date();
-        // Godown comes from the finished product's item category:
-        // ic_id 1 -> godown 3, everything else -> godown 2
-        // Finished output goes where its item category says (ic_id 1 ->
-        // FG-DESPATCH, else PRODUCTION). Materials are ALWAYS consumed out of
-        // PRODUCTION — issuing them from FG-DESPATCH drove that store's
-        // raw-material and semi-finished balances negative.
-        const productionGodown = await resolveProductionGodown(prisma, finished_id);
+        // Vouchers dated as "production.postingDate" says; sent = now.
+        const sentAt = new Date();
+        const currentDate = legacyPostOn || sentAt;
+        // Settings → Production setup: finished output goes where its item
+        // category says (finished goods → FG godown, else the production
+        // godown). Materials are ALWAYS consumed out of the production godown
+        // — issuing them from the FG godown drove that store's raw-material
+        // and semi-finished balances negative.
+        const setup = await getProductionSetup();
+        const productionGodown = await resolveProductionGodown(prisma, finished_id, setup);
         const godownForSF = productionGodown;   // finished goods in
-        const godownForPF = GODOWN_DEFAULT;     // materials issued out
+        const godownForPF = setup.productionGodown;     // materials issued out
 
         // Data scope (Admin → Permissions): one of the two must be the user's.
         const sfScopeError = await recordScopeError(session, "godown", [godownForPF, godownForSF]);
@@ -648,7 +686,7 @@ export const POST = guard("materialInput.create", async (request) => {
           where: { id: master.id },
           data: {
             transaction_id: producedTransactionMaster.tran_id,
-            sent_to_production_date: currentDate,
+            sent_to_production_date: sentAt,
             status: 'Posted'
           },
         });
@@ -660,8 +698,8 @@ export const POST = guard("materialInput.create", async (request) => {
             userid:       session.user.id,
             dated:        currentDate,
             req_catagory: 'FG_TRANSFER',
-            issued_by:    2,        // Production floor (godown 2)
-            issued_for:   6,        // FG department / main warehouse (adjust godown id as needed)
+            issued_by:    setup.productionGodown,   // Settings → Production setup
+            issued_for:   setup.fgTransferGodown,   // "FG transfer to"
             status:       'Pending',
             plan_id:      master.id,
             details: {
@@ -683,11 +721,14 @@ export const POST = guard("materialInput.create", async (request) => {
     // For Reprocessing, automatically create transaction entries (same as SF but godown 2)
     if (type === "reprocessing") {
       try {
-        const currentDate = new Date();
-        // Godown comes from the finished product's item category:
-        // ic_id 1 -> godown 3, everything else -> godown 2
-        const godownForReprocessing = await resolveProductionGodown(prisma, finished_id); // output
-        const godownForReprocessingIssue = GODOWN_DEFAULT;                                 // materials out of PRODUCTION
+        // Vouchers dated as "production.postingDate" says; sent = now.
+        const sentAt = new Date();
+        const currentDate = legacyPostOn || sentAt;
+        // Settings → Production setup: output godown from the item's category,
+        // materials out of the production godown.
+        const setup = await getProductionSetup();
+        const godownForReprocessing = await resolveProductionGodown(prisma, finished_id, setup); // output
+        const godownForReprocessingIssue = setup.productionGodown;                                // materials out of production
 
         // Data scope (Admin → Permissions): one of the two must be the user's.
         const rpScopeError = await recordScopeError(session, "godown", [godownForReprocessingIssue, godownForReprocessing]);
@@ -831,7 +872,7 @@ export const POST = guard("materialInput.create", async (request) => {
           where: { id: master.id },
           data: {
             transaction_id: producedTransactionMaster.tran_id,
-            sent_to_production_date: currentDate,
+            sent_to_production_date: sentAt,
             status: 'Posted'
           },
         });

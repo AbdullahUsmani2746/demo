@@ -4,7 +4,7 @@
 //        replaces that year's slabs (hr.payroll.manage)
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { HR_PERMS } from "@/lib/hr/access";
+import { getHrSettings, HR_PERMS } from "@/lib/hr/access";
 import { hrRoute, jsonBody } from "@/lib/hr/route";
 import { fiscalYearOf } from "@/lib/hr/payroll/compute";
 import { PayrollError } from "@/lib/hr/payroll/run";
@@ -13,7 +13,7 @@ import { todayKey } from "@/lib/hr/time";
 const VIEW = [HR_PERMS.payrollView, HR_PERMS.payrollManage, HR_PERMS.payrollApprove, HR_PERMS.payrollPost];
 
 export const GET = hrRoute(VIEW, async (req) => {
-  const y = Number(new URL(req.url).searchParams.get("year")) || fiscalYearOf(todayKey().slice(0, 7));
+  const y = Number(new URL(req.url).searchParams.get("year")) || fiscalYearOf(todayKey().slice(0, 7), (await getHrSettings()).taxYearStartMonth);
   const [slabs, years] = await Promise.all([
     prisma.hrTaxSlab.findMany({ where: { fiscal_year: y }, orderBy: { from_amount: "asc" } }),
     prisma.hrTaxSlab.findMany({ distinct: ["fiscal_year"], select: { fiscal_year: true }, orderBy: { fiscal_year: "desc" } }),

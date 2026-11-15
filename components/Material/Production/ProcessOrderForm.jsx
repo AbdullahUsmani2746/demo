@@ -67,10 +67,11 @@ import {
 import {
   PRODUCTION_TYPES,
   UNIT_OPTIONS,
-  PACKAGING_CATEGORY_ID,
+  isPackingCategory,
   emptyOutput,
   emptyLine,
   linesFromBom,
+  linesFromRecipe,
   loadOrder,
   validate,
   buildPayload,
@@ -82,9 +83,11 @@ import {
   fmtQty,
   godownForCategory,
 } from "./processOrderModel";
+import { useFeatures } from "@/hooks/useFeatures";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { yieldEditOpen, yieldEditClosedMessage } from "@/lib/production/rules";
 
 const MODES = { CREATE: "create", EDIT: "edit", VIEW: "view" };
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ── shared surface classes (compact, dense data-entry look; theme tokens so
 // dark mode follows — see components/Material/shared/LabUI.jsx)
@@ -351,6 +354,8 @@ const ProcessOrderForm = ({
   onSubmit,
   onCancel,
   isSubmitting = false,
+  // Opened from a Production Plan line: { req_no, sale_ord_no, itcd, qty }
+  prefill = null,
 }) => {
   const { company } = useCompany();
   const isView = mode === MODES.VIEW;
@@ -359,15 +364,32 @@ const ProcessOrderForm = ({
   const type = isCreate ? productionType || PRODUCTION_TYPES.NEW : editingItem?.type || PRODUCTION_TYPES.NEW;
   const status = editingItem?.status || null;
   const isPosted = status === "Posted";
-  // Posted orders already moved stock: only the actual yield may change (24h)
+  // Posted orders already moved stock: only the actual yield may change, for
+  // as long as Settings → Features "production.yieldEditWindow" says (24h)
   const locked = isView || isPosted;
+
+  // Settings → Features: new process orders made from a recipe (required) instead of a BOM (optional)
+  const features = useFeatures();
+  const recipeMode = features.value("production.processOrderSource") === "recipe" && type === PRODUCTION_TYPES.NEW;
+  const yieldWindow = features.value("production.yieldEditWindow");
   const yieldEditable =
-    isEdit &&
-    isPosted &&
-    !(Date.now() - new Date(editingItem?.sent_to_production_date || editingItem?.dated || 0).getTime() > DAY_MS);
+    isEdit && isPosted && yieldEditOpen(yieldWindow, editingItem?.sent_to_production_date || editingItem?.dated);
+  // BOM mode: every production item must name its BOM (production.bomRequired)
+  const bomRequired = type === PRODUCTION_TYPES.NEW && !recipeMode && features.on("production.bomRequired");
+  // One production item per order (production.multiOutput off); saved multi-item orders stay as they are
+  const multiOutput = features.on("production.multiOutput");
+  const autoLoadBom = type === PRODUCTION_TYPES.NEW && !recipeMode && features.on("production.autoLoadBom");
+
+  // Settings → Production setup: default godowns, packing categories. The
+  // values (not the object) key the memo, so loading the same setup never
+  // resets the form.
+  const { setup: setupLoaded } = useProductionSetup();
+  const setupKey = JSON.stringify(setupLoaded);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const setup = useMemo(() => setupLoaded, [setupKey]);
 
   // ── state ────────────────────────────────────────────────────────────────
-  const initial = useMemo(() => loadOrder(editingItem), [editingItem]);
+  const initial = useMemo(() => loadOrder(editingItem, setup), [editingItem, setup]);
   const [header, setHeader] = useState(initial.header);
   const [outputs, setOutputs] = useState(initial.outputs);
   const [lines, setLines] = useState(initial.lines);
@@ -400,6 +422,35 @@ const ProcessOrderForm = ({
   const patchLine = useCallback((key, patch) => {
     setLines((list) => list.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   }, []);
+
+  // Settings → Features (documents.batchReuseWarning): a batch no already on
+  // another process order → a warning only, never blocks. (From Eastland.)
+  const batchWarnOn = isCreate && features.on("documents.batchReuseWarning");
+  const batchNos = batchWarnOn ? [...new Set(outputs.map((o) => String(o.batch_no || "").trim()).filter(Boolean))].join(",") : "";
+  const warnedBatchRef = useRef(new Set());
+  useEffect(() => {
+    if (!batchNos) return;
+    const toCheck = batchNos.split(",").filter((b) => !warnedBatchRef.current.has(b));
+    if (!toCheck.length) return;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      for (const b of toCheck) {
+        try {
+          const { data } = await axios.get("/api/manufacturing/production/batch-check", { params: { batch_no: b }, signal: controller.signal });
+          warnedBatchRef.current.add(b);
+          if (data?.used?.length) {
+            setNotice({ tone: "warn", text: `Batch No ${b} is already used on Process Order# ${data.used.join(", ")}.` });
+          }
+        } catch {
+          /* a failed check never matters to the save */
+        }
+      }
+    }, 800);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [batchNos]);
 
   // ── godowns ──────────────────────────────────────────────────────────────
   const [godowns, setGodowns] = useState([]);
@@ -482,18 +533,24 @@ const ProcessOrderForm = ({
       if (l.kind !== "material" || !l.material_id || !l.godown) continue;
       const k = `${l.material_id}:${l.godown}`;
       const s = stock[k];
-      if (!s || s === "loading" || s.qty === null || s.categoryId === PACKAGING_CATEGORY_ID) continue;
+      if (!s || s === "loading" || s.qty === null || isPackingCategory(setup, s.categoryId)) continue;
       const gap = round(need.get(k) - s.qty, 3);
       if (gap > 0.01) short.set(l.key, gap);
     }
     return { shortByLine: short, needByKey: need };
-  }, [lines, stock]);
+  }, [lines, stock, setup]);
 
   // ── validation ───────────────────────────────────────────────────────────
   const blockOnStock = type === PRODUCTION_TYPES.REPROCESSING && !locked;
   const v = useMemo(
-    () => validate({ header, outputs, lines, type, stockShort: shortByLine, blockOnStock }),
-    [header, outputs, lines, type, shortByLine, blockOnStock],
+    () =>
+      validate({
+        header, outputs, lines, type, setup, stockShort: shortByLine, blockOnStock,
+        requireRecipe: recipeMode && !locked,
+        // a saved item without a BOM may stay so (the server allows it too)
+        requireBom: bomRequired && !locked && isCreate,
+      }),
+    [header, outputs, lines, type, setup, shortByLine, blockOnStock, recipeMode, bomRequired, locked, isCreate],
   );
   const show = submitted; // red borders only after the first save attempt
 
@@ -545,13 +602,14 @@ const ProcessOrderForm = ({
   });
 
   // ── production item actions ──────────────────────────────────────────────
+  const canAddOutput = !locked && multiOutput;
   const addOutput = useCallback(() => {
-    if (locked) return;
+    if (!canAddOutput) return;
     const o = emptyOutput();
     setOutputs((list) => [...list, o]);
     setSelectedKey(o.key);
     pendingFocus.current = `out-item-${o.key}`;
-  }, [locked]);
+  }, [canAddOutput]);
 
   const removeOutput = useCallback(
     async (key) => {
@@ -623,15 +681,57 @@ const ProcessOrderForm = ({
                 ic_id: ic,
                 // a BOM of another item no longer applies
                 ...(o.finished_id && o.finished_id !== opt.value ? { bom_id: null, bom_label: "" } : {}),
-                godown: o.godown && o.finished_id === opt.value ? o.godown : godownForCategory(ic),
+                godown: o.godown && o.finished_id === opt.value ? o.godown : godownForCategory(setup, ic),
                 unit: unitOfItem(opt.unit || opt.raw?.unit),
               }
             : o,
         ),
       );
+      // production.autoLoadBom: load the item's active BOM straight away
+      if (autoLoadBom && !locked) setPendingBom({ key, finished_id: opt.value });
     },
-    [patchOutput],
+    [patchOutput, setup, autoLoadBom, locked],
   );
+  const [pendingBom, setPendingBom] = useState(null);
+
+  // Opened from a Production Plan line (Features: production.labNature —
+  // ProductionTab ?fromPlan=…): Plan No, Sale Order, item and qty are picked
+  // the way choosing them in the dropdowns would. Once per prefill; the user
+  // fills the rest and saves as usual.
+  const prefilledRef = useRef(null);
+  useEffect(() => {
+    // "initial" too: a reset of the form (setup loaded) re-applies it
+    if (!isCreate || !prefill?.req_no || (prefilledRef.current?.prefill === prefill && prefilledRef.current?.initial === initial)) return;
+    prefilledRef.current = { prefill, initial };
+    const key = initial.outputs[0]?.key;
+    let cancelled = false;
+    (async () => {
+      let reqItems = [];
+      try {
+        const { data } = await axios.get("/api/material/requisition", {
+          params: { search: prefill.req_no, limit: 5, category: "DISPATCH" },
+        });
+        reqItems = (data.data || []).find((r) => Number(r.tran_id) === Number(prefill.req_no))?.details || [];
+      } catch {
+        reqItems = [];
+      }
+      if (cancelled) return;
+      patchHeader({ req_no: prefill.req_no, req_items: reqItems, sale_ord_no: prefill.sale_ord_no || null });
+      if (!prefill.itcd || !key) return;
+      try {
+        const { data } = await axios.get("/api/forms/items", { params: { search: prefill.itcd, limit: 10 } });
+        const item = (data.items || []).find((i) => String(i.itcd) === String(prefill.itcd));
+        if (!cancelled && item) setOutputItem(key, toItemOption(item));
+      } catch {
+        /* the user picks the item */
+      }
+      if (!cancelled && Number(prefill.qty) > 0) setOutputQty(key, String(prefill.qty));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill, isCreate, initial]);
 
   /** Replace the item's material lines with a BOM, scaled to its quantity. */
   const applyBom = useCallback(
@@ -670,7 +770,7 @@ const ProcessOrderForm = ({
         );
         setLines((list) => [
           ...list.filter((l) => !(l.outputKey === key && l.kind === "material")),
-          ...linesFromBom(key, bom.materials || [], qty),
+          ...linesFromBom(key, bom.materials || [], qty, setup),
         ]);
         setNotice({
           tone: qty > 0 ? "good" : "warn",
@@ -685,7 +785,87 @@ const ProcessOrderForm = ({
         setBomLoading(false);
       }
     },
-    [outputs, lines, locked, confirm],
+    [outputs, lines, locked, confirm, setup],
+  );
+
+  /** The item's active BOM (list row) or null. */
+  const activeBomOf = useCallback(async (finishedId) => {
+    const { data } = await axios.get("/api/manufacturing/bom", {
+      params: { finished_id: finishedId, filterStatus: "Active", limit: 1 },
+    });
+    return data?.data?.[0] || null;
+  }, []);
+
+  // production.autoLoadBom — after the production item was picked
+  useEffect(() => {
+    if (!pendingBom) return;
+    const { key, finished_id } = pendingBom;
+    setPendingBom(null);
+    activeBomOf(finished_id)
+      .then((bom) => {
+        if (bom) applyBom(key, bom.id);
+        else setNotice({ tone: "warn", text: "This item has no active BOM — add the issuances by hand." });
+      })
+      .catch(() => setNotice({ tone: "bad", text: "Could not look up the item's BOM." }));
+  }, [pendingBom, activeBomOf, applyBom]);
+
+  /**
+   * Recipe mode: the recipe decides production item 1 and its issuances
+   * (materials + instructions, scaled to its quantity) and links its BOM.
+   */
+  const applyRecipe = useCallback(
+    async (opt) => {
+      const first = outputs[0];
+      if (!first || locked) return;
+      if (!opt) {
+        patchHeader({ receipe_id: null, receipe_label: "" });
+        return;
+      }
+      const r = opt.recipe;
+      const existing = lines.filter((l) => l.outputKey === first.key);
+      if (
+        existing.length &&
+        header.receipe_id !== r.receipe_id &&
+        !(await confirm({
+          title: `Load recipe #${r.receipe_id}?`,
+          description: `It replaces the ${existing.length} issuance line(s) of the first production item.`,
+          confirmLabel: "Replace lines",
+        }))
+      ) {
+        return;
+      }
+      const ic = r.item?.ic_id ?? null;
+      patchHeader({ receipe_id: r.receipe_id, receipe_label: opt.label, machine_id: r.machine_id ?? header.machine_id, time_min: r.time_min ?? header.time_min });
+      setOutputs((list) =>
+        list.map((o, i) =>
+          i === 0
+            ? {
+                ...o,
+                finished_id: r.finished_id,
+                item_code: r.item?.code || "",
+                item_name: r.item?.item || "",
+                ic_id: ic,
+                bom_id: r.bom_id ?? null,
+                bom_label: r.bom_id ? `BOM #${r.bom_id}` : "",
+                godown: o.godown && o.finished_id === r.finished_id ? o.godown : godownForCategory(setup, ic),
+                unit: unitOfItem(r.item?.unit),
+              }
+            : o,
+        ),
+      );
+      setLines((list) => [
+        ...list.filter((l) => l.outputKey !== first.key),
+        ...linesFromRecipe(first.key, r.receipeDetails || [], toNum(first.qty), setup),
+      ]);
+      setNotice({
+        tone: toNum(first.qty) > 0 ? "good" : "warn",
+        text:
+          toNum(first.qty) > 0
+            ? `Recipe #${r.receipe_id} loaded: ${(r.receipeDetails || []).length} lines scaled to ${fmtQty(first.qty)}.`
+            : `Recipe #${r.receipe_id} loaded — enter the quantity to scale its lines.`,
+      });
+    },
+    [outputs, lines, locked, header.receipe_id, header.machine_id, header.time_min, confirm, patchHeader, setup],
   );
 
   /** Alt+B / "Load BOM": the selected item's active BOM. */
@@ -697,10 +877,7 @@ const ProcessOrderForm = ({
       return;
     }
     try {
-      const { data } = await axios.get("/api/manufacturing/bom", {
-        params: { finished_id: selected.finished_id, filterStatus: "Active", limit: 1 },
-      });
-      const bom = data?.data?.[0];
+      const bom = await activeBomOf(selected.finished_id);
       if (!bom) {
         setNotice({ tone: "warn", text: "This item has no active BOM — add the issuances by hand." });
         return;
@@ -709,13 +886,13 @@ const ProcessOrderForm = ({
     } catch {
       setNotice({ tone: "bad", text: "Could not look up the item's BOM." });
     }
-  }, [selected, locked, applyBom]);
+  }, [selected, locked, applyBom, activeBomOf]);
 
   // ── issuance line actions ───────────────────────────────────────────────
   const addLine = useCallback(
     (kind = "material") => {
       if (locked || !selected) return;
-      const l = emptyLine(selected.key, kind);
+      const l = emptyLine(selected.key, kind, {}, setup);
       setLines((list) => {
         // keep the item's lines together
         const lastIdx = list.map((x) => x.outputKey).lastIndexOf(selected.key);
@@ -725,7 +902,7 @@ const ProcessOrderForm = ({
       });
       pendingFocus.current = `line-${kind === "material" ? "item" : "text"}-${l.key}`;
     },
-    [locked, selected],
+    [locked, selected, setup],
   );
 
   const removeLine = useCallback((key) => {
@@ -793,6 +970,19 @@ const ProcessOrderForm = ({
   }, []);
   const loadBoms = useDebouncedLoader(fetchBoms);
 
+  // Active recipes (recipe mode) — { value, label, recipe }
+  const fetchRecipes = useCallback(async (input) => {
+    const { data } = await axios.get("/api/manufacturing/recipe", {
+      params: { search: input || "", status: "Active", limit: 15, sortBy: "receipe_id", sortOrder: "desc" },
+    });
+    return (data?.data || []).map((r) => ({
+      value: r.receipe_id,
+      label: `Recipe #${r.receipe_id} - ${r.item?.code || ""} ${r.item?.item || ""}`.trim(),
+      recipe: r,
+    }));
+  }, []);
+  const loadRecipes = useDebouncedLoader(fetchRecipes);
+
   // ── PO No preview ────────────────────────────────────────────────────────
   const [nextPoNo, setNextPoNo] = useState(null);
   useEffect(() => {
@@ -814,7 +1004,7 @@ const ProcessOrderForm = ({
       setNotice({ tone: "warn", text: "Select the production item to print." });
       return;
     }
-    const body = buildPayload({ header, outputs, lines, type, isEdit, locked });
+    const body = buildPayload({ header, outputs, lines, type, isEdit, locked, setup });
     const plan = planForOutput(
       {
         ...(editingItem || {}),
@@ -847,7 +1037,7 @@ const ProcessOrderForm = ({
       console.error("PDF generation error:", err);
       setNotice({ tone: "bad", text: "Failed to generate the PDF." });
     }
-  }, [selected, header, outputs, lines, type, isEdit, locked, editingItem, poNo, selectedIndex, company]);
+  }, [selected, header, outputs, lines, type, isEdit, locked, setup, editingItem, poNo, selectedIndex, company]);
 
   // ── save ─────────────────────────────────────────────────────────────────
   const submit = useCallback(
@@ -882,14 +1072,14 @@ const ProcessOrderForm = ({
       }
       setBusy(true);
       try {
-        await onSubmit(buildPayload({ header, outputs, lines, type, isEdit, locked }));
+        await onSubmit(buildPayload({ header, outputs, lines, type, isEdit, locked, setup }));
       } catch (err) {
         setNotice({ tone: "bad", text: err?.response?.data?.error || err?.message || "Failed to save" });
       } finally {
         setBusy(false);
       }
     },
-    [isView, busy, isSubmitting, isPosted, yieldEditable, locked, v, outputs, blockOnStock, shortByLine, lines, needByKey, stock, godownName, onSubmit, header, type, isEdit],
+    [isView, busy, isSubmitting, isPosted, yieldEditable, locked, v, outputs, blockOnStock, shortByLine, lines, needByKey, stock, godownName, onSubmit, header, type, isEdit, setup],
   );
 
   const saveViaKeyboard = useCallback(() => {
@@ -946,7 +1136,7 @@ const ProcessOrderForm = ({
 
   const SHORTCUTS = [
     { combo: "Ctrl+S", label: isCreate ? "Save process order" : "Update process order" },
-    { combo: "Alt+N", label: "Add production item" },
+    ...(multiOutput ? [{ combo: "Alt+N", label: "Add production item" }] : []),
     { combo: "Alt+I", label: "Add issuance line (selected item)" },
     { combo: "Alt+T", label: "Add instruction / note" },
     { combo: "Alt+B", label: "Load BOM of selected item" },
@@ -999,6 +1189,10 @@ const ProcessOrderForm = ({
 
   // ══════════════════════════════════════════════════════════════════════
   const isReproc = type === PRODUCTION_TYPES.REPROCESSING;
+  // Settings → Features "processOrder.batchRequiredReprocessing": a reprocessing
+  // order may wait for Send to Production instead of posting on save.
+  const waitOption = isReproc && features.on("processOrder.batchRequiredReprocessing");
+  const postsOnSave = isReproc && !(waitOption && header.batch_required);
   const typeLabel = isReproc ? "Reprocessing" : type === PRODUCTION_TYPES.SF ? "SF to FG" : "New Production";
   const sel = selected;
   const selTotals = sel ? totalsOf(sel) : null;
@@ -1060,14 +1254,14 @@ const ProcessOrderForm = ({
                 Posted — {yieldEditable ? "only the actual yield can change" : "read only"}
               </span>
             )}
-            {isReproc && isCreate && (
+            {postsOnSave && isCreate && (
               <span className="hidden text-[11.5px] font-medium text-primary md:inline">
                 Posts material issue + production on save
               </span>
             )}
           </div>
           <div className="flex items-center gap-3">
-            <LifecycleStepper status={status} isCreate={isCreate} isReproc={isReproc} />
+            <LifecycleStepper status={status} isCreate={isCreate} isReproc={postsOnSave} />
             {!isView && <KeyboardHint shortcuts={SHORTCUTS} />}
           </div>
         </div>
@@ -1202,6 +1396,34 @@ const ProcessOrderForm = ({
               <span className="text-xs font-semibold">{header.m2m ? "Yes" : "No"}</span>
             </div>
           </div>
+          {(waitOption || (isReproc && header.batch_required)) && (
+            <div>
+              <span className={UI.label}>Wait for Send to Production</span>
+              <div className="flex h-8 items-center gap-1.5">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!header.batch_required}
+                  aria-label="Wait for Send to Production"
+                  disabled={locked || !isCreate || !waitOption}
+                  title="On: saved without posting — posts on Send to Production"
+                  onClick={() => patchHeader({ batch_required: !header.batch_required })}
+                  className={cn(
+                    "relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-60",
+                    header.batch_required ? "bg-primary" : "bg-input",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "inline-block h-3.5 w-3.5 rounded-full bg-background shadow transition-transform",
+                      header.batch_required ? "translate-x-[18px]" : "translate-x-[3px]",
+                    )}
+                  />
+                </button>
+                <span className="text-xs font-semibold">{header.batch_required ? "Yes" : "No"}</span>
+              </div>
+            </div>
+          )}
         </div>
         {show && v.header.length > 0 && (
           <div className="px-2.5 pb-2">
@@ -1275,7 +1497,7 @@ const ProcessOrderForm = ({
                 {outputs.length}
               </span>
             </h3>
-            {!locked && (
+            {canAddOutput && (
               <button type="button" onClick={addOutput} className={cn(UI.btn, "bg-primary text-primary-foreground hover:opacity-90")} title="Add production item (Alt+N)">
                 <Plus size={13} />
                 Add item
@@ -1296,7 +1518,7 @@ const ProcessOrderForm = ({
               const t = totalsOf(o);
               const errs = v.outputs.get(o.key);
               const active = o.key === sel?.key;
-              const g = outputGodown(o);
+              const g = outputGodown(o, setup);
               return (
                 <div
                   key={o.key}
@@ -1410,8 +1632,28 @@ const ProcessOrderForm = ({
                           styles={show && !o.finished_id ? errSelectStyles : compactSelect}
                         />
                       </div>
+                      {recipeMode && idx === 0 ? (
                       <div className="col-span-2">
-                        <label className={UI.label}>BOM (optional)</label>
+                        <label className={UI.label}>Recipe *</label>
+                        <AsyncSelect
+                          cacheOptions
+                          defaultOptions
+                          loadOptions={loadRecipes}
+                          value={header.receipe_id ? { value: header.receipe_id, label: header.receipe_label || `Recipe #${header.receipe_id}` } : null}
+                          onChange={applyRecipe}
+                          isClearable
+                          isDisabled={locked}
+                          placeholder="Choose the recipe…"
+                          aria-label="Recipe"
+                          classNamePrefix="react-select"
+                          menuPortalTarget={portalTarget()}
+                          menuPlacement="auto"
+                          styles={show && !header.receipe_id ? errSelectStyles : compactSelect}
+                        />
+                      </div>
+                      ) : (
+                      <div className="col-span-2">
+                        <label className={UI.label}>{bomRequired ? "BOM *" : "BOM (optional)"}</label>
                         <div className="flex gap-1.5">
                           <div className="min-w-0 flex-1">
                             <AsyncSelect
@@ -1420,14 +1662,14 @@ const ProcessOrderForm = ({
                               loadOptions={loadBoms}
                               value={o.bom_id ? { value: o.bom_id, label: o.bom_label || `BOM #${o.bom_id}` } : null}
                               onChange={(opt) => (opt ? applyBom(o.key, opt.value, opt.label) : patchOutput(o.key, { bom_id: null, bom_label: "" }))}
-                              isClearable
+                              isClearable={!bomRequired}
                               isDisabled={locked || bomLoading}
-                              placeholder="No BOM — free entry"
+                              placeholder={bomRequired ? "Choose the BOM…" : "No BOM — free entry"}
                               aria-label="BOM"
                               classNamePrefix="react-select"
                               menuPortalTarget={portalTarget()}
                               menuPlacement="auto"
-                              styles={compactSelect}
+                              styles={show && bomRequired && isCreate && !o.bom_id ? errSelectStyles : compactSelect}
                             />
                           </div>
                           {!locked && (
@@ -1444,6 +1686,7 @@ const ProcessOrderForm = ({
                           )}
                         </div>
                       </div>
+                      )}
                       <div>
                         <label className={UI.label} htmlFor={`qty-${o.key}`}>Quantity *</label>
                         <div className="flex">
@@ -1515,7 +1758,7 @@ const ProcessOrderForm = ({
                         </div>
                       )}
                       {isPosted && !yieldEditable && isEdit && (
-                        <p className="col-span-2 text-[11.5px] font-semibold text-destructive">Editing closed (24 hours passed since posting)</p>
+                        <p className="col-span-2 text-[11.5px] font-semibold text-destructive">Editing closed — {yieldEditClosedMessage(yieldWindow)}</p>
                       )}
                       {show && errs && (
                         <div className="col-span-2">
@@ -1647,7 +1890,7 @@ const ProcessOrderForm = ({
                     const sk = `${l.material_id}:${l.godown}`;
                     const st = stock[sk];
                     const short = shortByLine.get(l.key);
-                    const isPacking = st && st !== "loading" && st.categoryId === PACKAGING_CATEGORY_ID;
+                    const isPacking = st && st !== "loading" && isPackingCategory(setup, st.categoryId);
                     const pct = toNum(sel?.qty) > 0 ? (toNum(l.material_qty) / toNum(sel.qty)) * 100 : null;
                     return (
                       <li
@@ -1862,7 +2105,7 @@ const ProcessOrderForm = ({
               title="Save (Ctrl+S)"
             >
               {busy || isSubmitting ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
-              {isPosted ? "Update yield" : isEdit ? "Update" : isReproc ? "Save & post" : "Save"}
+              {isPosted ? "Update yield" : isEdit ? "Update" : postsOnSave ? "Save & post" : "Save"}
               <span className="hidden opacity-80 md:inline"><KeyCombo combo="Ctrl+S" /></span>
             </button>
           )}

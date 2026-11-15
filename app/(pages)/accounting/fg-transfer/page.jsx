@@ -23,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import axios from "axios";
+import { useFeatures } from "@/hooks/useFeatures";
 import {
   LabHeader, LabCard, LabStat, LabEmpty, Chip, CODE_CHIP, TH, TD, NUM,
 } from "@/components/Material/shared/LabUI";
@@ -32,8 +33,11 @@ import {
 const STATUS_OPTIONS = [
   { value: "all",      label: "All Requests" },
   { value: "Pending",  label: "Pending"       },
+  // Partial / Closed exist only with Settings → Features "fgTransfer.partialAcceptance"
+  { value: "Partial",  label: "Partial",  feature: "fgTransfer.partialAcceptance" },
   { value: "Accepted", label: "Accepted"      },
   { value: "Rejected", label: "Rejected"      },
+  { value: "Closed",   label: "Closed",   feature: "fgTransfer.partialAcceptance" },
 ];
 
 // Status → Chip tone (components/Material/shared/LabUI.jsx) + icon.
@@ -41,6 +45,8 @@ const STATUS_META = {
   Pending:  { tone: "warn", icon: Clock        },
   Accepted: { tone: "ok",   icon: CheckCircle2 },
   Rejected: { tone: "bad",  icon: XCircle      },
+  Partial:  { tone: "warn", icon: Clock        },
+  Closed:   { tone: "ok",   icon: CheckCircle2 },
 };
 
 const fmtDate = (v, opts = { day: "2-digit", month: "short", year: "numeric" }) =>
@@ -68,6 +74,10 @@ const RowSkeleton = () => (
 );
 
 export default function FgTransferPage() {
+  // Settings → Features "fgTransfer.partialAcceptance": accept part, reject the balance
+  const features = useFeatures();
+  const partial = features.on("fgTransfer.partialAcceptance");
+  const [acceptQty, setAcceptQty] = useState({}); // detail id → typed qty
   const [rows,         setRows]         = useState([]);
   const [total,        setTotal]        = useState(0);
   const [totalPages,   setTotalPages]   = useState(1);
@@ -114,10 +124,16 @@ export default function FgTransferPage() {
   useEffect(() => { fetchStats(); }, [fetchStats]);
   useEffect(() => { setPage(1); },   [statusFilter]);
 
-  const handleAction = async (tran_id, action) => {
+  const handleAction = async (tran_id, action, detail = null) => {
     setProcessing(tran_id);
     try {
-      const { data } = await axios.patch("/api/manufacturing/fg-transfer", { tran_id, action });
+      // Partial acceptance: the typed qty of the line (default its remaining balance)
+      const typed = detail ? acceptQty[detail.id] : undefined;
+      const lines = partial && action === "accept" && detail && typed !== undefined && typed !== ""
+        ? [{ detail_id: detail.id, qty: Number(typed) }]
+        : undefined;
+      const { data } = await axios.patch("/api/manufacturing/fg-transfer", { tran_id, action, lines });
+      setAcceptQty((p) => (detail ? { ...p, [detail.id]: undefined } : p));
       toast.success(
         action === "accept"
           ? "✅ Transfer accepted — stock moved to FG godown"
@@ -197,7 +213,7 @@ export default function FgTransferPage() {
           {/* Toolbar: status filter + search */}
           <div className="flex flex-wrap items-center gap-2 border-b border-border p-3">
             <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-muted/60 p-0.5" role="tablist" aria-label="Status">
-              {STATUS_OPTIONS.map((o) => {
+              {STATUS_OPTIONS.filter((o) => !o.feature || features.on(o.feature)).map((o) => {
                 const on = statusFilter === o.value;
                 const count = o.value !== "all" ? stats[o.value.toLowerCase()] : 0;
                 return (
@@ -281,7 +297,7 @@ export default function FgTransferPage() {
                   filtered.map((row) => {
                     const detail     = row.details?.[0];
                     const item       = detail?.item;
-                    const isPending  = row.status === "Pending";
+                    const isPending  = row.status === "Pending" || (partial && row.status === "Partial");
                     const isLoading  = processing === row.tran_id;
                     const fromGodown = row.godown2Details?.godown ?? `Godown ${row.issued_by ?? "—"}`;
                     const toGodown   = row.godownDetails?.godown  ?? `Godown ${row.issued_for ?? "—"}`;
@@ -313,6 +329,24 @@ export default function FgTransferPage() {
                               ✓ {Number(detail.ap_qty).toFixed(2)}
                             </p>
                           )}
+                          {detail?.rejected_qty > 0 && (
+                            <p className="text-xs font-semibold text-destructive" title="Rejected quantity">
+                              ✕ {Number(detail.rejected_qty).toFixed(2)}
+                            </p>
+                          )}
+                          {partial && isPending && detail && (
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              inputMode="decimal"
+                              aria-label="Quantity to accept"
+                              title="Quantity to accept now (the rest stays open)"
+                              value={acceptQty[detail.id] ?? Number(detail.remainingQty ?? detail.qty ?? 0)}
+                              onChange={(e) => setAcceptQty((p) => ({ ...p, [detail.id]: e.target.value }))}
+                              className="mt-1 h-7 w-24 rounded-md border border-input bg-background px-2 text-right text-xs tabular-nums focus:border-primary focus:outline-none"
+                            />
+                          )}
                         </td>
                         <td className={`${TD} max-md:col-span-2`} data-label="From → To">
                           <span className="inline-flex flex-wrap items-center gap-1.5 text-xs text-foreground">
@@ -331,7 +365,7 @@ export default function FgTransferPage() {
                               <Button
                                 size="sm"
                                 disabled={isLoading}
-                                onClick={() => handleAction(row.tran_id, "accept")}
+                                onClick={() => handleAction(row.tran_id, "accept", detail)}
                                 className="h-8 gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
                               >
                                 {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
@@ -345,7 +379,7 @@ export default function FgTransferPage() {
                                 className="h-8 gap-1 text-destructive hover:bg-destructive/10 hover:text-destructive"
                               >
                                 <XCircle className="h-3.5 w-3.5" />
-                                Reject
+                                {partial ? "Reject balance" : "Reject"}
                               </Button>
                             </div>
                           ) : (

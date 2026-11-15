@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { guard, authorize, authErrorResponse } from "@/lib/auth/route";
 import { scopeFor, assertInScope } from "@/lib/auth/scope";
+import { feature } from "@/lib/features/server";
 
 export async function GET(request) {
   let session;
@@ -107,6 +108,28 @@ export const PUT = guard("salesItem.rate.update", async (request, { session }) =
       cust_itcd: null,
       gst_rate: Number(data.gst_rate),
     },
+  });
+  return NextResponse.json(item);
+});
+
+// Tick / untick an item on the customer's list (Settings → Features
+// "saleOrder.priceListOnly", from Eastland). Unticked (checked = false) items are
+// not offered on the Sale Order (/api/forms/products) and the orders route refuses
+// them. Only the flag (and who changed it) changes — the rate and its date stay.
+export const PATCH = guard("salesItem.rate.update", async (request, { session }) => {
+  if (!(await feature("saleOrder.priceListOnly"))) {
+    return NextResponse.json({ error: "Price-list-only ordering is switched off (Settings → Features)." }, { status: 403 });
+  }
+  const { id, checked } = await request.json();
+  if (!id || typeof checked !== "boolean") {
+    return NextResponse.json({ error: "id and checked (true / false) are required" }, { status: 400 });
+  }
+  const existing = await prisma.sALES_ITEM_CUST.findUnique({ where: { id: parseInt(id) }, select: { acno: true } });
+  if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  assertInScope(await scopeFor(session, "customer"), existing.acno, "customer");
+  const item = await prisma.sALES_ITEM_CUST.update({
+    where: { id: parseInt(id) },
+    data: { checked, updated_by: session?.user?.id ? String(session.user.id).slice(0, 50) : null },
   });
   return NextResponse.json(item);
 });

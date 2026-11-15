@@ -68,7 +68,10 @@ import {
   Link2,
   ExternalLink,
   Loader2,
+  Wrench,
 } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { usePermissions } from "@/hooks/usePermissions";
 import { cn } from "@/lib/utils";
 import { useFifoAllocation } from "@/hooks/useFifoAllocation";
 import { voucherHref } from "@/lib/vouchers/voucherLink";
@@ -113,10 +116,11 @@ function formatCompact(value) {
   }).format(Number(value || 0));
 }
 
-const TRAN_CODE_LABEL = { 1: "Receipt", 2: "Payment", 3: "JV" };
+// Returns appear only with Settings → Features "knockoff.matchReturns".
+const TRAN_CODE_LABEL = { 1: "Receipt", 2: "Payment", 3: "JV", 9: "Purchase Return", 10: "Sale Return" };
 
 // Chip tone per voucher type / run status (theme tokens, dark-mode safe).
-const TRAN_CODE_TONE = { 1: "ok", 2: "warn", 3: "brand" };
+const TRAN_CODE_TONE = { 1: "ok", 2: "warn", 3: "brand", 9: "muted", 10: "muted" };
 
 const RUN_STATUS_TONE = {
   RUNNING: "warn",
@@ -274,6 +278,8 @@ export default function KnockoffReviewPage() {
   const [selectedCandidate, setSelectedCandidate] = useState(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [runToReverse, setRunToReverse] = useState(null);
+  const [refifoOpen, setRefifoOpen] = useState(false);
+  const { can } = usePermissions();
 
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ field: "dated", dir: "desc" });
@@ -537,6 +543,12 @@ export default function KnockoffReviewPage() {
                     </>
                   )}
                 </Button>
+                {can("knockoff.refifo") && (
+                  <Button variant="outline" onClick={() => setRefifoOpen(true)} className="h-10 font-semibold">
+                    <Wrench className="mr-2 h-4 w-4" />
+                    Fix FIFO order
+                  </Button>
+                )}
               </>
             }
           />
@@ -991,8 +1003,280 @@ export default function KnockoffReviewPage() {
             queryClient.invalidateQueries({ queryKey: ["knockoffRuns"] });
           }}
         />
+
+        {/* ── Fix FIFO order (knockoff.refifo) ─────────────────── */}
+        {refifoOpen && <RefifoDialog open={refifoOpen} onClose={() => setRefifoOpen(false)} onChanged={refreshAll} />}
       </div>
     </TooltipProvider>
+  );
+}
+
+/* ==========================================================================
+   Fix FIFO order dialog (lib/ledger/refifo.js)
+   ========================================================================== */
+
+const REFIFO_KIND_LABEL = { apply: "Fix", resume: "Resume", restore: "Undo" };
+const REFIFO_PARTY = [
+  { value: "all", label: "Customers and vendors" },
+  { value: "customer", label: "Customers" },
+  { value: "vendor", label: "Vendors" },
+];
+
+function RefifoDialog({ open, onClose, onChanged }) {
+  const queryClient = useQueryClient();
+  const [party, setParty] = useState("all");
+  // "apply" | { restore: stamp } — the action waiting for a second click.
+  const [confirm, setConfirm] = useState(null);
+
+  const { data, isFetching, error } = useQuery({
+    queryKey: ["knockoffRefifo", party],
+    queryFn: async () => (await axios.get(`/api/invoice-knockoff/refifo?party=${party}`)).data,
+    enabled: open,
+    // Poll while a job runs so its log streams in.
+    refetchInterval: (q) => (q.state.data?.job?.status === "running" ? 3000 : false),
+  });
+
+  const job = data?.job;
+  const running = job?.status === "running";
+  const parties = useMemo(() => data?.parties || [], [data]);
+  const backups = data?.backups || [];
+  const totals = useMemo(
+    () => ({ lines: parties.reduce((s, p) => s + p.lines, 0), amount: parties.reduce((s, p) => s + p.fifoAmount, 0) }),
+    [parties],
+  );
+
+  // Refresh the page's lists once a job ends.
+  const lastStatus = useRef(null);
+  useEffect(() => {
+    if (lastStatus.current === "running" && job && job.status !== "running") onChanged?.();
+    lastStatus.current = job?.status ?? null;
+  }, [job, onChanged]);
+
+  const startMutation = useMutation({
+    mutationFn: async ({ action, stamp }) =>
+      (await axios.post(`/api/invoice-knockoff/refifo?action=${action}`, { stamp, party })).data,
+    onSuccess: () => {
+      setConfirm(null);
+      queryClient.invalidateQueries({ queryKey: ["knockoffRefifo"] });
+    },
+    onError: (err) => toast.error(err?.response?.data?.message || err.message),
+  });
+  const start = (action, stamp) => startMutation.mutate({ action, stamp });
+  const busy = running || startMutation.isPending;
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className={cn(DIALOG, "sm:max-w-[900px]")}>
+        <DialogHeader className={DIALOG_HEAD}>
+          <DialogTitle className="flex items-center gap-2">
+            <Wrench className="h-5 w-5 text-primary" />
+            Fix FIFO order
+          </DialogTitle>
+          <DialogDescription>
+            Parties whose automatic knock-offs were put on newer invoices while older ones stayed open
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className={cn(DIALOG_BODY, "space-y-5")}>
+          {error && (
+            <p className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+              {error?.response?.data?.message || error.message}
+            </p>
+          )}
+
+          <p className="text-sm text-muted-foreground">
+            For each party below, the automatic knock-offs are taken off and matched again, oldest invoice first. A
+            backup is taken first, and every voucher is checked to keep the same debit / credit totals. Voucher totals,
+            the ledger and the trial balance do not change; only <em>which invoice</em> each receipt or payment settled
+            does. Manual knock-offs and invoice numbers typed on a voucher are kept.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium">Check</span>
+            <Select value={party} onValueChange={setParty} disabled={busy}>
+              <SelectTrigger className="h-9 w-[220px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {REFIFO_PARTY.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* ── Running / last job ───────────────────────── */}
+          {job && (
+            <div
+              className={cn(
+                "rounded-xl border p-4",
+                running && "border-primary/30 bg-primary/5",
+                job.status === "completed" && "border-emerald-600/30 bg-emerald-500/5",
+                job.status === "failed" && "border-destructive/40 bg-destructive/5",
+              )}
+            >
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  {running && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+                  {REFIFO_KIND_LABEL[job.kind]} — {running ? "running…" : job.status === "completed" ? "finished" : "stopped"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  started {format(new Date(job.startedAt), "dd MMM, HH:mm")}
+                  {job.by ? ` by ${job.by}` : ""}
+                </p>
+              </div>
+              <div className="max-h-48 space-y-0.5 overflow-y-auto font-mono text-xs text-foreground/80">
+                {job.log.map((l, i) => (
+                  <p key={i}>
+                    <span className="text-muted-foreground">{format(new Date(l.at), "HH:mm:ss")}</span> {l.message}
+                  </p>
+                ))}
+              </div>
+              {job.status === "failed" && (
+                <p className="mt-2 text-sm text-destructive">
+                  Use <strong>Resume</strong> below to finish it, or <strong>Undo</strong> to put everything back.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── Affected parties ─────────────────────────── */}
+          <div>
+            <p className="mb-2 text-sm font-semibold text-foreground">
+              {isFetching && !data
+                ? "Checking…"
+                : `${parties.length} parties · ${totals.lines.toLocaleString()} lines · ${formatCurrency(totals.amount)} to re-match`}
+            </p>
+            {isFetching && !data ? (
+              <Skeleton className="h-40 w-full" />
+            ) : parties.length === 0 ? (
+              <p className="rounded-lg bg-emerald-500/10 p-3 text-sm text-emerald-800 dark:text-emerald-300">
+                Every party is in FIFO order — nothing to fix.
+              </p>
+            ) : (
+              <>
+                <div className="space-y-2 md:hidden">
+                  {parties.map((p) => (
+                    <div key={`${p.side}-${p.acno}`} className="rounded-lg border border-border p-3 text-sm">
+                      <p className="font-medium">
+                        {p.acname} <span className="text-xs text-muted-foreground">{p.acno}</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Oldest open {format(new Date(p.oldestOpen), "dd MMM yyyy")} · newer paid{" "}
+                        {format(new Date(p.newestPaid), "dd MMM yyyy")}
+                      </p>
+                      <p className="mt-1 tabular-nums">
+                        {formatCurrency(p.openAmount)} open · {p.lines} lines
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="hidden max-h-64 overflow-y-auto rounded-lg border border-border md:block [&_td]:px-3 [&_th]:px-3">
+                  <Table>
+                    <TableHeader className="sticky top-0 bg-muted/60">
+                      <TableRow>
+                        <TableHead>Party</TableHead>
+                        <TableHead>Oldest open invoice</TableHead>
+                        <TableHead>Newer invoice paid</TableHead>
+                        <TableHead className="text-right">Open on invoices</TableHead>
+                        <TableHead className="text-right">Lines</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {parties.map((p) => (
+                        <TableRow key={`${p.side}-${p.acno}`}>
+                          <TableCell>
+                            <span className="font-medium">{p.acname}</span>{" "}
+                            <span className="text-xs text-muted-foreground">{p.acno}</span>
+                          </TableCell>
+                          <TableCell>{format(new Date(p.oldestOpen), "dd MMM yyyy")}</TableCell>
+                          <TableCell>{format(new Date(p.newestPaid), "dd MMM yyyy")}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(p.openAmount)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{p.lines}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* ── Backups: resume / undo ───────────────────── */}
+          {backups.length > 0 && (
+            <div>
+              <p className="mb-2 text-sm font-semibold text-foreground">Earlier fixes (backups)</p>
+              <div className="divide-y divide-border rounded-lg border border-border">
+                {backups.map((b) => (
+                  <div key={b.stamp} className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+                    <p className="text-sm text-foreground/80">
+                      <span className="font-mono">{b.stamp}</span> · {b.parties} part{b.parties === 1 ? "y" : "ies"}
+                      {b.by ? ` · ${b.by}` : ""}
+                    </p>
+                    {confirm?.restore === b.stamp ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-destructive">Put these parties back as before?</span>
+                        <Button size="sm" variant="outline" onClick={() => setConfirm(null)}>
+                          No
+                        </Button>
+                        <Button size="sm" disabled={busy} onClick={() => start("restore", b.stamp)}>
+                          Yes, undo
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" disabled={busy} onClick={() => start("resume", b.stamp)}>
+                          <PlayCircle className="mr-1.5 h-3.5 w-3.5" />
+                          Resume
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          className="text-destructive"
+                          onClick={() => setConfirm({ restore: b.stamp })}
+                        >
+                          <Undo2 className="mr-1.5 h-3.5 w-3.5" />
+                          Undo
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className={cn(DIALOG_FOOT, "flex flex-wrap items-center justify-end gap-3")}>
+          {confirm === "apply" ? (
+            <>
+              <span className="mr-auto text-sm text-foreground/80">
+                Re-match {parties.length} parties now? Make sure a database backup was taken today.
+              </span>
+              <Button variant="outline" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button disabled={busy} onClick={() => start("apply")}>
+                Yes, fix them
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={onClose}>
+                Close
+              </Button>
+              <Button disabled={busy || parties.length === 0} onClick={() => setConfirm("apply")}>
+                <Wrench className="mr-2 h-4 w-4" />
+                {running ? "Running…" : `Fix ${parties.length} parties`}
+              </Button>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

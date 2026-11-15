@@ -6,6 +6,9 @@ import { SO_STATUS, reasonsOf } from "@/lib/orders/saleOrderApproval";
 // (/dashboard/approvals lists these orders through lib/approvals/saleOrders.js).
 import { approverScope, mayApprove, mayDecide } from "@/lib/approvals/saleOrders";
 import { selfDecisionError } from "@/lib/approvals/rules";
+import { feature } from "@/lib/features/server";
+import { planApprovedOrder } from "@/lib/orders/soPlan";
+import { setAuditActor } from "@/lib/audit/context";
 
 // ============================================================
 // /api/orders/saleOrder/approval — approval of Sale Orders (any reason)
@@ -176,12 +179,20 @@ export const POST = guard(null, async (req, { session }) => {
       },
     });
 
+    // Approved → its lines marked for planning go to their production plan
+    // (Features: saleOrder.planFromOrder). A plan problem never undoes the decision.
+    const plan =
+      action === "approve" && (await feature("saleOrder.planFromOrder"))
+        ? (setAuditActor(session), await planApprovedOrder({ soNo: orderNo, session }))
+        : null;
+
     return NextResponse.json({
       success: true,
       message:
         action === "reject"
           ? `Sale Order ${orderNo} rejected — the sales person has been told why`
-          : `Sale Order ${orderNo} approved — it can now be dispatched`,
+          : `Sale Order ${orderNo} approved — it can now be dispatched${plan?.message ? `. Production plan: ${plan.message}` : ""}`,
+      plan: plan && { ok: plan.ok, message: plan.message },
     });
   } catch (error) {
     console.error("SO approval POST error:", error);

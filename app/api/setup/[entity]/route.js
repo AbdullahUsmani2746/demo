@@ -35,6 +35,11 @@ export async function GET(request, { params }) {
       if (value === "null") {
         dynamicFilters[key] = null;
       }
+      // A list of numbers ("1,4") → any of them (e.g. items of the finished-goods
+      // categories of Settings → Production setup)
+      else if (/^\d+(,\d+)+$/.test(value.trim())) {
+        dynamicFilters[key] = { in: value.trim().split(",").map(Number) };
+      }
       // Convert numeric values to numbers
       else if (!isNaN(value) && value.trim() !== "") {
         dynamicFilters[key] = Number(value);

@@ -7,6 +7,10 @@ import { NextResponse } from "next/server";
 import { guard } from "@/lib/auth/route";
 import { isPeriodLocked } from "@/lib/periodLock";
 import { getAccount, requireAccountGroup } from "@/lib/accounts/accountSettings";
+import { getProductionSetup, isFinishedCategory, isSemiFinishedCategory } from "@/lib/production/setup";
+import { getIssueRates, isBlendedCosting } from "@/lib/costing/issueRate";
+import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
+import { getStockActivityWithRateReport } from "@/app/api/reports/[reportType]/route";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CC RATE: shared overhead pool ÷ total finished-goods qty (ic_id=1) from T8
@@ -20,6 +24,11 @@ async function _calcCcRateForPeriod(month, year) {
   const dateTo   = new Date(year, month, 0, 23, 59, 59);
   const overheadMacnos = await requireAccountGroup("conversion_overheads");
   const conversionCostAcno = await getAccount("conversion_cost");
+  // Categories that receive CC this month: Settings → Production setup
+  // "Finished goods", plus "Semi finished" while the feature
+  // costing.semiFinishedCC applies (lib/costing/ccPolicy.js). The denominator
+  // must cover every category that receives CC, or the pool is absorbed twice.
+  const finishedCategoryIds = await ccCategoryIdsFor(month, year);
 
   const ccRows = await prisma.$queryRaw`
     SELECT
@@ -50,7 +59,7 @@ async function _calcCcRateForPeriod(month, year) {
       AND tm.rmk4 IS DISTINCT FROM 'M2M'
       AND t.sub_tran_id = 1
       AND t.qty > 0
-      AND i.ic_id = 1
+      AND i.ic_id IN (${Prisma.join(finishedCategoryIds.length ? finishedCategoryIds : [-1])})
   `;
   const total_fg_qty = Number(fgRows[0]?.total_qty || 0);
   // const total_fg_qty = 142520.13;
@@ -136,6 +145,8 @@ async function getItemUnitCost(itemId, month, year, ccInclusive = false) {
 // their ProductionCostEntry is available when getPlanMaterials is called.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getPlanMaterials(plan, month, year, ccInclusive = false) {
+  if (await isBlendedCosting()) return getPlanMaterialsBlended(plan, month, year);
+  const setup = await getProductionSetup();
   const details = await prisma.productionPlanDetail.findMany({
     where:   { plan_id: plan.id },
     include: {
@@ -155,7 +166,7 @@ async function getPlanMaterials(plan, month, year, ccInclusive = false) {
     let unitCost   = 0;
     let costSource = "not_found";
 
-    if (icId === 2) {
+    if (isSemiFinishedCategory(setup, icId)) {
       // Semi-finished: blend opening stock + production cost for this period.
       // If the item has opening_qty from last month AND was produced this month,
       // the correct rate is: (opening_qty × opening_rate + prod_qty × prod_cost) / (opening_qty + prod_qty)
@@ -230,11 +241,97 @@ async function getPlanMaterials(plan, month, year, ccInclusive = false) {
   return [...merged.values()];
 }
 
+// Settings → Features "costing.method" = blendedCC: every material (raw or
+// produced) is valued at the month's issue rate — the rate the Stock Activity
+// With Rate report issues it at (lib/costing/issueRate.js) — so the COGM JV
+// credits each material exactly what the stock report issues.
+async function getPlanMaterialsBlended(plan, month, year) {
+  const details = await prisma.productionPlanDetail.findMany({
+    where:   { plan_id: plan.id },
+    include: { item: { select: { itcd: true, item: true, code: true, unit: true, ic_id: true } } },
+    orderBy: { sno: "asc" },
+  });
+  const rates = await getIssueRates({
+    month, year,
+    itcds: details.map((d) => d.material_id),
+    computeMonth: getStockActivityWithRateReport,
+  });
+  const merged = new Map();
+  for (const d of details) {
+    if (!d.material_id) continue;
+    const materialQty = Number(d.material_qty || 0);
+    if (materialQty <= 0) continue;
+    const { rate: unitCost = 0, source: costSource = "not_found" } = rates.get(Number(d.material_id)) || {};
+    const thisCost = materialQty * unitCost;
+    if (merged.has(d.material_id)) {
+      const ex = merged.get(d.material_id);
+      ex.qty += materialQty;
+      ex.total_cost += thisCost;
+      ex.unit_cost = ex.qty > 0 ? ex.total_cost / ex.qty : ex.unit_cost;
+    } else {
+      merged.set(d.material_id, {
+        material_id: d.material_id,
+        material_name: d.item?.item || `Item #${d.material_id}`,
+        material_code: d.item?.code || "",
+        unit: d.item?.unit || "",
+        ic_id: d.item?.ic_id,
+        is_raw_material: true,
+        bom_level: 0,
+        qty: materialQty,
+        unit_cost: unitCost,
+        total_cost: thisCost,
+        cost_source: costSource,
+      });
+    }
+  }
+  return [...merged.values()];
+}
+
+// blendedCC: issued qty per material valued at the same issue rate as above,
+// so the variance is a pure quantity difference.
+async function getActualIssuancesBlended(planId, month, year) {
+  const dateFrom = new Date(year, month - 1, 1);
+  const dateTo   = new Date(year, month, 0, 23, 59, 59);
+  const issued = await prisma.$queryRaw`
+    SELECT t.itcd, i.item AS item_name, i.code AS item_code, i.unit, SUM(t.qty) AS actual_qty
+    FROM "TRANSACTIONS_MASTER" tm
+    JOIN "Transactions" t ON t.tran_id = tm.tran_id
+    LEFT JOIN "Item" i ON i.itcd = t.itcd
+    WHERE tm.tran_code = 7
+      AND tm.dated >= ${dateFrom}
+      AND tm.dated <= ${dateTo}
+      AND tm.rmk5 = ${String(planId)}
+      AND t.sub_tran_id = 1
+      AND t.qty > 0
+    GROUP BY t.itcd, i.item, i.code, i.unit
+  `;
+  const rates = await getIssueRates({
+    month, year,
+    itcds: issued.map((r) => r.itcd),
+    computeMonth: getStockActivityWithRateReport,
+  });
+  const map = new Map();
+  for (const r of issued) {
+    const unit_cost = rates.get(Number(r.itcd))?.rate || 0;
+    const actual_qty = Number(r.actual_qty || 0);
+    map.set(Number(r.itcd), {
+      item_name: r.item_name || "",
+      item_code: r.item_code || "",
+      unit: r.unit || "",
+      actual_qty,
+      unit_cost,
+      actual_cost: actual_qty * unit_cost,
+    });
+  }
+  return map;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET ACTUAL ISSUANCES for a plan (tran_code=7, rmk5 = plan_id string)
 // Returns Map: itcd → { item_name, item_code, unit, actual_qty, unit_cost, actual_cost }
 // ─────────────────────────────────────────────────────────────────────────────
 async function getActualIssuances(planId, month, year, ccInclusive = false) {
+  if (await isBlendedCosting()) return getActualIssuancesBlended(planId, month, year);
   const dateFrom   = new Date(year, month - 1, 1);
   const dateTo     = new Date(year, month, 0, 23, 59, 59);
 
@@ -757,7 +854,8 @@ const isM2M = t8M2MCheck !== null;
   // semi). Value those finished-good inputs at their CC-inclusive rate so the
   // overhead travels into the semi instead of being stripped. The semi output
   // itself gets no CC (ic_id=2), so there is no double-count.
-  const ccInclusive = Number(finishedItem?.ic_id) === 2;
+  const setup = await getProductionSetup();
+  const ccInclusive = isSemiFinishedCategory(setup, finishedItem?.ic_id);
 
   // ── 1. Theoretical cost from productionPlanDetail ─────────────────────────
   // Uses the actual material list on this plan (not BomMaster).
@@ -796,8 +894,10 @@ const isM2M = t8M2MCheck !== null;
   const effectivePerUnit = qty > 0 ? effectiveCost / qty : 0;
   const actualPerUnit    = actualIssuedCost > 0 && qty > 0 ? actualIssuedCost / qty : null;
 
-  // ── CC overhead: applied only when the produced item's category is ic_id=1 ─
-  const isFG   = Number(finishedItem?.ic_id) === 1 && !isM2M;
+  // ── CC overhead: applied only when the produced item's category receives CC
+  // this month (finished goods; + semi-finished per costing.semiFinishedCC) ─
+  const ccCategoryIds = await ccCategoryIdsFor(month, year);
+  const isFG   = ccCategoryIds.includes(Number(finishedItem?.ic_id)) && !isM2M;
   const ccRate = isFG ? (ccRatePerUnit || 0) : 0;
   const ccCost = ccRate * qty;
 
@@ -920,6 +1020,8 @@ const isM2M = t8M2MCheck !== null;
 // CC overhead is applied to ic_id=1 items using the same rate as plan-based costing.
 // ─────────────────────────────────────────────────────────────────────────────
 async function costOrphanItems(month, year, calculatedBy, ccRatePerUnit = 0) {
+  const setup = await getProductionSetup();
+  const ccCategoryIds = await ccCategoryIdsFor(month, year);
   const startDate = new Date(year, month - 1, 1);
   const endDate   = new Date(year, month, 0, 23, 59, 59);
 
@@ -1000,7 +1102,7 @@ async function costOrphanItems(month, year, calculatedBy, ccRatePerUnit = 0) {
     const allocT7Cost    = totalT7Damt * costShare;
 
     // CC overhead for finished goods only
-    const isFG    = Number(t8.ic_id) === 1;
+    const isFG    = ccCategoryIds.includes(Number(t8.ic_id)); // categories receiving CC this month
     const ccCost  = isFG ? ccRatePerUnit * t8Qty : 0;
     const totalCost   = allocT7Cost + ccCost;
     const costPerUnit = t8Qty > 0 ? totalCost / t8Qty : 0;

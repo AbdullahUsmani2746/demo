@@ -6,6 +6,6 @@ import { HR_PERMS } from "@/lib/hr/access";
 import { hrRoute } from "@/lib/hr/route";
 import { cashBankAccounts } from "@/lib/hr/vouchers";
 
-export const GET = hrRoute([HR_PERMS.loanDisburse, HR_PERMS.payrollPay], async (req, { session }) => {
+export const GET = hrRoute([HR_PERMS.loanDisburse, HR_PERMS.payrollPay, HR_PERMS.settlementPost], async (req, { session }) => {
   return NextResponse.json({ accounts: await cashBankAccounts(session) });
 });

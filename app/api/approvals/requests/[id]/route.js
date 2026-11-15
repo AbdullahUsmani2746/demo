@@ -18,6 +18,8 @@ import { canDecide, formLabel, notifyRequester, REQUEST_STATUS, selfDecisionErro
 import { describeConditions, ruleFieldsFor } from "@/lib/approvals/conditions";
 import { POST as voucherPost, PUT as voucherPut } from "@/app/api/voucher/[type]/route";
 import { POST as orderPost, PUT as orderPut } from "@/app/api/orders/[type]/route";
+// Production Plan Nature change (kind "plan") — applied by the requisition route
+import { PUT as planPut } from "@/app/api/material/requisition/route";
 import { canDecideHr, decideHrRequest, describeHrRequest, hrRequestCancelled, hrSelfError } from "@/lib/hr/approvals";
 import { HR_APPROVAL_TYPES, HR_KIND, isHrType } from "@/lib/hr/approvalTypes";
 import { describeSaleOrder, diffLines, SO_CATEGORY, soOrderNo } from "@/lib/approvals/saleOrders";
@@ -25,7 +27,9 @@ import { POST as saleOrderDecide } from "@/app/api/orders/saleOrder/approval/rou
 
 // The route handler that saves this request: voucher / order × new / edit.
 const handlerFor = (request) =>
-  request.kind === "order"
+  request.kind === "plan"
+    ? planPut
+    : request.kind === "order"
     ? request.action === "update" ? orderPut : orderPost
     : request.action === "update" ? voucherPut : voucherPost;
 
@@ -153,7 +157,9 @@ export const GET = guard(null, async (req, { params, session }) => {
   let current = null;
   if (request.action === "update" && request.target_id) {
     current =
-      request.kind === "order"
+      request.kind === "plan"
+        ? await prisma.reqMaster.findUnique({ where: { tran_id: Number(request.target_id) } })
+        : request.kind === "order"
         ? await prisma.orderMaster.findUnique({ where: { order_no: Number(request.target_id) } })
         : await prisma.transactionsMaster.findUnique({ where: { tran_id: Number(request.target_id) } });
   }
@@ -175,7 +181,14 @@ export const GET = guard(null, async (req, { params, session }) => {
   // (qty / rate). Account-only lines (receipts, JVs) are listed in full below.
   let line_changes = [];
   const itemLines = lines.filter((l) => Number.isFinite(Number(shown(l.itcd))) && shown(l.itcd) !== "");
-  if (current && itemLines.length) {
+  if (request.kind === "plan") {
+    // Production Plan: only the Nature asked for, per Sale Order + item
+    line_changes = (payload.natureChanges || []).map((c) => ({
+      item: `${c.so_no ? `SO ${c.so_no} · ` : ""}${itemName.get(Number(c.itcd)) ?? `Item ${c.itcd}`}`,
+      change: "changed",
+      fields: [{ label: "Nature", from: c.from || "—", to: c.to || "—" }],
+    }));
+  } else if (current && itemLines.length) {
     const saved =
       request.kind === "order"
         ? await prisma.orderDetail.findMany({ where: { order_no: Number(request.target_id) }, select: { itcd: true, qty: true, rate: true } })

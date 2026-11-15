@@ -1,9 +1,9 @@
 "use client";
 
 // HR → Payroll → one run: payslips, adjustments, approval, posting, paying.
-import { use, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -21,6 +21,8 @@ import { RunStatus } from "@/components/HR/payroll/RunsTab";
 import PayslipSheet from "@/components/HR/payroll/PayslipSheet";
 import { downloadPayslips } from "@/components/HR/payroll/payslipPdf";
 import PaymentsPanel, { PayDialog } from "@/components/HR/payroll/PaymentsPanel";
+import { BankFilesDialog } from "@/components/HR/payroll/BankFiles";
+import { useFeatures } from "@/hooks/useFeatures";
 import { Card, Chip, CodeChip, DIALOG, DIALOG_FOOTER, MAIN, PAGE, PageSkeleton, SCROLL, Stepper, TFOOT, TH, TH_STICKY, TR } from "@/components/HR/payroll/ui";
 
 // The run's life cycle on the stepper: prepared → sent → approved → posted → paid.
@@ -61,8 +63,15 @@ export default function RunPage({ params }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [openSlip, setOpenSlip] = useState(null);
+  // ?slip=<employee id> opens that payslip (drill from Pay history).
+  const slipParam = Number(useSearchParams().get("slip")) || null;
+  useEffect(() => {
+    if (slipParam && data?.payslips?.some((p) => p.employee.id === slipParam)) setOpenSlip(slipParam);
+  }, [slipParam, data]);
   const [journal, setJournal] = useState(false);
   const [paying, setPaying] = useState(false);
+  const [bankFiles, setBankFiles] = useState(false);
+  const features = useFeatures();
 
   const slips = useMemo(() => data?.payslips ?? [], [data]);
   const shown = useMemo(() => {
@@ -271,6 +280,9 @@ export default function RunPage({ params }) {
             <div className="flex w-full flex-wrap gap-2 max-sm:[&>*]:flex-1 md:ml-auto md:w-auto">
               <Button variant="outline" size="sm" className="h-9" onClick={exportRegister}><FileSpreadsheet className="h-4 w-4 mr-1.5" />Register</Button>
               <Button variant="outline" size="sm" className="h-9" onClick={exportBank}><Landmark className="h-4 w-4 mr-1.5" />Bank sheet</Button>
+              {features.on("hr.bankDisbursement") && metaQ.data?.rights?.bankFile && ["APPROVED", "POSTED"].includes(run.status) && (
+                <Button variant="outline" size="sm" className="h-9" onClick={() => setBankFiles(true)}><Landmark className="h-4 w-4 mr-1.5" />Bank files</Button>
+              )}
               <Button variant="outline" size="sm" className="h-9" onClick={exportPdf} disabled={!shown.length}><FileDown className="h-4 w-4 mr-1.5" />Payslips PDF</Button>
             </div>
           </div>
@@ -397,6 +409,7 @@ export default function RunPage({ params }) {
       </Dialog>
 
       <JournalDialog id={id} open={journal} onClose={() => setJournal(false)} />
+      {bankFiles && <BankFilesDialog runId={id} open={bankFiles} onClose={() => setBankFiles(false)} />}
       {paying && payments && (
         <PayDialog open={paying} onClose={() => setPaying(false)} runId={id} run={run} slips={slips} paidBy={paidBy} today={metaQ.data?.today} />
       )}

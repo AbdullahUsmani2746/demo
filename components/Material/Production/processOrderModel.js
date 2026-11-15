@@ -8,14 +8,14 @@
 //   lines    issuance lines (materials + instructions), each belonging to one
 //            output through `outputKey` — RIGHT panel
 // ============================================================
-import { godownForCategory, GODOWN_DEFAULT } from "@/lib/productionGodown";
+// Default godowns + packing categories come from Settings → Production setup
+// (hooks/useProductionSetup.js → `setup`), passed in by the form.
+import { godownForCategory, isPackingCategory } from "@/lib/production/setupConfig";
 
 export const PRODUCTION_TYPES = { NEW: "new", SF: "sf", REPROCESSING: "reprocessing" };
 export const DEFAULT_UNIT = "KG";
 export const UNIT_OPTIONS = ["KG", "PCS", "NOS", "FT", "MTR", "ROLL", "PCK", "TON", "PAR", "MND", "OTH"];
-// ItemCategory.id of PACKAGING-MATERIAL — never stock-checked for production
-export const PACKAGING_CATEGORY_ID = 4;
-export { GODOWN_DEFAULT, godownForCategory };
+export { godownForCategory, isPackingCategory };
 
 let seq = 0;
 export const newKey = (prefix) => `${prefix}_${Date.now().toString(36)}_${(seq++).toString(36)}`;
@@ -55,7 +55,8 @@ export const emptyOutput = (overrides = {}) => ({
   ...overrides,
 });
 
-export const emptyLine = (outputKey, kind = "material", overrides = {}) => ({
+/** `setup` (Production setup) gives a material line its default issue godown. */
+export const emptyLine = (outputKey, kind = "material", overrides = {}, setup) => ({
   key: newKey("ln"),
   id: null,
   outputKey,
@@ -65,7 +66,7 @@ export const emptyLine = (outputKey, kind = "material", overrides = {}) => ({
   material_desc: "",
   material_qty: "",
   material_percentage: 0,
-  godown: kind === "material" ? GODOWN_DEFAULT : null,
+  godown: kind === "material" ? setup.productionGodown : null,
   unit: kind === "material" ? DEFAULT_UNIT : null,
   fromBom: false,
   orig: null,
@@ -83,10 +84,12 @@ export const emptyHeader = () => ({
   viscosity: "",
   m2m: false,
   receipe_id: null,
+  // reprocessing: wait for Send to Production (processOrder.batchRequiredReprocessing)
+  batch_required: false,
 });
 
 /** BOM materials (from /api/manufacturing/bom/:id `materials`) → issuance lines. */
-export const linesFromBom = (outputKey, materials = [], qty = 0) =>
+export const linesFromBom = (outputKey, materials = [], qty = 0, setup) =>
   materials.map((m) =>
     emptyLine(outputKey, "material", {
       material_id: m.id ?? m.material_id,
@@ -95,11 +98,34 @@ export const linesFromBom = (outputKey, materials = [], qty = 0) =>
       material_percentage: toNum(m.percentage ?? m.material_percentage),
       material_qty: round((toNum(qty) * toNum(m.percentage ?? m.material_percentage)) / 100),
       fromBom: true,
-    }),
+    }, setup),
   );
 
+/**
+ * Recipe details (RECEIPE_DETAIL rows: product_id, product_desc, product_percentage, sno)
+ * → issuance lines, in recipe order. A row without an item is an instruction.
+ * Used when Settings → Features makes process orders from recipes
+ * (production.processOrderSource = "recipe"). Materials follow the planned
+ * quantity like BOM lines (fromBom) until edited by hand.
+ */
+export const linesFromRecipe = (outputKey, details = [], qty = 0, setup) =>
+  [...details]
+    .sort((a, b) => (a.sno || 0) - (b.sno || 0) || (a.id || 0) - (b.id || 0))
+    .map((d, i) =>
+      d.product_id
+        ? emptyLine(outputKey, "material", {
+            material_id: d.product_id,
+            material_code: d.item?.code || "",
+            material_desc: d.product_desc || d.item?.item || "",
+            material_percentage: toNum(d.product_percentage),
+            material_qty: round((toNum(qty) * toNum(d.product_percentage)) / 100),
+            fromBom: true,
+          }, setup)
+        : emptyLine(outputKey, "instruction", { material_desc: d.product_desc || `Instruction ${d.sno || i + 1}` }, setup),
+    );
+
 /** An order from GET /api/manufacturing/production → editable state. */
-export function loadOrder(plan) {
+export function loadOrder(plan, setup) {
   if (!plan) {
     const out = emptyOutput();
     return { header: emptyHeader(), outputs: [out], lines: [] };
@@ -140,12 +166,12 @@ export function loadOrder(plan) {
       material_desc: d.material_desc || d.item?.item || "",
       material_qty: isMaterial ? d.material_qty ?? 0 : 0,
       material_percentage: d.material_percentage ?? 0,
-      godown: isMaterial ? d.issue_godown ?? d.godown ?? GODOWN_DEFAULT : null,
+      godown: isMaterial ? d.issue_godown ?? d.godown ?? setup.productionGodown : null,
       unit: isMaterial ? d.issue_unit || d.unit || DEFAULT_UNIT : null,
       wastage_percentage: d.item?.wastage_percentage ?? null,
       edited: isMaterial && editedMaterials.has(d.material_id),
       orig: { qty: d.material_qty ?? 0, pct: d.material_percentage ?? 0, desc: d.material_desc || "" },
-    });
+    }, setup);
   });
 
   // Group the lines by production item, keeping their saved order inside it
@@ -162,19 +188,23 @@ export function loadOrder(plan) {
     time_min: plan.time_min ?? "",
     viscosity: plan.viscosity || "",
     m2m: !!plan.m2m,
+    batch_required: !!plan.batch_required,
     receipe_id: plan.receipe_id ?? null,
+    receipe_label: plan.receipe_id
+      ? `Recipe #${plan.receipe_id}${plan.recipe?.item ? ` - ${plan.recipe.item.code || ""} ${plan.recipe.item.item || ""}` : ""}`
+      : "",
   };
   return { header, outputs, lines };
 }
 
 /** Godown an output produces into when the user has not picked one. */
-export const outputGodown = (o) => o.godown ?? (o.finished_id ? godownForCategory(o.ic_id) : null);
+export const outputGodown = (o, setup) => o.godown ?? (o.finished_id ? godownForCategory(setup, o.ic_id) : null);
 
 /**
  * Inline validation.
  * @returns {{ outputs: Map<key, string[]>, lines: Map<key, string[]>, header: string[], count: number }}
  */
-export function validate({ header, outputs, lines, type, stockShort = new Map(), blockOnStock = false }) {
+export function validate({ header, outputs, lines, type, setup, stockShort = new Map(), blockOnStock = false, requireRecipe = false, requireBom = false }) {
   const out = new Map();
   const ln = new Map();
   const head = [];
@@ -185,11 +215,15 @@ export function validate({ header, outputs, lines, type, stockShort = new Map(),
 
   if (!header.dated) head.push("Plan date is required");
   if (outputs.length === 0) head.push("Add at least one production item");
+  // Settings → Features: process orders are made from recipes
+  if (requireRecipe && !header.receipe_id) head.push("Choose the recipe — new process orders are made from a recipe");
 
   for (const o of outputs) {
     if (!o.finished_id) push(out, o.key, "Select the production item");
     if (!(toNum(o.qty) > 0)) push(out, o.key, "Enter the quantity to produce");
-    if (!outputGodown(o)) push(out, o.key, "Select the production godown");
+    if (!outputGodown(o, setup)) push(out, o.key, "Select the production godown");
+    // Settings → Features "production.bomRequired"
+    if (requireBom && !o.bom_id) push(out, o.key, "Choose the BOM — process orders must name a BOM");
     const mats = lines.filter((l) => l.outputKey === o.key && l.kind === "material");
     if (mats.length === 0) push(out, o.key, "No issuances — load the BOM or add lines");
   }
@@ -221,7 +255,7 @@ export function validate({ header, outputs, lines, type, stockShort = new Map(),
 }
 
 /** Editable state → POST / PUT body. */
-export function buildPayload({ header, outputs, lines, type, isEdit, locked }) {
+export function buildPayload({ header, outputs, lines, type, isEdit, locked, setup }) {
   const outputsBody = outputs.map((o, i) => ({
     line_no: i + 1,
     finished_id: o.finished_id,
@@ -234,7 +268,7 @@ export function buildPayload({ header, outputs, lines, type, isEdit, locked }) {
           ? toNum(o.qty)
           : null,
     unit: o.unit || DEFAULT_UNIT,
-    godown: outputGodown(o),
+    godown: outputGodown(o, setup),
     batch_no: o.batch_no || null,
   }));
   const lineNoOf = new Map(outputs.map((o, i) => [o.key, i + 1]));

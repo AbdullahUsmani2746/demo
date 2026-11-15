@@ -14,6 +14,8 @@ import { cn } from "@/lib/utils";
 import { LabHeader, LabStat, Chip, CODE_CHIP, CHIP, TH } from "@/components/Material/shared/LabUI";
 import { CostingFrame, PeriodPicker, IconBtn, MONTHS } from "@/components/Costing/CostingUI";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { isFinishedCategory, isSemiFinishedCategory, isRawMaterialCategory } from "@/lib/production/setupConfig";
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -33,9 +35,17 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-PK", { day: "2-dig
 // ─────────────────────────────────────────────────────────────
 // Item category labels + icon
 // ─────────────────────────────────────────────────────────────
-const IC_LABELS = { 1: "Finished Good", 2: "Semi-Finished", 3: "Raw Material" };
-const IC_ICON   = { 1: Factory, 2: Layers, 3: Package };
-const IC_TONE   = { 1: "brand", 2: "warn", 3: "muted" };
+// The kind of an item category = Settings → Production setup
+const IC_KINDS = {
+  finished: { label: "Finished Good", icon: Factory, tone: "brand" },
+  semi:     { label: "Semi-Finished", icon: Layers,  tone: "warn" },
+  raw:      { label: "Raw Material",  icon: Package, tone: "muted" },
+};
+const icKind = (setup, icId) =>
+  isFinishedCategory(setup, icId) ? IC_KINDS.finished
+    : isSemiFinishedCategory(setup, icId) ? IC_KINDS.semi
+      : isRawMaterialCategory(setup, icId) ? IC_KINDS.raw
+        : null;
 
 // Table cell paddings (first / middle / last column).
 const C0 = "py-1.5 pl-4 pr-2";
@@ -611,6 +621,7 @@ function LoadingState() {
 // Item search (ITCD / code / name autocomplete)
 // ─────────────────────────────────────────────────────────────
 function ItemSearch({ inputRef, onSelect, onDirectItcd, disabled }) {
+  const { setup } = useProductionSetup();
   const [query,   setQuery]   = useState("");
   const [results, setResults] = useState([]);
   const [open,    setOpen]    = useState(false);
@@ -731,8 +742,8 @@ function ItemSearch({ inputRef, onSelect, onDirectItcd, disabled }) {
                   {it.code && it.unit ? " · " : ""}{it.unit || ""}
                 </span>
               </span>
-              <Chip tone={IC_TONE[it.ic_id] || "muted"} className="flex-shrink-0 px-1.5 text-[10px]">
-                {IC_LABELS[it.ic_id] || `ic ${it.ic_id}`}
+              <Chip tone={icKind(setup, it.ic_id)?.tone || "muted"} className="flex-shrink-0 px-1.5 text-[10px]">
+                {icKind(setup, it.ic_id)?.label || `ic ${it.ic_id}`}
               </Chip>
             </button>
           ))}
@@ -746,6 +757,7 @@ function ItemSearch({ inputRef, onSelect, onDirectItcd, disabled }) {
 // Main Page
 // ─────────────────────────────────────────────────────────────
 export default function CostingCheckingPage() {
+  const { setup } = useProductionSetup();
   const now = new Date();
   const [itcd,    setItcd]    = useState("");
   const [month,   setMonth]   = useState(String(now.getMonth() + 1));
@@ -771,7 +783,7 @@ export default function CostingCheckingPage() {
   }, [itcd, month, year]);
 
   const ic_id  = data?.item?.ic_id;
-  const ItemIcon = IC_ICON[ic_id] || Factory;
+  const ItemIcon = icKind(setup, ic_id)?.icon || Factory;
 
   return (
     <CostingFrame>
@@ -813,7 +825,7 @@ export default function CostingCheckingPage() {
               <ItemIcon className="h-4 w-4 text-primary" />
               {data.item.item}
             </span>
-            <Chip tone={IC_TONE[ic_id] || "muted"}>{IC_LABELS[ic_id] || `ic_id=${ic_id}`}</Chip>
+            <Chip tone={icKind(setup, ic_id)?.tone || "muted"}>{icKind(setup, ic_id)?.label || `ic_id=${ic_id}`}</Chip>
             {data.item.unit && <Chip tone="muted">{data.item.unit}</Chip>}
             <span className="font-semibold text-foreground">{MONTHS[parseInt(month)-1]} {year}</span>
             <span>ITCD <strong className="tabular-nums text-foreground">{data.item.itcd}</strong></span>

@@ -269,6 +269,15 @@ const entityConfig = {
         optionLabelKey: "acname",
         optionValueKey: "acno",
       },
+      // Settings → Features "grn.directRateByItem" (lib/grn/directRate.js)
+      {
+        name: "grn_direct_rate",
+        label: "Rate entered on the GRN",
+        fieldType: "checkbox",
+        checkboxLabel: "Its items take the rate typed on the GRN (not the PO rate)",
+        defaultValue: false,
+        feature: "grn.directRateByItem",
+      },
     ],
     allowDelete: false
   },
@@ -783,6 +792,17 @@ const entityConfig = {
         fieldType: "number",
         required: true,
         sortable: true,
+      },
+      // Where the withheld tax is booked (Settings → Features "tax.lineWht", lib/tax/lineWht.js)
+      {
+        relation: "taxAcno",
+        relationName: "acname",
+        name: "tax_acno",
+        label: "Payable Account",
+        fieldType: "select",
+        fetchFrom: "/api/accounts/acno",
+        optionLabelKey: "acname",
+        optionValueKey: "acno",
       },
     ],
   },

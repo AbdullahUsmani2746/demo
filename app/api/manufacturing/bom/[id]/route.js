@@ -2,6 +2,7 @@
 import prisma from '@/lib/prisma';
 import { NextResponse } from 'next/server';
 import { guard } from "@/lib/auth/route";
+import { bomSaveError, deactivateOtherBoms } from "@/lib/manufacturing/bomRules";
 
 export async function GET(request, { params }) {
   try {
@@ -46,32 +47,38 @@ export async function GET(request, { params }) {
 export const PUT = guard("bom.manage", async (request, { params }) => {
   try {
     const data = await request.json();
-    const { finished_id, bomDetails, instructions } = data; // Fixed field names
-    
-    
-    // Update the BOM master
-    await prisma.bomMaster.update({
-      where: { id: parseInt(params.id) },
-      data: {
-        finished_id: parseInt(finished_id),
-        instructions,
-      },
-    });
+    const { finished_id, bomDetails, instructions } = data;
+    // Settings → Features "bom.percentRule" (lib/manufacturing/bomRules.js)
+    const saveError = await bomSaveError(data, { editing: true });
+    if (saveError) return NextResponse.json({ error: saveError }, { status: 422 });
 
-    // Delete existing details and create new ones
-    await prisma.bomDetail.deleteMany({ 
-      where: { bom_id: parseInt(params.id) } 
-    });
-    
-    for (const mat of bomDetails) {
-      await prisma.bomDetail.create({
+    await prisma.$transaction(async (tx) => {
+      // Update the BOM master
+      await tx.bomMaster.update({
+        where: { id: parseInt(params.id) },
         data: {
-          bom_id: parseInt(params.id), // Fixed: should be bom_id, not finished_id
-          material_id: parseInt(mat.material_id), // Fixed field name
-          material_percentage: mat.material_percentage, // Fixed field name
+          finished_id: parseInt(finished_id),
+          instructions,
         },
       });
-    }
+
+      // Delete existing details and create new ones
+      await tx.bomDetail.deleteMany({
+        where: { bom_id: parseInt(params.id) },
+      });
+
+      for (const mat of bomDetails) {
+        await tx.bomDetail.create({
+          data: {
+            bom_id: parseInt(params.id),
+            material_id: parseInt(mat.material_id),
+            material_percentage: mat.material_percentage,
+          },
+        });
+      }
+      // "bom.oneActivePerItem": the item's other active BOMs become Inactive
+      await deactivateOtherBoms(tx, { bomId: params.id, finishedId: finished_id, instructions });
+    });
 
     // Fetch the updated BOM with relations
     const updatedBom = await prisma.bomMaster.findUnique({

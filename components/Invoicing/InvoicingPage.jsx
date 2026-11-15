@@ -72,6 +72,8 @@ import { Kbd, PartyPicker, Segmented, StatChip, UI } from "./parts";
 import QueueItem from "./QueueItem";
 import DetailPanel from "./DetailPanel";
 import { ConfirmGenerateDialog, ResultsDialog, UnlockDialog } from "./dialogs";
+import ApprovedTrialItems from "./ApprovedTrialItems";
+import { useFeatures } from "@/hooks/useFeatures";
 
 const PAGE_LIMIT = 50;
 
@@ -105,6 +107,9 @@ function CenterState({ icon: Icon, tone = "muted", title, children, action }) {
 export default function InvoicingPage({ kind }) {
   const cfg = INVOICING_KINDS[kind];
   const queryClient = useQueryClient();
+  // Settings → Features: Approved trial items (Sale Invoicing, orders.trialLineBilling)
+  const features = useFeatures();
+  const trialBilling = kind === "sale" && features.on("orders.trialLineBilling");
 
   const [tab, setTab] = useState("pending");
   const [readiness, setReadiness] = useState("all"); // all | ready | blocked (client-side, this page)
@@ -580,6 +585,8 @@ export default function InvoicingPage({ kind }) {
             </>
           }
         />
+
+        {trialBilling ? <ApprovedTrialItems onBilled={() => refetch()} /> : null}
 
         {/* ── stat tiles (click to filter the queue) ── */}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">

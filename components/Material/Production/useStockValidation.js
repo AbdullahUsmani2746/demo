@@ -2,9 +2,8 @@
 import { useState, useCallback } from 'react';
 import axios from 'axios';
 import { useStockPolicy } from '@/hooks/useStockPolicy';
-
-// ItemCategory.id of PACKAGING-MATERIAL (Setup → Item Categories)
-const PACKAGING_CATEGORY_ID = 4;
+import { useProductionSetup } from '@/hooks/useProductionSetup';
+import { isPackingCategory } from '@/lib/production/setupConfig';
 
 // The check follows the stock check policy "processOrder" (Settings → Stock
 // checking; the server re-checks on send — lib/manufacturing/processOrder.js):
@@ -13,25 +12,27 @@ const PACKAGING_CATEGORY_ID = 4;
 //   off   → not checked
 export const useStockValidation = () => {
   const { screenMode } = useStockPolicy();
+  // Settings → Production setup: production godown + packing categories
+  const { setup } = useProductionSetup();
   const [isChecking, setIsChecking] = useState(false);
   const [stockErrors, setStockErrors] = useState([]);
   const [stockErrorDetails, setStockErrorDetails] = useState([]);
 
-  // godown: the issue godown of the line (PRODUCTION = 2 when not set)
-  const checkMaterialStock = useCallback(async (materialId, requiredQty, materialName, godown = 2) => {
+  // godown: the issue godown of the line (the production godown when not set)
+  const checkMaterialStock = useCallback(async (materialId, requiredQty, materialName, godown) => {
     try {
       const response = await axios.get('/api/inventory/stock', {
         params: {
           itcd: materialId,
-          godown: godown || 2,
+          godown: godown || setup.productionGodown,
         }
       });
 
       const availableStock = response.data.stock || 0;
 
-      // Packaging material (item category 4 = PACKAGING-MATERIAL) is never
-      // stock-checked when sending to production.
-      if (Number(response.data.categoryId) === PACKAGING_CATEGORY_ID) {
+      // Packing material (Production setup) is never stock-checked when
+      // sending to production.
+      if (isPackingCategory(setup, response.data.categoryId)) {
         return {
           materialId,
           materialName: materialName || materialId,
@@ -75,7 +76,7 @@ export const useStockValidation = () => {
         error: error.message
       };
     }
-  }, []);
+  }, [setup]);
 
   const validateProductionPlanStock = useCallback(async (productionPlanDetail, productionType = 'new') => {
     setIsChecking(true);
@@ -102,7 +103,7 @@ export const useStockValidation = () => {
       // items) out of one godown needs the SUM of those lines in stock.
       const needs = new Map();
       for (const material of materials) {
-        const godown = Number(material.issue_godown ?? material.godown) || 2;
+        const godown = Number(material.issue_godown ?? material.godown) || setup.productionGodown;
         const key = `${material.material_id}:${godown}`;
         const prev = needs.get(key);
         needs.set(key, {
@@ -147,7 +148,7 @@ export const useStockValidation = () => {
       setIsChecking(false);
       return { isValid: false, errors: [errorMsg] };
     }
-  }, [checkMaterialStock, screenMode]);
+  }, [checkMaterialStock, screenMode, setup]);
 
   return {
     validateProductionPlanStock,

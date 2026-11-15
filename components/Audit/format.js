@@ -101,9 +101,21 @@ export function fmtValue(v) {
   return String(v);
 }
 
+/** A changed / recorded value with its name when it is an id (lib/audit/refs.js). */
+export const fmtNamed = (v, label) => (label && !isEmpty(v) ? label : fmtValue(v));
+
+/** A change entry { field, old, new } — vs. a context entry { field, value } (order lines). */
+export const isDiff = (c) => c && ("old" in c || "new" in c);
+
+/** "ABC-101 — Blue Ink" for a row's item, "" when it has none. */
+export const itemText = (item) => (item ? [item.code, item.name].filter(Boolean).join(" — ") || `Item ${item.itcd}` : "");
+
+/** "#1234", or "" for a line added in bulk (its id is not known when it is recorded). */
+export const recordNo = (row) => (row?.record_id && row.record_id !== "new" ? `#${row.record_id}` : "");
+
 /** One-line, length-capped version for previews. */
-export function fmtShort(v, max = 40) {
-  const s = fmtValue(v).replace(/\s+/g, " ");
+export function fmtShort(v, max = 40, label = null) {
+  const s = fmtNamed(v, label).replace(/\s+/g, " ");
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 

@@ -5,7 +5,7 @@
 // hr.leave.apply, hr.loan.apply, hr.payslip.own — every role by default).
 import { Suspense } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { CalendarCheck, FileText, HandCoins, Link2Off, Plane, ShieldAlert, UserRound } from "lucide-react";
+import { CalendarCheck, FileText, HandCoins, Link2Off, Plane, ShieldAlert, UserRound, UserMinus } from "lucide-react";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PageHeader, useHrMeta } from "@/components/HR/shared";
 import { MAIN, PAGE, PageSkeleton, UnderlineTab, UnderlineTabsList } from "@/components/HR/payroll/ui";
@@ -13,12 +13,15 @@ import MyAttendance from "@/components/HR/self/MyAttendance";
 import MyLeave from "@/components/HR/leave/MyLeave";
 import LoansList from "@/components/HR/loans/LoansList";
 import MyPayslips from "@/components/HR/payroll/MyPayslips";
+import MyLeaving from "@/components/HR/leaving/MyLeaving";
+import { useFeatures } from "@/hooks/useFeatures";
 
 function MyHrPage() {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
   const { data: meta, isLoading, error } = useHrMeta();
+  const features = useFeatures();
 
   if (isLoading) return <PageSkeleton />;
   if (error || !meta?.self) {
@@ -34,6 +37,7 @@ function MyHrPage() {
     (r.leaveApply || r.leaveManage) && { key: "leave", label: "Leave", icon: Plane, body: <MyLeave meta={meta} /> },
     (r.loanApply || r.loanManage) && { key: "loans", label: "Advances & loans", icon: HandCoins, body: <LoansList meta={meta} mine /> },
     r.payslipOwn && { key: "payslips", label: "Payslips", icon: FileText, body: <MyPayslips /> },
+    r.leavingApply && features.on("hr.leavingProcess") && { key: "leaving", label: "Leaving", icon: UserMinus, body: <MyLeaving meta={meta} /> },
   ].filter(Boolean);
   if (!all.length) {
     return (

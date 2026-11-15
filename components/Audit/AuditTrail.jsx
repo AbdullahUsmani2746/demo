@@ -39,7 +39,7 @@ import { auditLabel } from "@/lib/audit/catalog";
 import AuditFilters, { ActiveChips } from "./AuditFilters";
 import AuditTimeline, { whoOf } from "./AuditTimeline";
 import AuditDetailSheet from "./AuditDetailSheet";
-import { FILTER_KEYS, SCOPE_KEYS, fmtDateTime, fmtDayShort, fmtNum, fmtValue, humanize, presetRange, scopeOf } from "./format";
+import { FILTER_KEYS, SCOPE_KEYS, fmtDateTime, fmtDayShort, fmtNamed, fmtNum, humanize, isDiff, presetRange, scopeOf } from "./format";
 
 const PAGE_SIZE = 50;
 const EXPORT_SIZE = 200;
@@ -80,13 +80,16 @@ function NoAuditAccess() {
   );
 }
 
-function ScopeCard({ scope, params, first, total, onBack }) {
+function ScopeCard({ scope, params, first, page, total, onBack }) {
   let icon = FileStack;
   let title = "";
   let hint = "";
   if (scope === "document") {
-    title = `${singular(auditLabel(params.doc_model))} #${params.doc_id} — full history`;
-    hint = "The document and every line that belongs to it, over all time.";
+    const label = page?.scope_label ?? singular(auditLabel(params.doc_model));
+    title = `${label} #${params.doc_id} — full history`;
+    hint = page?.linked
+      ? "The order, every line of it, and the Production Plan lines and Process Orders made from it — over all time."
+      : "The document and every line that belongs to it, over all time.";
   } else if (scope === "record") {
     icon = History;
     title = `${singular(auditLabel(params.model))} #${params.record} — record history`;
@@ -126,6 +129,8 @@ export default function AuditTrail() {
   const spString = sp.toString();
   const [selected, setSelected] = useState(null);
   const [exporting, setExporting] = useState(false);
+  // Lines a re-save removed and added back unchanged — shown unless hidden
+  const [hideResaves, setHideResaves] = useState(false);
   const listQuery = useRef("");
 
   const params = useMemo(() => {
@@ -190,7 +195,9 @@ export default function AuditTrail() {
   });
 
   const first = q.data?.pages?.[0];
-  const rows = useMemo(() => q.data?.pages.flatMap((p) => p.rows) ?? [], [q.data]);
+  const allRows = useMemo(() => q.data?.pages.flatMap((p) => p.rows) ?? [], [q.data]);
+  const resaveCount = useMemo(() => allRows.filter((r) => r.resave?.same).length, [allRows]);
+  const rows = useMemo(() => (hideResaves ? allRows.filter((r) => !r.resave?.same) : allRows), [allRows, hideResaves]);
   const facets = first?.facets;
   const total = first?.total ?? 0;
   const acts = facets?.actions ?? {};
@@ -210,21 +217,31 @@ export default function AuditTrail() {
         if (!d.rows.length || page * d.size >= d.total) break;
       }
       const XLSX = await import("xlsx");
-      const head = ["Date & time", "User", "Made by", "Action", "Table", "Record", "Document", "Document no.", "Field", "Before", "After", "Save", "Entry"];
+      const head = ["Date & time", "User", "Made by", "Action", "Table", "Record", "Document", "Document no.", "Item code", "Item", "Account", "Sale Order", "What happened", "Why", "Field", "Before", "After", "Save", "Entry"];
       const body = [];
-      const flat = (v) => fmtValue(v).replace(/\s+/g, " ");
+      const flat = (v, label) => fmtNamed(v, label).replace(/\s+/g, " ");
       for (const r of all.slice(0, EXPORT_MAX)) {
-        const base = [fmtDateTime(r.dated), whoOf(r), r.source === "system" || !r.user_id ? "System" : "Person", { create: "Created", update: "Changed", delete: "Deleted" }[r.action] ?? r.action, r.model_label, r.record_id, r.doc_label, r.doc_id];
+        const base = [
+          fmtDateTime(r.dated), whoOf(r), r.source === "system" || !r.user_id ? "System" : "Person",
+          { create: "Created", update: "Changed", delete: "Deleted" }[r.action] ?? r.action,
+          r.model_label, r.record_id === "new" ? "" : r.record_id, r.doc_label, r.doc_id,
+          r.item?.code ?? "", r.item ? r.item.name ?? r.item.itcd : "", r.account ? r.account.name ?? r.account.acno : "", r.iso ?? "",
+          r.story ?? "", r.why ?? "",
+        ];
         const tail = [r.batch_id ?? "", r.id];
-        if (r.action === "update" && Array.isArray(r.changes) && r.changes.length) {
-          for (const c of r.changes) body.push([...base, humanize(c.field), flat(c.old), flat(c.new), ...tail]);
+        const diffs = Array.isArray(r.changes) ? r.changes.filter(isDiff) : [];
+        const notes = Array.isArray(r.changes) ? r.changes.filter((c) => !isDiff(c)).map((c) => `${humanize(c.field)}: ${flat(c.value)}`).join("; ") : "";
+        if (r.action === "update" && diffs.length) {
+          for (const c of diffs) body.push([...base, humanize(c.field), flat(c.old, c.old_label), flat(c.new, c.new_label), ...tail]);
         } else {
-          const snap = r.snapshot && typeof r.snapshot === "object" ? Object.entries(r.snapshot).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${humanize(k)}: ${flat(v)}`).join("; ") : "";
+          const snap = r.snapshot && typeof r.snapshot === "object"
+            ? Object.entries(r.snapshot).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${humanize(k)}: ${flat(v, r.snapshot_labels?.[k])}`).join("; ")
+            : notes;
           body.push([...base, "", r.action === "delete" ? snap : "", r.action === "create" ? snap : "", ...tail]);
         }
       }
       const ws = XLSX.utils.aoa_to_sheet([head, ...body]);
-      ws["!cols"] = [18, 18, 9, 9, 18, 10, 18, 12, 20, 30, 30, 12, 9].map((wch) => ({ wch }));
+      ws["!cols"] = [18, 18, 9, 9, 18, 10, 18, 12, 14, 30, 24, 8, 60, 40, 20, 30, 30, 12, 9].map((wch) => ({ wch }));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Audit trail");
       const name = scope === "document" ? `audit-${params.doc_model}-${params.doc_id}` : scope === "record" ? `audit-${params.model}-${params.record}` : scope === "batch" ? "audit-save" : `audit-trail-${range.from}-to-${range.to}`;
@@ -264,7 +281,7 @@ export default function AuditTrail() {
           <NoAuditAccess />
         ) : (
           <>
-            {scope && <ScopeCard scope={scope} params={params} first={rows[0]} total={first ? total : null} onBack={leaveScope} />}
+            {scope && <ScopeCard scope={scope} params={params} first={rows[0]} page={first} total={first ? total : null} onBack={leaveScope} />}
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
               <StatTile
@@ -313,7 +330,7 @@ export default function AuditTrail() {
                   }
                 />
               </div>
-            ) : !rows.length ? (
+            ) : !allRows.length ? (
               <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
                 <EmptyState
                   icon={History}
@@ -330,10 +347,17 @@ export default function AuditTrail() {
               </div>
             ) : (
               <>
+                {resaveCount > 0 && (
+                  <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm">
+                    <input type="checkbox" className="h-4 w-4 accent-[#800000]" checked={hideResaves} onChange={(e) => setHideResaves(e.target.checked)} />
+                    Hide lines re-saved with no change ({fmtNum(resaveCount)} of those loaded)
+                  </label>
+                )}
                 <AuditTimeline rows={rows} onOpen={setSelected} onBatch={scope === "batch" ? null : (batch) => goScope({ batch })} />
                 <div className="flex flex-col items-center gap-2 pb-4 pt-1">
                   <p className="text-xs tabular-nums text-slate-500">
-                    Showing {fmtNum(rows.length)} of {fmtNum(total)}
+                    Showing {fmtNum(allRows.length)} of {fmtNum(total)}
+                    {hideResaves && resaveCount > 0 && ` (${fmtNum(resaveCount)} unchanged re-saves hidden)`}
                   </p>
                   {q.hasNextPage && (
                     <Button variant="outline" className="w-full sm:w-auto" onClick={() => q.fetchNextPage()} disabled={q.isFetchingNextPage}>

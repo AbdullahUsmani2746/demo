@@ -1,13 +1,16 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { getProductionSetup } from "@/lib/production/setup";
 
-// Packing materials (item category 4) for the Dispatch "Packing Material"
+// Packing materials (Settings → Production setup "Packing material"
+// categories) for the Dispatch "Packing Material"
 // picker. ?search= matches the item name, its code or its itcd.
 export async function GET(request) {
   try {
     const params = new URL(request.url).searchParams;
     const search = String(params.get("search") || "").trim();
-    const where = { ic_id: 4 };
+    const { packingCategoryIds } = await getProductionSetup();
+    const where = { ic_id: { in: packingCategoryIds } };
     // ?itcd= — the picker's label lookup for a saved value.
     const itcd = Number(params.get("itcd"));
     if (Number.isInteger(itcd) && itcd > 0) where.itcd = itcd;

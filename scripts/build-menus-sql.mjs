@@ -43,6 +43,8 @@ const MENU = [
       rep("saleOrder", "SALE ORDER REPORT"),
       rep("salesOrderBalance", "SALE ORDER BALANCE"),
       rep("saleOrderToDispatch", "SALE ORDER TO DISPATCH"),
+      // Feature "saleOrder.planFromOrder" — hidden from the sidebar while it is off
+      rep("isoTimeline", "SALE ORDER TO INVOICE TIME TRACKING", "Timer"),
       rep("saleReturn", "SALE RETURN REPORT"),
       rep("customerAging", "CUSTOMER AGING", "Hourglass"),
       rep("customerMargin", "CUSTOMER MARGIN", "Percent"),
@@ -101,6 +103,10 @@ const MENU = [
   ["PRODUCTION", null, "Factory", [
     ["PROCESS ORDER", "/accounting/material?tab=production", "Workflow"],
     ["PRODUCTION PLAN", "/accounting/material?tab=production-plan", "CalendarRange"],
+    // Planned qty per item per month / quarter (INPUT_FOR_PP) — Production Planning's Qtr Qty
+    ["PLANNED QUANTITIES", "/accounting/planned-quantities", "CalendarRange"],
+    // Dispatch production plans (Sale Order lines, Lab Nature) — feature "saleOrder.planFromOrder"
+    ["SALE ORDER PRODUCTION PLANS", "/accounting/material/dispatchTransfer", "ClipboardList"],
     ["MATERIAL CONSUMPTION", "/accounting/production/materialIssue", "PackageMinus"],
     ["MATERIAL INPUT", "/accounting/production/materialInput", "PackagePlus"],
     ["MATERIAL TRANSACTIONS", "/accounting/materialTransactions", "ArrowDownUp"],
@@ -114,11 +120,18 @@ const MENU = [
       ["PRODUCTION COSTING", "/accounting/costing/production", "Factory"],
       ["COST VARIANCE", "/accounting/costing/variance", "Scale"],
       ["COSTING CHECK", "/accounting/costing/checking", "ListChecks"],
+      // Feature "costing.reconciliation" — hidden from the sidebar while it is off (lib/features/apply.js)
+      ["STOCK ↔ GL RECONCILIATION", "/accounting/costing/reconciliation", "Scale"],
+      ["ITEM COST TRACE", "/accounting/costing/item-reconciliation", "Search"],
+      // Feature "reports.rmcInputRates" — hidden from the sidebar while it is off (lib/features/apply.js)
+      ["RMC INPUT RATES", "/accounting/rmc-rates", "Calculator"],
     ]],
     ["PRODUCTION REPORTS", null, "FileChartColumn", [
       rep("productionPlanning", "PRODUCTION PLANNING"),
       rep("processOrderReconciliation", "PROCESS ORDER RECONCILIATION"),
       rep("processOrderTiming", "PROCESS ORDER TIMING", "Timer"),
+      // Feature "production.labNature"
+      rep("pendingReport", "PENDING REPORT (PROCESS ORDERS)", "ListChecks"),
       rep("materialProduction", "MATERIAL PRODUCTION"),
       rep("materialIssuance", "MATERIAL ISSUANCE"),
       rep("rmc", "RAW MATERIAL COST"),
@@ -130,6 +143,9 @@ const MENU = [
       rep("costOfGoodsManufactured", "COST OF GOODS MANUFACTURED"),
       rep("directMaterialIssuanceCost", "DIRECT MATERIAL ISSUANCE COST"),
       rep("discard", "DISCARDED MATERIAL"),
+      rep("dailyProduction", "DAILY PRODUCTION"),
+      rep("monthWiseRMMovingAverage", "RM MOVING AVERAGE - MONTH WISE"),
+      rep("rmCosting", "RM COSTING"),
     ]],
   ]],
   ["DESPATCH", null, "Truck", [
@@ -160,6 +176,8 @@ const MENU = [
       ["CREDIT NOTE", "/accounting/invoice/credit", "FilePlus"],
     ]],
     ["ACCOUNT SETTINGS", "/accounting/settings/accounts", "Landmark"],
+    // Feature "vouchers.subAccounts" — hidden from the sidebar while it is off (lib/features/apply.js)
+    ["SUB ACCOUNTS", "/accounting/sub-accounts", "Layers"],
     // Physical documents (GRN, dispatch and their returns) carry quantities
     // only; they are priced and posted here.
     ["INVOICING", null, "FileCheck", [
@@ -179,6 +197,7 @@ const MENU = [
       rep("trialBalancePeriod", "TRIAL BALANCE (PERIOD)"),
       rep("trialBalanceSheet", "BALANCE SHEET"),
       rep("profitLoss", "PROFIT & LOSS"),
+      rep("profitLossMonthly", "PROFIT & LOSS - MONTH ON MONTH"),
       rep("accountsActivity", "ACCOUNTS ACTIVITY"),
       rep("payment", "PAYMENT REGISTER"),
       rep("receipt", "RECEIPT REGISTER"),
@@ -189,7 +208,17 @@ const MENU = [
       rep("costOfGoodsSold", "COST OF GOODS SOLD"),
       rep("costOfSales", "COST OF SALES"),
       rep("tradingMargin", "TRADING MARGIN"),
+      rep("withHoldingTax", "WITHHOLDING TAX"),
+      rep("digitalInvoice", "FBR DIGITAL INVOICE"),
       ["ALL REPORTS", "/accounting/reports", "FolderOpen"],
+    ]],
+    // Data files a principal company asks its distributor for (codes: Settings "distributorFileCodes")
+    ["DISTRIBUTOR FILES", null, "FileSpreadsheet", [
+      rep("customerFile", "CUSTOMER FILE"),
+      rep("purchasingfile", "PURCHASING FILE"),
+      rep("ilfile", "IL FILE"),
+      rep("pcfile", "PC FILE"),
+      rep("prfile", "PR FILE"),
     ]],
   ]],
   // One desk for the accounts staff: only the screens their access list names
@@ -243,6 +272,9 @@ const MENU = [
     ["SALARY", "/accounting/hr/salary", "BadgeDollarSign"],
     ["ADVANCES & LOANS", "/accounting/hr/loans", "HandCoins"],
     ["PAYROLL", "/accounting/hr/payroll", "Wallet"],
+    // Features hr.payHistory / hr.leavingProcess — hidden while switched off (lib/features/catalog.js screens)
+    ["PAY HISTORY", "/accounting/hr/pay-history", "History"],
+    ["LEAVING & SETTLEMENT", "/accounting/hr/leaving", "UserMinus"],
     ["HR REPORTS", null, "ChartColumn", [
       rep("hrAttendanceSummary", "MONTHLY ATTENDANCE SUMMARY"),
       rep("hrAttendanceExceptions", "LATES, ABSENCES & MISSED PUNCHES"),
@@ -254,6 +286,9 @@ const MENU = [
       rep("hrIncomeTax", "INCOME TAX DEDUCTED"),
       rep("hrSalaryRegister", "SALARY REGISTER"),
       rep("hrLoansOutstanding", "ADVANCES & LOANS OUTSTANDING"),
+      rep("hrPayHistory", "PAY HISTORY"),
+      rep("hrPfLedger", "PROVIDENT FUND LEDGER"),
+      rep("hrGratuityProvision", "GRATUITY PROVISION"),
       rep("hrHeadcount", "EMPLOYEE LIST & TURNOVER"),
     ]],
     setup("employees", "EMPLOYEES", "Users"),
@@ -278,6 +313,18 @@ const MENU = [
     ["FIXED ASSETS GRN", "/accounting/report/fixedAssetsGrn", "PackageCheck"],
     setup("fixed_asset_items", "FIXED ASSET ITEMS", "Boxes"),
     setup("fixed_asset_categories", "FIXED ASSET CATEGORIES", "FolderTree"),
+    // lib/fixedAssets — depreciation / relocation menus hide while their
+    // Settings → Features switch is off (catalog `screens`).
+    ["FIXED ASSET REGISTER", "/accounting/fixed-assets", "ClipboardList"],
+    ["DEPRECIATION RUN", "/accounting/fixed-assets/depreciation", "Calculator"],
+    ["FIXED ASSET RELOCATION", "/accounting/report/fixedAssetRelocation", "MoveRight"],
+    ["FIXED ASSET DISPOSAL", "/accounting/report/fixedAssetDisposal", "Trash2"],
+    ["FIXED ASSET REPORTS", null, "FileChartColumn", [
+      rep("fixedAssetRegister", "FIXED ASSET REGISTER REPORT"),
+      rep("fixedAssetMovement", "FIXED ASSET MOVEMENT", "ArrowLeftRight"),
+      rep("fixedAssetSchedule", "DEPRECIATION SCHEDULE", "CalendarRange"),
+      rep("fixedAssetDisposals", "DISPOSAL GAIN / LOSS", "Scale"),
+    ]],
   ]],
   ["MANAGEMENT", null, "LayoutDashboard", [
     ["DASHBOARD", "/accounting/dashboard", "LayoutDashboard"],

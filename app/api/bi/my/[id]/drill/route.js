@@ -7,7 +7,8 @@ import { guard } from "@/lib/auth/route";
 import { bi, biJson, routeId } from "@/lib/bi/http";
 import { BiError, breakdownFields, drillRows } from "@/lib/bi/engine";
 import { isValidPeriod } from "@/lib/bi/periods";
-import { canViewDashboard, allowedDatasets, layoutQuestionIds, BUILTIN_DASH_FILTERS } from "@/lib/bi/access";
+import { canViewDashboard, allowedDatasets, layoutQuestionIds, dashFilterFields } from "@/lib/bi/access";
+import { enabledDashFilters } from "@/lib/bi/dashFilters";
 
 export const POST = guard(
   null,
@@ -27,7 +28,7 @@ export const POST = guard(
     if (allowed && !allowed.has(q.dataset)) throw new BiError("Your department does not have access to this data.", 403);
 
     // Only the dashboard's own filters are honoured.
-    const fields = new Set([...(dashboard.layout?.filters ?? []).map((f) => f.field), ...BUILTIN_DASH_FILTERS]);
+    const fields = dashFilterFields(dashboard.layout, await enabledDashFilters());
     const filters = (Array.isArray(body?.filters) ? body.filters : []).filter((f) => fields.has(f?.field));
     // One value of any field of this figure ("Why did it change?" → a name):
     // only ever narrows what the person already sees.

@@ -11,6 +11,8 @@ import {
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { isPackingCategory, isRawMaterialCategory } from "@/lib/production/setupConfig";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -167,6 +169,8 @@ const MonthYear = ({ idPrefix, month, year, onMonth, onYear }) => (
 
 // ══════════════════════════════════════════════════════════════════════════════
 const FutureCosting = () => {
+  // Settings → Production setup: which categories are raw / packing material
+  const { setup } = useProductionSetup();
   const [tab, setTab] = useState("table");
 
   const [periods, setPeriods]     = useState([]);
@@ -306,9 +310,9 @@ const FutureCosting = () => {
       );
 
       const allItems = sarData.allData || sarData.data || [];
-      // Filter to raw materials (3) and packaging (4) only
+      // Filter to raw materials and packaging only (Production setup)
       const rawMaterials = allItems.filter(
-        (it) => Number(it.category_id) === 3 || Number(it.category_id) === 4
+        (it) => isRawMaterialCategory(setup, it.category_id) || isPackingCategory(setup, it.category_id)
       );
 
       if (rawMaterials.length === 0) {
@@ -355,7 +359,7 @@ const FutureCosting = () => {
         })
       );
     } catch (e) { setInsError(e.message); } finally { setInsLoading(false); }
-  }, [baseMonth, baseYear, insMonth, insYear]);
+  }, [baseMonth, baseYear, insMonth, insYear, setup]);
 
   const applyGlobalPct = (pctStr) => {
     setGlobalPct(pctStr);
@@ -439,8 +443,8 @@ const FutureCosting = () => {
     (m.code || "").toLowerCase().includes(insSearch.toLowerCase())
   );
   const selectedCount = insItems.filter((m) => m.selected).length;
-  const rmCount       = insItems.filter((m) => m.category_id === 3).length;
-  const pkgCount      = insItems.filter((m) => m.category_id === 4).length;
+  const rmCount       = insItems.filter((m) => isRawMaterialCategory(setup, m.category_id)).length;
+  const pkgCount      = insItems.filter((m) => isPackingCategory(setup, m.category_id)).length;
 
   // ── TAB 3 – REPORT ─────────────────────────────────────────────────────────
   const [rptMonth,   setRptMonth]   = useState(null);
@@ -902,7 +906,7 @@ const FutureCosting = () => {
                           const fAmt   = fQty * fRate;
                           const avgR   = m.avg_rate != null ? m.avg_rate : 0;
                           const chg    = cRate > 0 ? ((avgR - cRate) / cRate) * 100 : 0;
-                          const isRM   = m.category_id === 3;
+                          const isRM   = isRawMaterialCategory(setup, m.category_id);
                           return (
                             <tr key={m.itcd} className={cn("group transition-colors hover:bg-muted", !m.selected && "opacity-50")}>
                               <td className={cn(TD, "vl-check", PIN_TD)}>

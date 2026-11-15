@@ -16,13 +16,13 @@ import prisma from "@/lib/prisma";
 import { assertEmployeesInScope, employeeName, hrRights, HR_PERMS, sessionEmployeeId } from "@/lib/hr/access";
 import { hrRoute, intParam, jsonBody } from "@/lib/hr/route";
 import { disburse, policyFlags, recordCash, reschedule, reversePayout, reverseRepayment, skipMonth, thisMonth } from "@/lib/hr/loans/service";
-import { dueInMonth, outstandingOf, recoveredTotal, schedule } from "@/lib/hr/loans/schedule";
+import { dueInMonth, isPfKind, isRefundable, LOAN_KINDS, loanApprovalType, outstandingOf, ownLoanAcno, recoveredTotal, schedule } from "@/lib/hr/loans/schedule";
 import { canDecideHr, decideHrRequest } from "@/lib/hr/approvals";
 import { REQUEST_STATUS } from "@/lib/approvals/rules";
 import { EMPLOYEE_SELECT, employeeLite } from "@/lib/hr/attendance/sheet";
 import { dayKeyOfDb } from "@/lib/hr/time";
 
-const ALL = [HR_PERMS.loanApply, HR_PERMS.loanView, HR_PERMS.loanManage, HR_PERMS.loanApprove, HR_PERMS.loanDisburse];
+const ALL = [HR_PERMS.loanApply, HR_PERMS.loanView, HR_PERMS.loanManage, HR_PERMS.loanApprove, HR_PERMS.loanDisburse, HR_PERMS.pfLoanApprove];
 
 async function access(session, loan) {
   const [rights, selfId] = await Promise.all([hrRights(session), sessionEmployeeId(session)]);
@@ -59,8 +59,10 @@ export const GET = hrRoute(ALL, async (req, { params, session }) => {
     loan: {
       id: loan.id,
       employee: employeeLite(loan.employee),
-      acno: loan.kind === "LOAN" ? loan.employee.loanAcno : loan.employee.advanceAcno,
+      acno: ownLoanAcno(loan.kind, loan.employee),
       kind: loan.kind,
+      pf: isPfKind(loan.kind),
+      refundable: isRefundable(loan.kind),
       amount: loan.amount,
       installment: loan.installment,
       start_month: loan.start_month,
@@ -77,18 +79,18 @@ export const GET = hrRoute(ALL, async (req, { params, session }) => {
       requested_by: nameOf.get(loan.requested_by) ?? loan.requested_by,
       requested_at: loan.requested_at,
     },
-    schedule: schedule(loan, loan.recoveries, month),
+    schedule: isRefundable(loan.kind) ? schedule(loan, loan.recoveries, month) : [],
     recoveries: loan.recoveries.map((r) => ({ id: r.id, date: dayKeyOfDb(r.date), month: r.month, amount: r.amount, source: r.source, reference: r.reference, tran_id: r.tran_id, by: nameOf.get(r.created_by) ?? r.created_by })),
     events: loan.events.map((e) => ({ id: e.id, action: e.action, detail: e.detail, at: e.created_at, by: nameOf.get(e.created_by) ?? e.created_by })),
     flags,
     gross,
     can: {
-      decide: loan.status === "pending" && rights.loanApprove && !self,
+      decide: loan.status === "pending" && (loanApprovalType(loan.kind) === "hrPfLoan" ? rights.pfLoanApprove : rights.loanApprove) && !self,
       cancel: (loan.status === "pending" && (self || loan.requested_by === session.user.id || rights.loanManage)) || (loan.status === "active" && manage && recoveredTotal(loan.recoveries) === 0),
-      manage: loan.status === "active" && manage,
+      manage: loan.status === "active" && manage && isRefundable(loan.kind),
       // Money moves are finance's (hr.loan.disburse), never on one's own loan.
       disburse: loan.status === "active" && !loan.disbursed_on && money,
-      repay: loan.status === "active" && Boolean(loan.disbursed_on) && money,
+      repay: loan.status === "active" && Boolean(loan.disbursed_on) && money && isRefundable(loan.kind),
       reverse_payout: Boolean(loan.disburse_tran_id) && loan.recoveries.length === 0 && money,
       reverse_repayment: money,
     },
@@ -117,7 +119,7 @@ export const POST = hrRoute(ALL, async (req, { params, session }) => {
       if (loan.status !== "pending") return NextResponse.json({ error: `#A-${id} is already ${loan.status}.` }, { status: 409 });
       const request = loan.approval_request_id ? await prisma.approvalRequest.findUnique({ where: { id: loan.approval_request_id } }) : null;
       if (!request || request.status !== REQUEST_STATUS.PENDING) return NextResponse.json({ error: "Its approval request is not waiting any more — refresh." }, { status: 409 });
-      if (!(await canDecideHr(session, "hrLoan"))) return NextResponse.json({ error: "You may not approve advances or loans." }, { status: 403 });
+      if (!(await canDecideHr(session, loanApprovalType(loan.kind)))) return NextResponse.json({ error: `You may not approve a ${LOAN_KINDS[loan.kind].label.toLowerCase()}.` }, { status: 403 });
       const { status, body } = await decideHrRequest({ request, action: b.action, note, session });
       return NextResponse.json(body, { status });
     }
@@ -165,7 +167,7 @@ export const POST = hrRoute(ALL, async (req, { params, session }) => {
     case "disburse": {
       financeOnly();
       const v = await disburse(await fullLoan(), { date: b.date, cashAcno: b.cash_acno, reference: b.reference, session });
-      return NextResponse.json({ success: true, message: `Paid out — payment voucher #${v.tran_id}. Payroll recovers it from now on.` });
+      return NextResponse.json({ success: true, message: `Paid out — payment voucher #${v.tran_id}.${isRefundable(loan.kind) ? " Payroll recovers it from now on." : ""}` });
     }
     case "reverse_payout": {
       financeOnly();

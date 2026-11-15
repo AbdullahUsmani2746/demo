@@ -17,6 +17,10 @@ import useKeyboardShortcuts from "@/hooks/useKeyboardShortcuts";
 import KeyboardHint, { KeyCombo } from "@/components/ui/KeyboardHint";
 import { selectStyles } from "@/components/shared/EntityFormPanel";
 import { LabCard, Chip, CHIP, CODE_CHIP, TH, TD, NUM, TOTAL_ROW } from "../shared/LabUI";
+import { useFeatures } from "@/hooks/useFeatures";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { isFinishedCategory, productKindLabel } from "@/lib/production/setupConfig";
+import { bomPercentCap } from "@/lib/production/rules";
 
 const BOMForm = ({
   formData,
@@ -29,7 +33,15 @@ const BOMForm = ({
   isCloning = false, // ← ADD THIS LINE
   sourceBomId = null,
 }) => {
-  
+  // Settings → Production setup decides which products are finished goods;
+  // Settings → Features "bom.percentRule" how far their percentages may go.
+  const { setup } = useProductionSetup();
+  const bomFeatures = useFeatures();
+  const percentRule = bomFeatures.value("bom.percentRule");
+  // "bom.oneActivePerItem": a new active BOM makes the old one inactive (server side)
+  const oneActivePerItem = bomFeatures.on("bom.oneActivePerItem");
+  const maxPercentOf = (product) => bomPercentCap(percentRule, { finished: isFinishedCategory(setup, product?.ic_id) });
+
   const [materialInput, setMaterialInput] = useState({
     material_id: "",
     material_desc: "",
@@ -295,7 +307,7 @@ const BOMForm = ({
     const selectedProduct = finishItems.find(
       (item) => item.itcd === formData.finished_id,
     );
-    const maxPercentage = selectedProduct?.ic_id === 1 ? 110 : 100; 
+    const maxPercentage = maxPercentOf(selectedProduct); 
 
     // Validate percentage
     if (numValue < 0 || numValue > maxPercentage) return;
@@ -344,8 +356,7 @@ const BOMForm = ({
         (item) => item.itcd === formData.finished_id,
       );
       if (selectedProduct) {
-        const correctCategory =
-          selectedProduct.ic_id === 1 ? "Finished" : "Semi Finished";
+        const correctCategory = productKindLabel(setup, selectedProduct.ic_id);
 
         // Only update if category is different
         if (formData.category !== correctCategory) {
@@ -363,6 +374,7 @@ const BOMForm = ({
     finishItems,
     formData.category,
     setFormData,
+    setup,
   ]);
 
   // SCENARIO 1: Check product status when product is selected
@@ -378,7 +390,7 @@ const BOMForm = ({
           if (result.hasActiveBOM) {
             setExistingBOM(result.bom);
             setShowDuplicateWarning(true);
-            if (!isEditing) {
+            if (!isEditing && !oneActivePerItem) {
               onSaveDisabled?.(true);
             }
           } else {
@@ -395,7 +407,7 @@ const BOMForm = ({
     };
 
     checkProductStatus();
-  }, [formData.finished_id, isEditing, isViewMode]);
+  }, [formData.finished_id, isEditing, isViewMode, oneActivePerItem]);
 
   // Handle category change
   const handleCategoryChange = (category) => {
@@ -421,11 +433,7 @@ const BOMForm = ({
     const selectedProduct = finishItems.find(
       (item) => item.itcd === finished_id,
     );
-    const category = selectedProduct
-      ? selectedProduct.ic_id === 1
-        ? "Finished"
-        : "Semi Finished"
-      : formData.category;
+    const category = selectedProduct ? productKindLabel(setup, selectedProduct.ic_id) : formData.category;
 
     // If cloning and changing product, keep the existing materials but update the product
     if (isCloning && finished_id && finished_id !== formData.finished_id) {
@@ -476,7 +484,7 @@ const BOMForm = ({
     const selectedProduct = finishItems.find(
       (item) => item.itcd === formData.finished_id,
     );
-    const maxPercentage = selectedProduct?.ic_id === 1 ? 110 : 100;
+    const maxPercentage = maxPercentOf(selectedProduct);
 
     // Basic validation (same as before)
     if (
@@ -620,7 +628,7 @@ const BOMForm = ({
     const selectedProduct = finishItems.find(
       (item) => item.itcd === formData.finished_id,
     );
-    const maxPercentage = selectedProduct?.ic_id === 1 ? 110 : 100;
+    const maxPercentage = maxPercentOf(selectedProduct);
 
     const numValue = parseFloat(value) || 0;
     if (numValue > maxPercentage) {
@@ -659,7 +667,7 @@ const BOMForm = ({
 
   const filteredFinishOptions = finishItems.map((item) => ({
   value: item.itcd,
-  label: `${item.code} - ${item.itcd} - ${item.item} (${item.ic_id === 1 ? "Finished" : "Semi-Finished"})`,
+  label: `${item.code} - ${item.itcd} - ${item.item} (${isFinishedCategory(setup, item.ic_id) ? "Finished" : "Semi-Finished"})`,
   item: item,
 }));
  
@@ -967,7 +975,9 @@ const BOMForm = ({
               }`}
             >
               {existingBOM.instructions === "A"
-                ? "An active BOM already exists for this product."
+                ? oneActivePerItem && !isEditing
+                  ? `An active BOM (#${existingBOM.id}) already exists for this product — saving this one as Active makes it Inactive.`
+                  : "An active BOM already exists for this product."
                 : `An inactive BOM exists. You can create a new active version.`}
             </p>
           </div>

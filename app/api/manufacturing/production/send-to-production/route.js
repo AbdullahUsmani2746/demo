@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { guard } from '@/lib/auth/route';
 import { checkPeriodLock } from '@/lib/periodLock';
 import { recordScopeError } from '@/lib/auth/documentScope';
-import { buildPosting, postPlan, assertIssueStock } from '@/lib/manufacturing/processOrder';
+import { buildPosting, postPlan, assertIssueStock, postingDate } from '@/lib/manufacturing/processOrder';
 
 export const POST = guard('materialInput.create', async (request) => {
   try {
@@ -18,8 +18,13 @@ export const POST = guard('materialInput.create', async (request) => {
       return NextResponse.json({ error: 'A valid production plan ID is required' }, { status: 400 });
     }
 
+    // The vouchers' date: now, or the order's plan date (Settings → Features
+    // "production.postingDate"). The period lock is checked for that date.
     const when = new Date();
-    const lockError = await checkPeriodLock(when, 8, { action: 'create' });
+    const stored = await prisma.productionPlanMaster.findUnique({ where: { id: planId }, select: { dated: true } });
+    if (!stored) return NextResponse.json({ error: 'Production plan not found' }, { status: 404 });
+    const dated = await postingDate(stored.dated, when);
+    const lockError = await checkPeriodLock(dated, 8, { action: 'create' });
     if (lockError) return NextResponse.json({ error: lockError }, { status: 422 });
 
     const result = await prisma.$transaction(async (tx) => {
@@ -72,6 +77,7 @@ export const POST = guard('materialInput.create', async (request) => {
         userId: session.user.id,
         m2m: plan.m2m,
         when,
+        dated,
       });
       return { posted, posting, stockWarnings };
     }, { timeout: 30000, maxWait: 10000 });

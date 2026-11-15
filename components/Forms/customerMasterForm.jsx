@@ -58,7 +58,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, CheckSquare, Square } from "lucide-react";
+import { useFeatures } from "@/hooks/useFeatures";
 import { Kbd, KeyCombo } from "@/components/ui/KeyboardHint";
 import useKeyboardShortcuts from "@/hooks/useKeyboardShortcuts";
 import { selectStyles } from "@/components/shared/EntityFormPanel";
@@ -2268,6 +2269,18 @@ const CustomerManagementDashboard = () => {
   const { company } = useCompany();
   const { currency } = useCurrency();
   const { data: session } = useSession();
+  // Settings → Features "saleOrder.priceListOnly": an item rate may be ticked /
+  // unticked for Sale Orders (unticked = not offered, refused by the server)
+  const priceListTicks = useFeatures().on("saleOrder.priceListOnly");
+  const toggleSalesItemTick = async (item) => {
+    try {
+      await axios.patch("/api/forms/sales-items", { id: item.id, checked: item.checked === false });
+      toast.success(item.checked === false ? "Offered on Sale Orders again" : "No longer offered on Sale Orders");
+      refetchSalesItems();
+    } catch (error) {
+      toast.error(error.response?.data?.error || "Could not change it");
+    }
+  };
 
   const updateSearchState = (tab, value) => {
     setSearchStates((prev) => ({ ...prev, [tab]: value }));
@@ -5905,7 +5918,12 @@ const CustomerManagementDashboard = () => {
                       )}
                       <div className="min-w-0">
                         <div className="truncate font-semibold text-foreground">{item.item?.item}</div>
-                        <div className="mt-0.5 text-[12px] text-muted-foreground">Item #{item.itcd}</div>
+                        <div className="mt-0.5 text-[12px] text-muted-foreground">
+                          Item #{item.itcd}
+                          {priceListTicks && item.checked === false ? (
+                            <span className="ml-2 font-semibold text-amber-700 dark:text-amber-400">Not offered on Sale Orders</span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   </td>
@@ -5938,6 +5956,17 @@ const CustomerManagementDashboard = () => {
                       >
                         <Edit3 className="h-4 w-4" />
                       </button>
+                      {priceListTicks ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSalesItemTick(item)}
+                          className={ICON_BTN_CLS}
+                          title={item.checked === false ? "Offer on Sale Orders" : "Stop offering on Sale Orders"}
+                          aria-label={item.checked === false ? "Offer on Sale Orders" : "Stop offering on Sale Orders"}
+                        >
+                          {item.checked === false ? <Square className="h-4 w-4" /> : <CheckSquare className="h-4 w-4" />}
+                        </button>
+                      ) : null}
                       {/* Delete stays switched off (as before) */}
                     </div>
                   </td>

@@ -5,6 +5,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { hiddenApprovalPages } from "@/lib/approvals/access";
 import { blockedMenuIdsFor } from "@/lib/menu/blocks";
+import { getFeatures } from "@/lib/features/server";
+import { hiddenFeatureScreens, isHiddenScreen } from "@/lib/features/apply";
 import {
   APP_MENU_ORDER_SOURCE_KEY,
   DEFAULT_APP_MENU_SETTINGS,
@@ -29,9 +31,13 @@ async function readOrderSource() {
 
 // ✅ Recursive function to fetch all assigned + descendant menus
 async function getAllMenusForEmployee(employeeId) {
+  // A login without an employee record (screens send employeeId=undefined)
+  // has no Employee menus — not an error.
+  const id = parseInt(employeeId);
+  if (!Number.isInteger(id)) return [];
   // 1️⃣ Get menus directly assigned to the employee
   const employeeMenus = await prisma.employee_menu.findMany({
-    where: { employee_id: parseInt(employeeId) },
+    where: { employee_id: id },
     include: { menu: true },
   });
 
@@ -103,6 +109,11 @@ export async function GET(request) {
     const hidden = await hiddenApprovalPages(session);
     if (hidden.length && allMenus?.length) {
       allMenus = allMenus.filter((m) => !hidden.some((p) => m.url === p || String(m.url || "").startsWith(`${p}/`)));
+    }
+    // Screens of features switched off on Settings → Features (catalog `screens`).
+    const featureHidden = hiddenFeatureScreens(await getFeatures());
+    if (featureHidden.length && allMenus?.length) {
+      allMenus = allMenus.filter((m) => !isHiddenScreen(m.url, featureHidden));
     }
 
     if (!allMenus || allMenus.length === 0) {
