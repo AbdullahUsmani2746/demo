@@ -1,0 +1,491 @@
+
+-- GRN sequence
+CREATE SEQUENCE grn_no_seq START 1;
+
+--GRN SEQUENCE RESTART QUERY
+SELECT SETVAL('grn_no_seq', 2856, false)
+
+--DISPATCH SEQUENCE RESTART QUERY
+SELECT SETVAL('dispatch_no_seq', 15687, false)
+
+-- Dispatch sequence
+CREATE SEQUENCE dispatch_no_seq START 1;
+
+-- VR sequences for tran_code 1 & 2 with cash/bank
+CREATE SEQUENCE vr_no_seq_1_cash START 1;
+CREATE SEQUENCE vr_no_seq_1_bank START 1;
+CREATE SEQUENCE vr_no_seq_2_cash START 1;
+CREATE SEQUENCE vr_no_seq_2_bank START 1;
+
+-- VR sequences for other tran_codes
+CREATE SEQUENCE vr_no_seq_3 START 1;
+CREATE SEQUENCE vr_no_seq_4 START 1;
+CREATE SEQUENCE vr_no_seq_5 START 1;
+CREATE SEQUENCE vr_no_seq_6 START 1;
+CREATE SEQUENCE vr_no_seq_7 START 1;
+CREATE SEQUENCE vr_no_seq_8 START 1;
+CREATE SEQUENCE vr_no_seq_9 START 1;
+
+
+CREATE TABLE tran_code_sequences (
+    tran_code INT PRIMARY KEY,
+    sequence_name TEXT NOT NULL
+);
+
+
+INSERT INTO tran_code_sequences (tran_code, sequence_name)
+VALUES 
+(3, 'vr_no_seq_3'),
+(4, 'vr_no_seq_4'),
+(5, 'vr_no_seq_5'),
+(6, 'vr_no_seq_6'),
+(7, 'vr_no_seq_7'),
+(8, 'vr_no_seq_8'),
+(9, 'vr_no_seq_9');
+
+
+-- ---------------------------------------------------------------------------
+-- Current live version (what is in the database): ONE series per number,
+-- no on/off distinction. GRN -> grn_no_seq, Dispatch -> dispatch_no_seq,
+-- VR -> cash/bank sequence for tran_code 1/2, else tran_code_sequences.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.auto_assign_numbers()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    seq_name TEXT;
+BEGIN
+    -- ---------- GRN_NO ----------
+    IF NEW.tran_code = 4 THEN
+        NEW.grn_no := nextval('grn_no_seq');
+    END IF;
+
+    -- ---------- DISPATCH_NO ----------
+    IF NEW.tran_code = 6 THEN
+        NEW.dispatch_no := nextval('dispatch_no_seq');
+    END IF;
+
+    -- ---------- VR_NO ----------
+    IF NEW.tran_code IN (1,2) THEN
+        -- rmk3 carries the cash/bank flag (set by the app)
+        seq_name := CASE
+                        WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_1_cash'
+                        WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_1_bank'
+                        WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_2_cash'
+                        WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_2_bank'
+                    END;
+    ELSE
+        -- For other tran_codes, get sequence from helper table
+        SELECT sequence_name
+        INTO seq_name
+        FROM tran_code_sequences
+        WHERE tran_code = NEW.tran_code;
+    END IF;
+
+    -- Assign VR number if a sequence exists
+    IF seq_name IS NOT NULL THEN
+        NEW.vr_no := nextval(seq_name);
+    END IF;
+
+    RETURN NEW;
+END;
+$function$;
+
+-- ---------------------------------------------------------------------------
+-- ON / OFF numbering — DORMANT (objects exist in the DB, function ignores them)
+-- An account is "off" when acno.is_active = FALSE or its MACNO.is_active = FALSE.
+-- The *_off sequences below and tran_code_sequences.off_sequence_name are kept
+-- so the split can be switched on later by replacing auto_assign_numbers()
+-- with a version that picks the *_off sequence when the party is off.
+-- ---------------------------------------------------------------------------
+CREATE SEQUENCE IF NOT EXISTS grn_no_off_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS dispatch_no_off_seq START 1;
+
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_1_cash_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_1_bank_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_2_cash_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_2_bank_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_3_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_4_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_5_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_6_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_7_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_8_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_9_off  START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_10_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_11_off START 1;
+CREATE SEQUENCE IF NOT EXISTS vr_no_seq_20_off START 1;
+
+ALTER TABLE tran_code_sequences ADD COLUMN IF NOT EXISTS off_sequence_name TEXT;
+UPDATE tran_code_sequences SET off_sequence_name = sequence_name || '_off'
+WHERE off_sequence_name IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- ON / OFF version of auto_assign_numbers() — NOT LIVE. To switch the split
+-- on, copy this block and run it in the database (CREATE OR REPLACE swaps the
+-- body; trigger_auto_numbers keeps pointing at it). To switch it back off,
+-- run the live version above again.
+--
+-- Party off/on comes from TRANSACTIONS_MASTER.pycd -> acno.is_active and its
+-- parent MACNO.is_active. Off-party vouchers draw from the *_off sequences
+-- (GRN, Dispatch and VR); on-party vouchers from the normal ones.
+-- ---------------------------------------------------------------------------
+/*
+CREATE OR REPLACE FUNCTION public.auto_assign_numbers()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    seq_name TEXT;
+    is_off BOOLEAN := FALSE;
+BEGIN
+    -- Determine off/on status from the master party account (pycd).
+    -- An account is "off" if it (or its parent MACNO) has been switched off.
+    IF NEW.pycd IS NOT NULL THEN
+        SELECT COALESCE(a.is_active = FALSE OR m.is_active = FALSE, FALSE)
+        INTO is_off
+        FROM acno a
+        JOIN "MACNO" m ON m.macno = a.macno
+        WHERE a.acno = NEW.pycd;
+
+        is_off := COALESCE(is_off, FALSE);
+    END IF;
+
+    -- ---------- GRN_NO ----------
+    IF NEW.tran_code = 4 THEN
+        IF is_off THEN
+            NEW.grn_no := nextval('grn_no_off_seq');
+        ELSE
+            NEW.grn_no := nextval('grn_no_seq');
+        END IF;
+    END IF;
+
+    -- ---------- DISPATCH_NO ----------
+    IF NEW.tran_code = 6 THEN
+        IF is_off THEN
+            NEW.dispatch_no := nextval('dispatch_no_off_seq');
+        ELSE
+            NEW.dispatch_no := nextval('dispatch_no_seq');
+        END IF;
+    END IF;
+
+    -- ---------- VR_NO ----------
+    IF NEW.tran_code IN (1,2) THEN
+        -- rmk3 carries the cash/bank flag (set by the app)
+        IF is_off THEN
+            seq_name := CASE
+                            WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_1_cash_off'
+                            WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_1_bank_off'
+                            WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_2_cash_off'
+                            WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_2_bank_off'
+                        END;
+        ELSE
+            seq_name := CASE
+                            WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_1_cash'
+                            WHEN NEW.tran_code = 1 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_1_bank'
+                            WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'cash' THEN 'vr_no_seq_2_cash'
+                            WHEN NEW.tran_code = 2 AND NEW.rmk3 = 'bank' THEN 'vr_no_seq_2_bank'
+                        END;
+        END IF;
+    ELSE
+        -- For other tran_codes, get sequence from helper table
+        SELECT (CASE WHEN is_off THEN off_sequence_name ELSE sequence_name END)
+        INTO seq_name
+        FROM tran_code_sequences
+        WHERE tran_code = NEW.tran_code;
+    END IF;
+
+    -- Assign VR number if a sequence exists
+    IF seq_name IS NOT NULL THEN
+        NEW.vr_no := nextval(seq_name);
+    END IF;
+
+    RETURN NEW;
+END;
+$function$;
+*/
+
+-- Variant: on/off split for VR_NO only, GRN_NO and DISPATCH_NO stay ONE series.
+-- Take the block above and replace the two GRN_NO / DISPATCH_NO sections with:
+--
+--     IF NEW.tran_code = 4 THEN
+--         NEW.grn_no := nextval('grn_no_seq');
+--     END IF;
+--
+--     IF NEW.tran_code = 6 THEN
+--         NEW.dispatch_no := nextval('dispatch_no_seq');
+--     END IF;
+
+    CREATE TRIGGER trigger_auto_numbers
+    BEFORE INSERT ON transactions_master
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_assign_numbers();
+
+-- Step 5: How to add a new tran_code in future
+
+-- Create a new VR sequence (if not cash/bank):
+
+-- CREATE SEQUENCE vr_no_seq_10 START 1;
+
+
+-- Add mapping in tran_code_sequences:
+
+-- INSERT INTO tran_code_sequences (tran_code, sequence_name)
+-- VALUES (10, 'vr_no_seq_10');
+
+
+SELECT setval(
+  pg_get_serial_sequence('"Item"', 'itcd'),
+
+  (SELECT MAX(itcd) FROM "Item")
+);
+
+=====================================  ITCD ==============================================
+-- 1. Create sequence table
+CREATE TABLE IF NOT EXISTS category_sequences (
+    ic_id INTEGER PRIMARY KEY REFERENCES "ItemCategory"(id),
+    next_sequence INTEGER DEFAULT 1 NOT NULL
+);
+
+-- Drop the broken functions
+DROP FUNCTION IF EXISTS get_next_itcd_by_ic_id(integer) CASCADE;
+DROP FUNCTION IF EXISTS set_item_itcd_from_ic_id() CASCADE;
+
+-- Recreate with correct table name "Item" (case-sensitive)
+CREATE OR REPLACE FUNCTION get_next_itcd_by_ic_id(ic_id_param INTEGER)
+RETURNS INTEGER AS $$
+DECLARE
+    next_seq INTEGER;
+    new_itcd INTEGER;
+    last_itcd_in_category INTEGER;
+BEGIN
+    -- Check the LAST ITCD number in this category - use "Item" with quotes
+    SELECT MAX(itcd) INTO last_itcd_in_category 
+    FROM "Item" 
+    WHERE ic_id = ic_id_param;
+    
+    -- Determine next sequence
+    IF last_itcd_in_category IS NOT NULL THEN
+        -- Continue from last ITCD + 1
+        next_seq := (last_itcd_in_category % 100000) + 1;
+    ELSE
+        -- Start from sequence 1
+        next_seq := 1;
+    END IF;
+    
+    -- Generate new ITCD (ic_id * 100000 + sequence)
+    new_itcd := (ic_id_param * 100000) + next_seq;
+    
+    RETURN new_itcd;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create the trigger function
+CREATE OR REPLACE FUNCTION set_item_itcd_from_ic_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- ALWAYS generate new itcd, regardless of what was provided
+    NEW.itcd := get_next_itcd_by_ic_id(NEW.ic_id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create the trigger on the correct table "Item"
+DROP TRIGGER IF EXISTS trigger_set_item_itcd_from_ic_id ON "Item";
+CREATE TRIGGER trigger_set_item_itcd_from_ic_id
+    BEFORE INSERT ON "Item"
+    FOR EACH ROW
+    EXECUTE FUNCTION set_item_itcd_from_ic_id();
+================================================================================================
+
+
+
+================= OPTIMIZIED VERSION =========================
+
+-- Enable faster text search
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- Core BOM indexes
+CREATE INDEX CONCURRENTLY idx_bom_master_finished_id ON bom_master(finished_id);
+CREATE INDEX CONCURRENTLY idx_bom_master_instructions ON bom_master(instructions);
+CREATE INDEX CONCURRENTLY idx_bom_detail_bom_id ON bom_detail(bom_id);
+CREATE INDEX CONCURRENTLY idx_bom_detail_material_id ON bom_detail(material_id);
+CREATE INDEX CONCURRENTLY idx_bom_master_dated_desc ON bom_master(dated DESC);
+
+-- Text search optimization
+CREATE INDEX CONCURRENTLY idx_items_item_gin ON items USING gin(item gin_trgm_ops); 
+
+==============================================
+AUTO ENTRY TRAN_cODE 2
+======================================
+INSERT INTO "Transactions" (tran_id, ccno, narration1, damt, camt, sub_tran_id, acno, returnable)
+SELECT 
+    tm.tran_id,
+    NULL as ccno,
+    'Auto Entry' as narration1,
+    0 as damt,
+    SUM(t.damt) as camt,  -- Sum of all sibling debit amounts
+    3 as sub_tran_id,
+    tm.pycd as acno,  -- Get acno from parent transaction master's pycd
+    FALSE as returnable
+FROM "TRANSACTIONS_MASTER" tm
+INNER JOIN "Transactions" t ON tm.tran_id = t.tran_id
+WHERE t.damt > 0 and tm.tran_code =2 and tm.tran_id > 852  -- Only sum the debit entries
+GROUP BY tm.tran_id, tm.pycd;
+======================================================
+
+
+==================================== ORDER MASTER =============================
+
+Here are all the final steps with correct quoted table name:
+
+STEP 1 — Prisma Schema
+Add this model:
+prismamodel OrderRegionSequence {
+  region    String @db.VarChar(25)
+  category  Int
+  last_no   Int    @default(0)
+
+  @@id([region, category])
+  @@map("order_region_sequences")
+}
+Find in OrderMaster:
+prismaorder_no  Int  @id @default(autoincrement())
+Change to:
+prismaorder_no  Int  @id
+
+STEP 2 — Drop old table
+sqlDROP TABLE order_region_sequences;
+
+STEP 3 — Run Prisma
+bashnpx prisma db push
+
+STEP 4 — Run in Database (in this exact order)
+4a. Seed your current numbers:
+sqlINSERT INTO "order_region_sequences" (region, category, last_no) VALUES
+    ('NORTH', 6, 1000586),
+    ('SOUTH', 6, 501463)
+ON CONFLICT (region, category) DO NOTHING;
+4b. Create purchase order sequence:
+sqlCREATE SEQUENCE IF NOT EXISTS purchase_order_seq
+    START WITH 100
+    INCREMENT BY 1
+    NO MAXVALUE;
+4c. Create region function:
+sqlCREATE OR REPLACE FUNCTION get_next_order_no(
+    region_param   VARCHAR,
+    category_param INTEGER
+)
+RETURNS INTEGER AS $$
+DECLARE
+    next_no INTEGER;
+BEGIN
+    UPDATE "order_region_sequences"
+    SET last_no = last_no + 1
+    WHERE region   = UPPER(region_param)
+      AND category = category_param
+    RETURNING last_no INTO next_no;
+
+    IF next_no IS NULL THEN
+        RAISE EXCEPTION 'No sequence found for region: % category: %',
+            region_param, category_param;
+    END IF;
+
+    RETURN next_no;
+END;
+$$ LANGUAGE plpgsql;
+4d. Create trigger function:
+sqlCREATE OR REPLACE FUNCTION set_order_no_from_region()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.order_catagory = 6 THEN
+        NEW.order_no := get_next_order_no(NEW.region, NEW.order_catagory);
+
+    ELSIF NEW.order_catagory = 4 THEN
+        NEW.order_no := nextval('purchase_order_seq');
+
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+4e. Attach trigger:
+sqlDROP TRIGGER IF EXISTS trigger_set_order_no_from_region ON "OrderMaster";
+
+CREATE TRIGGER trigger_set_order_no_from_region
+    BEFORE INSERT ON "OrderMaster"
+    FOR EACH ROW
+    EXECUTE FUNCTION set_order_no_from_region();
+
+STEP 5 — API Change
+javascriptconst order = await prisma.orderMaster.create({
+  data: {
+    ...body,
+    order_no: 0, // DB trigger overrides automatically
+  },
+});
+
+STEP 6 — Verify
+sql-- Check sequences
+SELECT * FROM "order_region_sequences";
+
+-- Check trigger exists
+SELECT trigger_name 
+FROM information_schema.triggers 
+WHERE event_object_table = 'OrderMaster';
+
+Final Checklist
+□ 1. Prisma schema → add OrderRegionSequence model
+□ 2. Prisma schema → remove @default(autoincrement()) from order_no
+□ 3. DROP TABLE order_region_sequences in DB
+□ 4. npx prisma db push
+□ 5. Run 4a → seed NORTH 1000586, SOUTH 501463
+□ 6. Run 4b → create purchase_order_seq
+□ 7. Run 4c → create get_next_order_no function
+□ 8. Run 4d → create trigger function
+□ 9. Run 4e → attach trigger
+□ 10. API → pass order_no: 0 on create
+□ 11. Verify with SELECT
+
+=========================================================================================
+
+total RM COST (own GL) ---> Credit
+total CC COst ---> Credit
+
+total net (own GL) ---->  DEBit
+
+
+COST OF sold
+
+debit> CC GL
+credit OWN GL()
+
+ALTER SYSTEM SET max_connections = 200;
+ALTER SYSTEM SET idle_session_timeout = '5min';
+ALTER SYSTEM SET idle_in_transaction_session_timeout = '5min';
+SELECT pg_reload_conf();
+
+
+INSERT INTO "CostingPeriod" (month, year, is_locked, locked_at, locked_by, created_at)
+SELECT EXTRACT(MONTH FROM d)::int, EXTRACT(YEAR FROM d)::int, true, NOW(), 'system', NOW()
+FROM generate_series('2025-01-01'::date, '2025-06-01'::date, interval '1 month') AS d
+ON CONFLICT (month, year) DO UPDATE SET
+  is_locked = true,
+  locked_at = COALESCE("CostingPeriod".locked_at, NOW()),
+  locked_by = COALESCE("CostingPeriod".locked_by, 'system');
+
+  SELECT
+    t.tgname AS trigger_name,
+    c.relname AS table_name,
+    t.tgenabled AS enabled_status
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_proc p ON p.oid = t.tgfoid
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE p.proname = 'auto_assign_numbers'
+  AND NOT t.tgisinternal;
+
+
+ALTER TABLE public."TRANSACTIONS_MASTER"
+DISABLE TRIGGER "trigger_auto_numbers";

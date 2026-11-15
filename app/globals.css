@@ -1,0 +1,374 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
+
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
+
+body {
+  font-family: "Poppins";
+  /* Lightest grey background for base body */
+  background-color: hsl(var(--secondary));
+   overflow-x: clip;
+}
+
+
+
+/* Add to your global.css */
+.max-w-full {
+  max-width: 100vw !important;
+}
+
+.min-w-max {
+  min-width: max-content !important;
+}
+
+/* Ensure table doesn't break layout */
+.overflow-x-auto {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Optional: Add a visual indicator for scrollable tables */
+.scroll-indicator {
+  position: relative;
+}
+
+.scroll-indicator::after {
+  content: '↔';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #3b82f6;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+@layer base {
+  :root {
+    /* Rich Maroon & Charcoal Scheme - Dark Red, Professional, and Deep */
+    /* #fafafa - Cool off-white */
+    --custom-light-rose: 0 0% 98%;
+    /* #800000 - Deep Maroon (Primary Dark Red) */
+    --custom-deep-red: 0 100% 25%; 
+    /* #e8e8e8 - Light cool grey */
+    --custom-light-gray: 0 0% 91%; 
+    /* #ffffff - Pure white */
+    --custom-white: 0 0% 100%; 
+    /* #1e1e1e - Deep charcoal */
+    --custom-black: 0 0% 12%;
+
+    /* Base theme colors - Light Mode (But using deep primary colors) */
+    --background: 0 0% 100%; /* Pure white */
+    --foreground: 0 0% 12%; /* Deep charcoal */
+    
+    /* Card components */
+    --card: 0 0% 100%; /* White */
+    --card-foreground: 0 0% 12%; /* Deep charcoal */
+    
+    /* Popover components */
+    --popover: 0 0% 100%; /* White */
+    --popover-foreground: 0 0% 12%; /* Deep charcoal */
+    
+    /* Primary - Deep Maroon/Burgundy (Dark Red) */
+    --primary: 0 100% 25%; /* Deep Maroon #800000 */
+    --primary-foreground: 0 0% 100%; /* White */
+    
+    /* Secondary - Cool mid-grey */
+    --secondary: 0 0% 91%; /* Light cool grey */
+    --secondary-foreground: 0 0% 20%; /* Dark grey */
+    
+    /* Muted - Neutral light grey */
+    --muted: 0 0% 94%; /* Light grey */
+    --muted-foreground: 0 0% 45%; /* Medium grey */
+    
+    /* Accent - Bright Red/Crimson for high-visibility highlights */
+    --accent: 0 84% 51%; /* Vibrant Red #dc2626 */
+    --accent-foreground: 0 0% 100%; /* White */
+    
+    /* Destructive - Standard Red */
+    --destructive: 0 84% 51%; /* Vibrant Red */
+    --destructive-foreground: 0 0% 100%; /* White */
+    
+    /* Borders and inputs */
+    --border: 0 0% 85%; /* Light grey border */
+    --input: 0 0% 85%; /* Light grey border */
+    --ring: 0 100% 25%; /* Deep Maroon for focus rings */
+    
+    /* Chart colors - Maroon, Red, Grey palette */
+    --chart-1: 0 100% 25%; /* Deep Maroon */
+    --chart-2: 0 84% 51%; /* Vibrant Red */
+    --chart-3: 0 0% 45%; /* Medium grey */
+    --chart-4: 30 70% 50%; /* Deep Orange accent */
+    --chart-5: 0 0% 65%; /* Light grey */
+    
+    /* Sidebar components - Deep Maroon for structure */
+    --sidebar-background: 0 100% 25%; /* Deep Maroon */
+    --sidebar-foreground: 0 0% 100%; /* White */
+    --sidebar-primary: 0 75% 15%; /* Darkest Maroon */
+    --sidebar-primary-foreground: 0 0% 100%; /* White */
+    --sidebar-accent: 0 100% 31%; /* Lighter maroon — hover / active in the sidebar */
+    --sidebar-accent-foreground: 0 0% 100%; /* White */
+    --sidebar-border: 0 75% 10%; /* Near black border */
+    --sidebar-ring: 0 0% 100%; /* White focus ring on the maroon sidebar */
+    
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark mode - Charcoal backgrounds with brighter Maroon/Red accents */
+    --background: 0 0% 12%; /* Deep charcoal */
+    --foreground: 0 0% 98%; /* Cool off-white */
+    
+    /* Card components */
+    --card: 0 0% 16%; /* Dark grey */
+    --card-foreground: 0 0% 98%; /* Cool off-white */
+    
+    /* Popover components */
+    --popover: 0 0% 16%; /* Dark grey */
+    --popover-foreground: 0 0% 98%; /* Cool off-white */
+    
+    /* Primary - Brighter Maroon/Red for dark mode visibility */
+    --primary: 0 84% 51%; /* Vibrant Red */
+    --primary-foreground: 0 0% 100%; /* White */
+    
+    /* Secondary - Dark grey */
+    --secondary: 0 0% 20%; /* Dark grey */
+    --secondary-foreground: 0 0% 85%; /* Light grey */
+    
+    /* Muted */
+    --muted: 0 0% 20%; /* Dark grey */
+    --muted-foreground: 0 0% 60%; /* Medium grey */
+    
+    /* Accent - Bright Red */
+    --accent: 0 91% 65%; /* Bright Red */
+    --accent-foreground: 0 0% 100%; /* White */
+    
+    /* Destructive - Bright Red */
+    --destructive: 0 91% 65%; /* Bright Red */
+    --destructive-foreground: 0 0% 100%; /* White */
+    
+    /* Borders and inputs */
+    --border: 0 0% 25%; /* Dark border */
+    --input: 0 0% 25%; /* Dark border */
+    --ring: 0 91% 65%; /* Bright Red for focus */
+    
+    /* Chart colors for dark mode - Brighter Red palette */
+    --chart-1: 0 91% 65%; /* Bright Red */
+    --chart-2: 0 84% 51%; /* Vibrant Red */
+    --chart-3: 0 0% 60%; /* Medium grey */
+    --chart-4: 30 95% 60%; /* Bright Orange */
+    --chart-5: 0 0% 70%; /* Light grey */
+    
+    /* Sidebar dark mode */
+    --sidebar-background: 0 0% 14%; /* Very dark grey */
+    --sidebar-foreground: 0 0% 98%; /* Cool off-white */
+    --sidebar-primary: 0 91% 65%; /* Bright Red */
+    --sidebar-primary-foreground: 0 0% 100%; /* White */
+    --sidebar-accent: 0 0% 20%; /* Dark grey */
+    --sidebar-accent-foreground: 0 0% 85%; /* Light grey */
+    --sidebar-border: 0 0% 25%; /* Dark border */
+    --sidebar-ring: 0 91% 65%; /* Bright Red */
+  }
+}
+
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom responsive utilities (unchanged) */
+@media (max-width: 640px) {
+  .pos-container {
+    flex-direction: column;
+  }
+  
+  .product-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  
+  .category-tree {
+    max-height: 150px;
+    overflow-y: auto;
+  }
+}
+
+/* Custom component styles using the deep maroon & charcoal scheme */
+@layer components {
+  /* Button variants */
+  .btn-custom-primary {
+    /* Deep Maroon, White text, darker hover/active */
+    @apply bg-[#800000] text-white hover:bg-[#660000] active:bg-[#4d0000];
+  }
+  
+  .btn-custom-secondary {
+    /* Light Cool Grey, Dark text, darker hover/active */
+    @apply bg-[#e8e8e8] text-[#1e1e1e] hover:bg-[#d9d9d9] active:bg-[#c4c4c4];
+  }
+  
+  /* Custom input styles */
+  .input-custom {
+    /* Light background, light border, focus is Deep Maroon */
+    @apply bg-[#fafafa] border-[#e3e3e3] focus:border-[#800000] focus:ring-[#800000];
+  }
+  
+  /* Custom card styles */
+  .card-custom {
+    /* White background, light border, subtle shadow */
+    @apply bg-white border-[#e3e3e3] shadow-sm;
+  }
+  
+  /* Custom alert styles */
+  .alert-custom {
+    /* Lightest background, light border */
+    @apply border-[#e3e3e3] bg-[#fafafa];
+  }
+  
+  .alert-custom-destructive {
+    /* Standard Red border, light red background, red text */
+    @apply border-[#dc2626] bg-[#fee2e2] text-[#dc2626];
+  }
+}
+
+/* Hide number input increment/decrement arrows (spin buttons) */
+@layer base {
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+}
+
+@media print {
+  [data-sonner-toaster] {
+    display: none !important;
+  }
+}
+/* Voucher form line grid (components/Category/Form.jsx, table.vf-grid):
+   under md every line becomes a card — the same inputs, labelled from the
+   cell's data-label: pickers / text areas (td.vf-wide) across the card,
+   figures two per row (three from 480px). Layout only. */
+@media (max-width: 767px) {
+  .vf-grid thead { display: none; }
+  .vf-grid, .vf-grid tbody { display: block; width: 100%; }
+  .vf-grid tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 10px;
+    padding: 12px;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .vf-grid tbody td { display: block; min-width: 0 !important; width: auto !important; padding: 0 !important; text-align: left; }
+  .vf-grid tbody td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 3px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+  .vf-grid tbody td[data-label]:empty { display: none; }
+  .vf-grid tbody td.vf-check, .vf-grid tbody td.vf-index { align-self: center; }
+  .vf-grid tbody td.vf-index { justify-self: end; }
+  .vf-grid tbody td.vf-remove { grid-column: 1 / -1; justify-self: end; }
+  .vf-grid tbody tr > td[colspan] { grid-column: 1 / -1; }
+  .vf-grid tbody td.vf-wide { grid-column: 1 / -1; }
+  /* The line pickers keep a desktop min-width; on a card they fill the cell. */
+  .vf-grid tbody td [class*="-container"],
+  .vf-grid tbody td [class*="-control"] { min-width: 0 !important; max-width: 100%; }
+  .vf-grid tbody td input, .vf-grid tbody td textarea { width: 100%; min-width: 0 !important; }
+}
+@media (min-width: 480px) and (max-width: 767px) {
+  .vf-grid tbody tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+/* Voucher list table (components/Category/Table.jsx, table.vl-grid):
+   under md every row becomes a card — cells labelled from data-label, two
+   per row, the action icons across the bottom. Layout only. */
+@media (max-width: 767px) {
+  .vl-grid thead { display: none; }
+  .vl-grid, .vl-grid tbody { display: block; width: 100%; }
+  .vl-grid tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+    padding: 12px 14px;
+  }
+  .vl-grid tbody td { display: block; padding: 0 !important; min-width: 0; text-align: left; }
+  .vl-grid tbody td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+  .vl-grid tbody td.vl-check { grid-column: 1 / -1; }
+  .vl-grid tbody td.vl-actions {
+    grid-column: 1 / -1;
+    text-align: left;
+    white-space: normal;
+    border-top: 1px dashed hsl(var(--border));
+    padding-top: 6px !important;
+  }
+  .vl-grid tbody tr > td[colspan] { grid-column: 1 / -1; text-align: center; }
+}
+
+/* Voucher view lines (components/Category/Table.jsx DataViewModal, table.vv-grid):
+   under md every line becomes a card — item / account across the top, the
+   figures two per row, the total row as a shaded card. Layout only. */
+@media (max-width: 767px) {
+  .vv-wrap { border: 0 !important; overflow: visible !important; }
+  .vv-grid thead { display: none; }
+  .vv-grid, .vv-grid tbody, .vv-grid tfoot { display: block; width: 100%; }
+  .vv-grid tbody tr, .vv-grid tfoot tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    border: 1px solid hsl(var(--border)) !important;
+    border-radius: 12px;
+  }
+  .vv-grid tfoot tr { background: hsl(var(--muted)); }
+  .vv-grid td { display: block; padding: 0 !important; min-width: 0; text-align: left !important; }
+  .vv-grid td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+  .vv-grid td.vv-index, .vv-grid td.vv-empty { display: none; }
+  .vv-grid td.vv-name { grid-column: 1 / -1; }
+}
+
+/* Voucher form header (Form.jsx .vf-master): a field is as wide as its grid
+   cell — react-select's min-width (kept for the line table) would push it
+   over the next field. */
+.vf-master [class*="-container"],
+.vf-master [class*="-control"] { min-width: 0 !important; max-width: 100%; }
+.vf-master input, .vf-master textarea, .vf-master button { max-width: 100%; }

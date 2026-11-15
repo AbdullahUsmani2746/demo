@@ -1,0 +1,759 @@
+"use client";
+import { useState, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useRouter } from "next/navigation";
+import {
+  Package,
+  Edit3,
+  Save,
+  ArrowLeft,
+  DollarSign,
+  Hash,
+  Barcode,
+  Tag,
+  Warehouse,
+  CheckCircle,
+  AlertCircle,
+  Loader2,
+  Upload,
+  X,
+  FileText,
+  ImageIcon,
+} from "lucide-react";
+import React from "react";
+import Image from "next/image";
+import axios from "axios";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+
+const ProductDetail = ({ productId }) => {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const fileInputRef = useRef(null);
+
+  const [form, setForm] = useState({
+    item: "",
+    ic_id: "",
+    sku: "",
+    price: "",
+    stock: "",
+    description: "",
+  });
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [removeImage, setRemoveImage] = useState(false);
+  const [errors, setErrors] = useState({});
+  const [saveStatus, setSaveStatus] = useState(null);
+
+  // TanStack Query for fetching product details
+  const {
+    data: product,
+    isLoading: productLoading,
+    error: productError,
+  } = useQuery({
+    queryKey: ["product", productId],
+    queryFn: async () => {
+      const productRes = await axios.get(`/api/pos/products/${productId}`);
+      return productRes.data;
+    },
+    enabled: !!productId,
+  });
+
+  // TanStack Query for fetching categories
+  const { data: categories = [] } = useQuery({
+    queryKey: ["categories"],
+    queryFn: async () => {
+      const categoriesRes = await axios.get("/api/pos/categories");
+      return categoriesRes.data;
+    },
+  });
+
+  // Update form when product data is loaded
+  useEffect(() => {
+    if (product) {
+      setForm({
+        item: product.item,
+        ic_id: product.ic_id,
+        sku: product.sku,
+        price: product.price,
+        stock: product.stock.toString(),
+        description: product.description || "",
+      });
+      setImagePreview(product.image_url);
+    }
+  }, [product]);
+
+  // TanStack Mutation for updating product
+  const updateProductMutation = useMutation({
+    mutationFn: async ({ formData, selectedImage, removeImage }) => {
+      let response;
+
+      // Check if we have an image to upload or need to remove image
+      if (selectedImage || removeImage) {
+        // Use FormData for file upload
+        const formDataObj = new FormData();
+        formDataObj.append("item", formData.item);
+        formDataObj.append("ic_id", formData.ic_id);
+        formDataObj.append("sku", formData.sku);
+        formDataObj.append("price", formData.price);
+        formDataObj.append("stock", formData.stock);
+        formDataObj.append("description", formData.description);
+
+        if (selectedImage) {
+          formDataObj.append("image", selectedImage);
+        }
+
+        if (removeImage) {
+          formDataObj.append("deleteImage", "true");
+        }
+
+        response = await fetch(`/api/pos/products/${productId}`, {
+          method: "PUT",
+          body: formDataObj,
+        });
+      } else {
+        // Use JSON for text-only updates
+        const payload = {
+          ...formData,
+          ic_id: parseInt(formData.ic_id),
+          price: parseFloat(formData.price),
+          stock: parseInt(formData.stock),
+        };
+
+        response = await fetch(`/api/pos/products/${productId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+
+      if (!response.ok) {
+        throw new Error("Update failed");
+      }
+
+      return await response.json();
+    },
+    onSuccess: (result) => {
+      // Update the product data in cache
+      queryClient.setQueryData(["product", productId], (oldData) => ({
+        ...oldData,
+        ...result.data,
+      }));
+
+      // Invalidate related queries
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+
+      // Reset file selection states
+      setSelectedImage(null);
+      setRemoveImage(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+
+      // Update image preview if new image is available
+      if (result.data?.image_url) {
+        setImagePreview(result.data.image_url);
+      }
+
+      // Show success message
+      setSaveStatus("success");
+      setTimeout(() => setSaveStatus(null), 3000);
+    },
+    onError: (error) => {
+      console.error("API Error:", error);
+      setSaveStatus("error");
+      setTimeout(() => setSaveStatus(null), 3000);
+    },
+  });
+
+  const validateForm = () => {
+    const newErrors = {};
+
+    if (!form.item.trim()) newErrors.item = "Product name is required";
+    if (!form.ic_id) newErrors.ic_id = "Category is required";
+    if (!form.sku.trim()) newErrors.sku = "SKU is required";
+    if (!form.price || parseFloat(form.price) <= 0)
+      newErrors.price = "Valid price is required";
+    if (!form.stock || parseInt(form.stock) < 0)
+      newErrors.stock = "Valid stock quantity is required";
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleImageSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      // Validate file type
+      const allowedTypes = [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+      ];
+      if (!allowedTypes.includes(file.type)) {
+        setErrors({
+          ...errors,
+          image: "Please select a valid image file (JPEG, PNG, GIF, or WebP)",
+        });
+        return;
+      }
+
+      // Validate file size (5MB)
+      if (file.size > 5 * 1024 * 1024) {
+        setErrors({ ...errors, image: "Image size must be less than 5MB" });
+        return;
+      }
+
+      setSelectedImage(file);
+      setRemoveImage(false);
+
+      // Create preview
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setImagePreview(e.target.result);
+      };
+      reader.readAsDataURL(file);
+
+      // Clear any image errors
+      if (errors.image) {
+        const newErrors = { ...errors };
+        delete newErrors.image;
+        setErrors(newErrors);
+      }
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+    setRemoveImage(true);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!validateForm()) return;
+
+    updateProductMutation.mutate({ formData: form, selectedImage, removeImage });
+  };
+
+  const handleInputChange = (field, value) => {
+    setForm({ ...form, [field]: value });
+    if (errors[field]) {
+      setErrors({ ...errors, [field]: "" });
+    }
+  };
+
+  const isLoading = productLoading;
+  const isSaving = updateProductMutation.isLoading;
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white rounded-2xl shadow-xl p-8 text-center"
+        >
+          <Loader2 className="w-12 h-12 mx-auto text-blue-600 animate-spin mb-4" />
+          <p className="text-gray-600 text-lg">Loading product details...</p>
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (productError || !product) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-white rounded-2xl shadow-xl p-8 text-center"
+        >
+          <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-4" />
+          <p className="text-gray-600 text-lg mb-4">
+            {productError ? "Error loading product details" : "Product not found"}
+          </p>
+          <button
+            onClick={() => router.back()}
+            className="bg-primary text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Go Back
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen">
+      <div className="max-w-full mx-auto px-4 sm:px-6">
+        {/* Header */}
+        <motion.div
+          initial={{ y: -50, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          className="bg-white rounded-2xl shadow-xl p-4 sm:p-6 mb-6"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center space-x-3 sm:space-x-5">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => router.back()}
+                className="hover:bg-primary p-1 rounded-lg"
+              >
+                <ArrowLeft className="w-5 h-5 sm:w-6 sm:h-6 hover:text-background" />
+              </motion.button>
+              <div>
+                <h1 className="text-xl sm:text-3xl font-bold text-gray-800">
+                  Edit Product
+                </h1>
+                <p className="text-sm sm:text-base text-gray-600">
+                  Update product information
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs sm:text-sm text-gray-500">Product ID</div>
+              <div className="font-mono text-base sm:text-lg font-semibold text-primary">
+                #{productId}
+              </div>
+            </div>
+          </div>
+        </motion.div>
+
+        <div className="grid lg:grid-cols-3 gap-6">
+          {/* Product Preview - Hidden on small screens, shown on lg and up */}
+          <motion.div
+            initial={{ x: -50, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            transition={{ delay: 0.2 }}
+            className="hidden lg:block lg:col-span-1"
+          >
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-6 sticky top-4">
+              <h3 className="text-lg sm:text-xl font-semibold mb-4 text-gray-800">
+                Product Preview
+              </h3>
+              <div className="space-y-4">
+                <div className="aspect-square bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl overflow-hidden relative">
+                  {imagePreview ? (
+                    <img
+                      src={imagePreview}
+                      alt={form.item || "Product"}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <Package className="w-12 sm:w-16 h-12 sm:h-16 text-gray-400 mb-3" />
+                      <p className="text-sm text-gray-500">No Image</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs sm:text-sm text-gray-500">Name</div>
+                    <div className="font-semibold text-gray-800 text-sm sm:text-base">
+                      {form.item || "Product Name"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs sm:text-sm text-gray-500">SKU</div>
+                    <div className="font-mono text-xs sm:text-sm text-primary">
+                      {form.sku || "SKU-CODE"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs sm:text-sm text-gray-500">
+                      Description
+                    </div>
+                    <div className="text-xs sm:text-sm text-gray-700 line-clamp-3">
+                      {form.description || "No description"}
+                    </div>
+                  </div>
+                  <div className="flex justify-between">
+                    <div>
+                      <div className="text-xs sm:text-sm text-gray-500">
+                        Price
+                      </div>
+                      <div className="text-lg sm:text-xl font-bold text-green-600">
+                        ${form.price || "0.00"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs sm:text-sm text-gray-500">
+                        Stock
+                      </div>
+                      <div className="text-lg sm:text-xl font-bold text-blue-600">
+                        {form.stock || "0"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* Form */}
+          <motion.div
+            initial={{ x: 50, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            transition={{ delay: 0.3 }}
+            className="lg:col-span-2"
+          >
+            <div className="bg-white rounded-2xl shadow-xl p-4 sm:p-6 md:p-8">
+              <div className="space-y-4 sm:space-y-6">
+                {/* Image Upload */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.4 }}
+                  className="relative"
+                >
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                    <ImageIcon className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                    Product Image
+                  </label>
+                  <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 sm:p-6 text-center hover:border-blue-400 transition-colors">
+                    {imagePreview ? (
+                      <div className="relative">
+                        <Image
+                          src={imagePreview}
+                          alt="Preview"
+                          className="w-24 h-24 sm:w-32 sm:h-32 object-cover rounded-xl mx-auto mb-3 sm:mb-4"
+                          width={128}
+                          height={128}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleRemoveImage}
+                          className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 transition-colors"
+                        >
+                          <X className="w-3 h-3 sm:w-4 sm:h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="py-2 sm:py-4">
+                        <Upload className="w-10 h-10 sm:w-12 sm:h-12 mx-auto text-gray-400 mb-3 sm:mb-4" />
+                        <p className="text-sm sm:text-base text-gray-600 mb-2">
+                          Click to upload image
+                        </p>
+                        <p className="text-xs sm:text-sm text-gray-400">
+                          PNG, JPG, GIF up to 5MB
+                        </p>
+                      </div>
+                    )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageSelect}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+                  {errors.image && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                    >
+                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                      {errors.image}
+                    </motion.p>
+                  )}
+                </motion.div>
+
+                {/* Product Name */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.5 }}
+                >
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                    <Package className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                    Product Name
+                  </label>
+                  <input
+                    type="text"
+                    value={form.item}
+                    onChange={(e) => handleInputChange("item", e.target.value)}
+                    className={`w-full px-3 py-2 sm:px-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all ${
+                      errors.item
+                        ? "border-red-300 focus:border-red-500"
+                        : "border-gray-200 focus:border-blue-500"
+                    }`}
+                    placeholder="Enter product name"
+                  />
+                  {errors.item && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                    >
+                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                      {errors.item}
+                    </motion.p>
+                  )}
+                </motion.div>
+
+                {/* Description */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.6 }}
+                >
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                    <FileText className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                    Description
+                  </label>
+                  <textarea
+                    value={form.description}
+                    onChange={(e) =>
+                      handleInputChange("description", e.target.value)
+                    }
+                    rows={4}
+                    className={`w-full px-3 py-2 sm:px-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all resize-none ${
+                      errors.description
+                        ? "border-red-300 focus:border-red-500"
+                        : "border-gray-200 focus:border-blue-500"
+                    }`}
+                    placeholder="Enter product description (optional)"
+                  />
+                  {errors.description && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                    >
+                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                      {errors.description}
+                    </motion.p>
+                  )}
+                </motion.div>
+
+                {/* Category */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.7 }}
+                >
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                    <Tag className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                    Category
+                  </label>
+                  <select
+                    value={form.ic_id}
+                    onChange={(e) => handleInputChange("ic_id", e.target.value)}
+                    className={`w-full px-3 py-2 sm:px-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all ${
+                      errors.ic_id
+                        ? "border-red-300 focus:border-red-500"
+                        : "border-gray-200 focus:border-blue-500"
+                    }`}
+                  >
+                    <option value="">Select category</option>
+                    {categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.ic_name}
+                      </option>
+                    ))}
+                  </select>
+                  {errors.ic_id && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                    >
+                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                      {errors.ic_id}
+                    </motion.p>
+                  )}
+                </motion.div>
+
+                {/* SKU */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 0.8 }}
+                >
+                  <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                    <Barcode className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                    SKU (Stock Keeping Unit)
+                  </label>
+                  <input
+                    type="text"
+                    value={form.sku}
+                    onChange={(e) => handleInputChange("sku", e.target.value)}
+                    className={`w-full px-3 py-2 sm:px-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all font-mono ${
+                      errors.sku
+                        ? "border-red-300 focus:border-red-500"
+                        : "border-gray-200 focus:border-blue-500"
+                    }`}
+                    placeholder="Enter SKU code"
+                  />
+                  {errors.sku && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                    >
+                      <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                      {errors.sku}
+                    </motion.p>
+                  )}
+                </motion.div>
+
+                {/* Price and Stock Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
+                  {/* Price */}
+                  <motion.div
+                    initial={{ y: 20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 0.9 }}
+                  >
+                    <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                      <DollarSign className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                      Price
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 sm:left-4 top-1/2 transform -translate-y-1/2 text-gray-500 font-medium">
+                        $
+                      </span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={form.price}
+                        onChange={(e) =>
+                          handleInputChange("price", e.target.value)
+                        }
+                        className={`w-full pl-7 sm:pl-8 pr-3 py-2 sm:pr-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all ${
+                          errors.price
+                            ? "border-red-300 focus:border-red-500"
+                            : "border-gray-200 focus:border-blue-500"
+                        }`}
+                        placeholder="0.00"
+                      />
+                    </div>
+                    {errors.price && (
+                      <motion.p
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                      >
+                        <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                        {errors.price}
+                      </motion.p>
+                    )}
+                  </motion.div>
+
+                  {/* Stock */}
+                  <motion.div
+                    initial={{ y: 20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 1.0 }}
+                  >
+                    <label className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
+                      <Warehouse className="w-3 h-3 sm:w-4 sm:h-4 inline mr-2" />
+                      Stock Quantity
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      readOnly
+                      value={form.stock}
+                      onChange={(e) =>
+                        handleInputChange("stock", e.target.value)
+                      }
+                      className={`w-full px-3 py-2 sm:px-4 sm:py-3 border-2 rounded-xl focus:outline-none transition-all ${
+                        errors.stock
+                          ? "border-red-300 focus:border-red-500"
+                          : "border-gray-200 focus:border-blue-500"
+                      }`}
+                      placeholder="0"
+                    />
+                    {errors.stock && (
+                      <motion.p
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-red-500 text-xs sm:text-sm mt-1 flex items-center"
+                      >
+                        <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />
+                        {errors.stock}
+                      </motion.p>
+                    )}
+                  </motion.div>
+                </div>
+
+                {/* Save Button */}
+                <motion.div
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ delay: 1.1 }}
+                  className="pt-4 sm:pt-6 border-t border-gray-200"
+                >
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleSubmit}
+                    disabled={isSaving}
+                    className={`w-full py-2 px-4 rounded-lg font-semibold text-sm sm:text-md transition-all ${
+                      isSaving
+                        ? "bg-primary/50 cursor-not-allowed"
+                        : "bg-primary"
+                    } text-white flex items-center justify-center space-x-2 sm:space-x-3`}
+                  >
+                    {isSaving ? (
+                      <>
+                        <Loader2 className="w-5 h-5 sm:w-6 sm:h-6 animate-spin" />
+                        <span>Saving Changes...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-5 h-5 sm:w-6 sm:h-6" />
+                        <span>Save Product</span>
+                      </>
+                    )}
+                  </motion.button>
+                </motion.div>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+
+        {/* Save Status Toast */}
+        <AnimatePresence>
+          {saveStatus && (
+            <motion.div
+              initial={{ opacity: 0, y: 100, scale: 0.8 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 100, scale: 0.8 }}
+              className="fixed bottom-4 sm:bottom-8 right-4 sm:right-8 z-50"
+            >
+              <div
+                className={`px-4 py-3 sm:px-6 sm:py-4 rounded-xl shadow-2xl flex items-center space-x-2 sm:space-x-3 ${
+                  saveStatus === "success"
+                    ? "bg-green-500 text-white"
+                    : "bg-red-500 text-white"
+                }`}
+              >
+                {saveStatus === "success" ? (
+                  <CheckCircle className="w-5 h-5 sm:w-6 sm:h-6" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 sm:w-6 sm:h-6" />
+                )}
+                <span className="font-semibold text-sm sm:text-base">
+                  {saveStatus === "success"
+                    ? "Product updated successfully!"
+                    : "Failed to update product. Please try again."}
+                </span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+};
+
+export default ProductDetail;

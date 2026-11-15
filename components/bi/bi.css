@@ -1,0 +1,336 @@
+/* components/bi/bi.css — the BI dashboards, in the ERP's own look.
+   Every colour comes from the app's theme variables (app/globals.css), so the
+   dashboards follow the brand (the theme primary, white cards on light grey,
+   Poppins) and switch with light / dark mode automatically.
+   Everything is scoped under .bi so the rest of the ERP is untouched.
+
+   Semantic names used by the widgets:
+     --brass  main highlight  → primary (theme colour)
+     --moss   good / up       → green
+     --rust   bad / down      → destructive (red)
+     --steel  neutral         → slate */
+.bi{
+  --bg: hsl(var(--secondary));
+  --panel: hsl(var(--card));
+  --panel-2: hsl(var(--muted));
+  --panel-3: hsl(var(--muted));
+  --border: hsl(var(--border));
+  --border-soft: hsl(var(--border) / .65);
+  --text: hsl(var(--foreground));
+  --muted: hsl(var(--muted-foreground));
+  --muted-2: hsl(var(--muted-foreground) / .8);
+  --brass: hsl(var(--primary));
+  --brass-soft: hsl(var(--primary) / .09);
+  --rust: hsl(var(--destructive));
+  --rust-soft: hsl(var(--destructive) / .1);
+  --moss: hsl(142 64% 32%);
+  --moss-soft: hsl(142 64% 32% / .1);
+  --steel: hsl(215 22% 42%);
+  --steel-soft: hsl(215 22% 42% / .1);
+  background:var(--bg); color:var(--text);
+  font-family:"Poppins", sans-serif; -webkit-font-smoothing:antialiased;
+}
+/* Inside the ERP frame (components/sidebar/AppShell.jsx): fills the page area beside the menu. */
+.bi-page{min-height:calc(100svh - var(--header-height, 0px)); min-width:0;}
+.bi *{box-sizing:border-box;}
+.bi ::selection{background:var(--brass-soft);}
+.bi .disp, .bi h1, .bi h2, .bi h3{font-family:"Poppins", sans-serif;}
+.bi .num, .bi .mono{font-variant-numeric:tabular-nums; font-feature-settings:"tnum";}
+.bi .pos{color:var(--moss);} .bi .neg{color:var(--rust);}
+
+/* header — white bar with the primary-coloured brand mark */
+/* sticks just under the ERP header (z-50), never over it */
+.bi-header{position:sticky; top:var(--header-height, 0px); z-index:30; background:hsl(var(--card) / .96); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); box-shadow:0 1px 2px hsl(0 0% 0% / .04);}
+.bi-header-inner{max-width:1440px; margin:0 auto; padding:12px 28px; display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap;}
+.bi-brand{display:flex; align-items:center; gap:12px;}
+.bi-brand-mark{width:36px; height:36px; background:var(--brass); border-radius:8px; display:flex; align-items:center; justify-content:center; color:hsl(var(--primary-foreground)); font-weight:700; font-size:15px;}
+.bi-brand .t1{font-size:16px; font-weight:600; color:var(--text);} .bi-brand .t2{font-size:11.5px; color:var(--muted); margin-top:1px;}
+.bi-switch{display:flex; gap:4px; background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:3px; flex-wrap:wrap;}
+.bi-switch button{border:none; background:transparent; color:var(--muted); font-size:12.5px; font-weight:500; padding:7px 13px; border-radius:7px; cursor:pointer; white-space:nowrap; transition:background .15s,color .15s;}
+.bi-switch button.active{background:var(--brass); color:hsl(var(--primary-foreground)); box-shadow:0 1px 3px hsl(var(--primary) / .35);}
+.bi-switch button:hover:not(.active){color:var(--text); background:var(--panel);}
+.bi-clock{font-size:12px; color:var(--muted); text-align:right; line-height:1.45;}
+.bi-clock .live{color:var(--moss); display:inline-flex; align-items:center; gap:6px; font-weight:500;}
+.bi-dot{width:7px; height:7px; border-radius:50%; background:var(--moss); box-shadow:0 0 0 3px var(--moss-soft); animation:bi-pulse 2s infinite;}
+@keyframes bi-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
+.bi-periods{max-width:1440px; margin:0 auto; padding:0 28px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+.bi-chip{border:1px solid var(--border); background:var(--panel); color:var(--muted); padding:6px 14px; border-radius:999px; font-size:12px; font-weight:500; cursor:pointer; transition:.15s;}
+.bi-chip.active{border-color:var(--brass); color:hsl(var(--primary-foreground)); background:var(--brass);}
+.bi-chip:hover:not(.active){color:var(--brass); border-color:hsl(var(--primary) / .45);}
+.bi-iconbtn{border:1px solid var(--border); background:var(--panel); color:var(--muted); border-radius:8px; padding:6px 11px; font-size:12px; font-weight:500; cursor:pointer; display:inline-flex; align-items:center; gap:6px; text-decoration:none;}
+.bi-iconbtn:hover{color:var(--brass); border-color:hsl(var(--primary) / .45);}
+
+/* layout */
+.bi-main{max-width:1440px; margin:0 auto; padding:24px 28px 72px;}
+.bi-section{margin-bottom:30px;}
+.bi-section-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:12px; flex-wrap:wrap;}
+.bi-section-head h2{font-size:14px; font-weight:600; margin:0; color:var(--text); display:flex; align-items:center; gap:9px;}
+.bi-section-head h2::before{content:""; width:4px; height:16px; border-radius:2px; background:var(--brass);}
+.bi-sub{font-size:12px; color:var(--muted-2);}
+/* The grid follows the space it actually has (beside the menu, inside the
+   designer preview), not the whole screen — so cards never squeeze into
+   each other when the sidebar is open. .bi-cq is the measuring box. */
+.bi-cq{container-type:inline-size; min-width:0;}
+.bi-grid{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px;}
+.bi-grid > *{min-width:0;}
+.bi-w1{grid-column:span 1;} .bi-w2{grid-column:span 2;} .bi-w3{grid-column:span 3;} .bi-w4{grid-column:span 4;}
+@container (max-width:1060px){.bi-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .bi-w3,.bi-w4{grid-column:span 2;}}
+@container (max-width:600px){.bi-grid{grid-template-columns:1fr;} .bi-w1,.bi-w2,.bi-w3,.bi-w4{grid-column:span 1;}}
+@media(max-width:720px){.bi-header-inner,.bi-periods,.bi-main{padding-left:16px; padding-right:16px;}}
+.bi-card{overflow:hidden;}
+
+/* cards — white, soft shadow, primary accent on hover */
+.bi-card{background:var(--panel); border:1px solid var(--border-soft); border-radius:12px; padding:16px 16px 14px; min-width:0;
+  box-shadow:0 1px 2px hsl(0 0% 0% / .04), 0 1px 3px hsl(0 0% 0% / .03); transition:border-color .15s, box-shadow .15s;}
+.bi-card:hover{border-color:hsl(var(--primary) / .28); box-shadow:0 4px 14px hsl(0 0% 0% / .06);}
+.bi-card-title{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px;}
+.bi-card-title .lbl{font-size:12.5px; color:var(--text); font-weight:600;}
+.bi-card-title .ds{font-size:9.5px; color:var(--muted-2); text-transform:uppercase; letter-spacing:.6px; background:var(--panel-2); padding:2px 7px; border-radius:999px; white-space:nowrap;}
+.bi-kpi-primary{font-size:24px; font-weight:700; letter-spacing:-.4px; margin-bottom:2px; color:var(--brass);}
+.bi-kpi-period{font-size:11.5px; color:var(--muted-2); margin-bottom:12px;}
+.bi-kpi-rows{display:flex; flex-direction:column; gap:5px; border-top:1px solid var(--border-soft); padding-top:9px;}
+.bi-kpi-row{display:flex; justify-content:space-between; font-size:11.5px; color:var(--muted);}
+.bi-kpi-row b{color:var(--text); font-weight:600;}
+.bi-kpi-row.hi, .bi-kpi-row.hi b{color:var(--brass);}
+.bi-big{font-size:30px; font-weight:700; letter-spacing:-.5px; color:var(--brass);}
+.bi-error{font-size:12px; color:var(--rust); background:var(--rust-soft); border-radius:8px; padding:10px 12px;}
+.bi-empty{font-size:12px; color:var(--muted-2); padding:18px 0; text-align:center;}
+
+/* tables */
+.bi table{width:100%; border-collapse:collapse; font-size:12.5px;}
+.bi th{text-align:left; font-weight:600; color:var(--muted); font-size:10.5px; letter-spacing:.4px; text-transform:uppercase; padding:8px 10px; border-bottom:2px solid var(--border); white-space:nowrap; background:var(--panel-2); position:sticky; top:0; z-index:1;}
+.bi td{padding:9px 10px; border-bottom:1px solid var(--border-soft); color:var(--text);}
+.bi tbody tr:hover td{background:var(--brass-soft);}
+.bi tr:last-child td{border-bottom:none;}
+.bi td.num, .bi th.num{text-align:right;}
+.bi-table-wrap{overflow:auto; max-height:420px; border-radius:8px; border:1px solid var(--border-soft);}
+
+/* skeleton */
+.bi-skel{background:linear-gradient(90deg,var(--panel-2),var(--panel),var(--panel-2)); background-size:200% 100%; animation:bi-shim 1.4s infinite; border-radius:10px;}
+@keyframes bi-shim{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+.bi-footer{max-width:1440px; margin:0 auto; padding:0 28px 40px; color:var(--muted-2); font-size:11px;}
+
+/* dashboard filter bar */
+.bi-filters{max-width:1440px; margin:0 auto; padding:0 28px 12px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+.bi-filter{display:flex; align-items:center; gap:6px; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:3px 4px 3px 10px;}
+.bi-filter label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; font-weight:600;}
+.bi-filter select{background:transparent; color:var(--text); border:none; outline:none; font-size:12.5px; padding:5px 4px; max-width:220px; font-family:inherit;}
+.bi-filter select option{background:var(--panel); color:var(--text);}
+.bi-filter.on{border-color:var(--brass); background:var(--brass-soft);}
+@media(max-width:720px){.bi-filters{padding-left:16px; padding-right:16px;}}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Dashboard page (2026-10) — title card, toolbar, buttons, tabs, cards.
+   Everything still reads the theme tokens above, so light / dark follow.
+   ══════════════════════════════════════════════════════════════════════ */
+.bi-wrap{max-width:1600px; margin:0 auto; padding-left:24px; padding-right:24px;}
+@media(max-width:720px){.bi-wrap{padding-left:12px; padding-right:12px;}}
+
+/* title card */
+.bi-hero{position:relative; overflow:hidden; background:var(--panel); border:1px solid var(--border-soft); border-radius:16px; padding:18px 20px 14px;
+  box-shadow:0 1px 2px hsl(0 0% 0% / .04), 0 8px 24px -12px hsl(var(--primary) / .18);}
+.bi-hero::before{content:""; position:absolute; inset:0 0 auto 0; height:3px; background:linear-gradient(90deg, var(--brass), hsl(var(--primary) / .35));}
+.bi-hero-icon{display:inline-grid; place-items:center; width:42px; height:42px; flex-shrink:0; border-radius:12px; color:hsl(var(--primary-foreground));
+  background:linear-gradient(135deg, var(--brass), hsl(var(--primary) / .75)); box-shadow:0 6px 14px -6px hsl(var(--primary) / .6);}
+.bi-live{display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:500; color:var(--moss); background:var(--moss-soft);
+  padding:3px 9px; border-radius:999px; white-space:nowrap;}
+
+/* buttons */
+.bi-btn{display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 12px; border-radius:10px; border:1px solid var(--border);
+  background:var(--panel); color:var(--text); font-size:13px; font-weight:500; cursor:pointer; text-decoration:none; white-space:nowrap;
+  transition:border-color .15s, color .15s, background .15s, box-shadow .15s;}
+.bi-btn:hover{border-color:hsl(var(--primary) / .5); color:var(--brass); box-shadow:0 2px 8px -4px hsl(var(--primary) / .35);}
+.bi-btn.on{border-color:var(--brass); color:var(--brass); background:var(--brass-soft);}
+.bi-btn-icon{width:36px; justify-content:center; padding:0;}
+.bi-btn-primary{background:var(--brass); border-color:var(--brass); color:hsl(var(--primary-foreground));}
+.bi-btn-primary:hover{color:hsl(var(--primary-foreground)); filter:brightness(1.08);}
+
+/* dashboard tabs */
+.bi-tabs{display:flex; gap:4px; margin-top:14px; padding-top:12px; border-top:1px solid var(--border-soft); overflow-x:auto; scrollbar-width:thin;}
+.bi-tabs button{flex-shrink:0; border:none; background:transparent; color:var(--muted); font-size:13px; font-weight:500; padding:7px 14px;
+  border-radius:9px; cursor:pointer; transition:background .15s, color .15s;}
+.bi-tabs button:hover{color:var(--text); background:var(--panel-2);}
+.bi-tabs button.active{color:var(--brass); background:var(--brass-soft); font-weight:600;}
+
+/* sticky toolbar under the ERP header */
+.bi-toolbar{position:sticky; top:var(--header-height, 0px); z-index:30; margin-top:14px; background:hsl(var(--secondary) / .86);
+  backdrop-filter:blur(10px); border-top:1px solid var(--border-soft); border-bottom:1px solid var(--border-soft);}
+.bi-seg{display:flex; gap:2px; padding:3px; background:var(--panel); border:1px solid var(--border); border-radius:11px; overflow-x:auto; scrollbar-width:none; max-width:100%;}
+.bi-seg::-webkit-scrollbar{display:none;}
+.bi-seg button{flex-shrink:0; border:none; background:transparent; color:var(--muted); font-size:12.5px; font-weight:500; padding:6px 11px;
+  border-radius:8px; cursor:pointer; white-space:nowrap; transition:background .15s, color .15s;}
+.bi-seg button:hover:not(.active){color:var(--text); background:var(--panel-2);}
+.bi-seg button.active{background:var(--brass); color:hsl(var(--primary-foreground)); box-shadow:0 2px 6px -2px hsl(var(--primary) / .5);}
+.bi-filter-label{font-size:10.5px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--muted);}
+
+/* sections */
+.bi-section{margin-bottom:26px;}
+.bi-section-head h2{font-size:13.5px; letter-spacing:.2px;}
+
+/* cards */
+.bi-card{display:flex; flex-direction:column; border-radius:14px; padding:16px 18px; border-color:var(--border-soft);
+  box-shadow:0 1px 2px hsl(0 0% 0% / .04), 0 2px 6px -2px hsl(0 0% 0% / .04);}
+.bi-card:hover{border-color:hsl(var(--primary) / .3); box-shadow:0 10px 26px -14px hsl(var(--primary) / .35);}
+.bi-card-title{align-items:flex-start; margin-bottom:12px;}
+.bi-card-title .lbl{font-size:13px; font-weight:600; line-height:1.35;}
+.bi-card-title .ds{font-size:9.5px; font-weight:600; color:var(--muted); background:var(--panel-2); border:1px solid var(--border-soft);}
+.bi-empty-state{max-width:520px; margin:40px auto; padding:36px 28px; text-align:center; align-items:center;}
+
+/* KPI */
+.bi-kpi-primary{font-size:28px; letter-spacing:-.6px; line-height:1.1;}
+.bi-kpi-period{display:inline-flex; align-self:flex-start; font-size:11px; font-weight:500; color:var(--brass); background:var(--brass-soft);
+  padding:2px 8px; border-radius:999px; margin:6px 0 12px;}
+.bi-kpi-rows{display:grid; grid-template-columns:1fr 1fr; gap:6px; border-top:none; padding-top:0;}
+.bi-kpi-row{flex-direction:column; gap:1px; padding:7px 9px; border-radius:9px; background:var(--panel-2); font-size:10.5px;}
+.bi-kpi-row b{font-size:12.5px;}
+.bi-kpi-row.hi{background:var(--brass-soft);}
+
+/* table tools: search + count */
+.bi-table-tools{display:flex; align-items:center; gap:8px; margin-bottom:8px;}
+.bi-search{position:relative; flex:1; max-width:260px;}
+.bi-search svg{position:absolute; left:9px; top:50%; transform:translateY(-50%); color:var(--muted-2); pointer-events:none;}
+.bi-search input{width:100%; height:32px; padding:0 28px 0 30px; border-radius:9px; border:1px solid var(--border); background:var(--panel);
+  color:var(--text); font-size:12.5px; outline:none; transition:border-color .15s, box-shadow .15s;}
+.bi-search input:focus{border-color:var(--brass); box-shadow:0 0 0 3px var(--brass-soft);}
+.bi-search .clr{position:absolute; right:6px; top:50%; transform:translateY(-50%); border:none; background:transparent; color:var(--muted); cursor:pointer; padding:2px; display:flex;}
+.bi-count{font-size:11.5px; color:var(--muted-2); margin-left:auto; white-space:nowrap;}
+.bi th.sortable{cursor:pointer; user-select:none;}
+.bi th.sortable:hover{color:var(--brass);}
+.bi th .arrow{display:inline-block; margin-left:4px; opacity:.8;}
+.bi tbody tr:nth-child(even) td{background:hsl(var(--muted) / .35);}
+.bi tbody tr:hover td{background:var(--brass-soft);}
+.bi-table-wrap{border-radius:10px;}
+.bi tr.total td{border-top:2px solid var(--border); background:var(--panel-2) !important;}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Tables v2 — solid sticky header, one line per row, readable weights,
+   status pills. border-collapse:separate is what keeps a sticky header
+   opaque: with "collapse" some browsers let scrolled rows show through it.
+   ══════════════════════════════════════════════════════════════════════ */
+.bi .bi-table-wrap{max-height:460px; overflow:auto; border:1px solid var(--border); border-radius:12px; background:var(--panel);
+  scrollbar-width:thin; scrollbar-color:hsl(var(--foreground) / .22) transparent;}
+.bi .bi-table-wrap::-webkit-scrollbar{width:8px; height:8px;}
+.bi .bi-table-wrap::-webkit-scrollbar-thumb{background:hsl(var(--foreground) / .18); border-radius:8px; border:2px solid var(--panel);}
+.bi .bi-table-wrap::-webkit-scrollbar-thumb:hover{background:hsl(var(--foreground) / .32);}
+.bi .bi-table-wrap::-webkit-scrollbar-track{background:transparent;}
+
+.bi .bi-table-wrap table{width:100%; border-collapse:separate; border-spacing:0; font-size:13px;}
+.bi .bi-table-wrap thead th{position:sticky; top:0; z-index:3; background:hsl(var(--card)); color:hsl(var(--foreground));
+  font-size:11.5px; font-weight:700; letter-spacing:.35px; text-transform:uppercase; padding:11px 14px; white-space:nowrap;
+  border-bottom:2px solid hsl(var(--primary) / .35); box-shadow:0 1px 0 var(--border);}
+.bi .bi-table-wrap thead th.num{text-align:right;}
+.bi .bi-table-wrap thead th.sortable:hover{color:var(--brass); background:hsl(var(--muted));}
+.bi .bi-table-wrap tbody td{padding:10px 14px; font-size:13px; font-weight:500; color:hsl(var(--foreground)); white-space:nowrap;
+  border-bottom:1px solid hsl(var(--border) / .7); background:var(--panel); vertical-align:middle;}
+.bi .bi-table-wrap tbody td.num{text-align:right; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:.1px;}
+.bi .bi-table-wrap tbody tr:nth-child(even) td{background:hsl(var(--muted) / .45);}
+.bi .bi-table-wrap tbody tr:hover td{background:hsl(var(--primary) / .07);}
+.bi .bi-table-wrap tbody tr:last-child td{border-bottom:none;}
+.bi .bi-table-wrap tbody tr.total td{position:sticky; bottom:0; z-index:2; background:hsl(var(--card)); border-top:2px solid hsl(var(--primary) / .35);
+  border-bottom:none; font-weight:700; color:var(--brass); box-shadow:0 -1px 0 var(--border);}
+
+/* text cells: one line, long names end in … (full name on hover) */
+.bi-cell-text{display:inline-block; max-width:280px; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom;}
+.bi-cell-key{font-weight:700; color:var(--brass); font-variant-numeric:tabular-nums;}
+
+/* status pills */
+.bi-pill{display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11.5px; font-weight:600; line-height:1.4; white-space:nowrap;}
+.bi-pill::before{content:""; width:6px; height:6px; border-radius:50%; background:currentColor; opacity:.85;}
+.bi-pill-good{color:hsl(142 64% 28%); background:hsl(142 64% 32% / .12);}
+.bi-pill-warn{color:hsl(32 90% 34%); background:hsl(38 92% 50% / .16);}
+.bi-pill-bad{color:hsl(var(--destructive)); background:hsl(var(--destructive) / .1);}
+.bi-pill-neutral{color:hsl(215 22% 38%); background:hsl(215 22% 42% / .1);}
+.dark .bi-pill-good{color:hsl(142 60% 60%);} .dark .bi-pill-warn{color:hsl(38 92% 62%);} .dark .bi-pill-neutral{color:hsl(215 20% 72%);}
+
+/* card header: stronger title */
+.bi-card-title .lbl{font-size:14px; font-weight:700; color:hsl(var(--foreground)); letter-spacing:-.1px;}
+.bi-card-title .ds{font-size:9.5px; letter-spacing:.6px; color:var(--muted); background:transparent; border:1px solid var(--border-soft);}
+.bi-table-tools .bi-search input{height:34px; font-size:13px;}
+.bi-count{font-weight:500;}
+
+/* follow-up flags (visual.options.rowRules) */
+.bi .bi-table-wrap tbody tr.bi-row-flag td{background:color-mix(in srgb, var(--flag) 9%, var(--panel));}
+.bi .bi-table-wrap tbody tr.bi-row-flag:hover td{background:color-mix(in srgb, var(--flag) 15%, var(--panel));}
+.bi .bi-table-wrap tbody tr.bi-row-flag td:first-child{box-shadow:inset 4px 0 0 var(--flag);}
+.bi-flag-pill{display:inline-flex; align-items:center; gap:4px; margin-right:8px; padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:700;
+  letter-spacing:.2px; color:#fff; background:var(--flag); vertical-align:middle; white-space:nowrap;}
+.bi-flag-toggle{display:inline-flex; align-items:center; gap:5px; height:32px; padding:0 11px; border-radius:9px; font-size:12px; font-weight:600; cursor:pointer;
+  color:var(--rust); background:var(--rust-soft); border:1px solid hsl(var(--destructive) / .25); white-space:nowrap;}
+.bi-flag-toggle.on{color:#fff; background:var(--rust); border-color:var(--rust);}
+
+/* follow-up status on scenario rows (lib/bi/followups.js) */
+.bi-fu-done,.bi-fu-snooze,.bi-fu-log{display:inline-flex; align-items:center; gap:4px; margin-right:8px; padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:700; vertical-align:middle; white-space:nowrap;}
+.bi-fu-done{color:hsl(142 64% 28%); background:hsl(142 64% 32% / .14);}
+.bi-fu-snooze{color:hsl(200 80% 32%); background:hsl(200 80% 45% / .14);}
+.bi-fu-log{border:1px solid var(--brass); color:var(--brass); background:var(--panel); cursor:pointer; transition:background .15s, color .15s;}
+.bi-fu-log:hover{background:var(--brass); color:hsl(var(--primary-foreground));}
+.dark .bi-fu-done{color:hsl(142 60% 60%);} .dark .bi-fu-snooze{color:hsl(200 80% 65%);}
+
+/* ══════════════════════════════════════════════════════════════════════
+   System look (2026-11) — the ERP's page / card / table pattern
+   (components/shared/DataTable.jsx, Accounting → Settings): muted page,
+   white bordered cards with a maroon-tinted header band, solid primary
+   table headers, underline tabs, calm status pills.
+   ══════════════════════════════════════════════════════════════════════ */
+.bi{--bg: hsl(var(--muted) / .4);}
+.bi-wrap{max-width:1600px;}
+@media(max-width:640px){.bi-wrap{padding-left:12px; padding-right:12px;}}
+@media(min-width:641px){.bi-wrap{padding-left:24px; padding-right:24px;}}
+
+/* cards: header band */
+.bi-card{border:1px solid var(--border); border-radius:12px; padding:0 16px 14px; box-shadow:none;}
+.bi-card:hover{border-color:hsl(var(--primary) / .3); box-shadow:0 6px 18px -12px hsl(var(--primary) / .35);}
+.bi-card-title{margin:0 -16px 12px; padding:10px 16px; align-items:center; border-bottom:1px solid hsl(var(--primary) / .15); background:hsl(var(--primary) / .05);}
+.bi-card-title .lbl{font-size:13.5px; font-weight:600; color:var(--brass); min-width:0; overflow:hidden; text-overflow:ellipsis;}
+.bi-card-title .ds{background:var(--panel); border:1px solid hsl(var(--primary) / .18); color:var(--muted);}
+
+/* KPI: muted label, big figure, period chip */
+.bi-kpi-primary{color:hsl(var(--foreground)); font-size:28px; font-weight:700;}
+.bi-big{color:hsl(var(--foreground));}
+
+/* tables: solid primary header */
+.bi .bi-table-wrap{border-radius:10px;}
+.bi .bi-table-wrap thead th{background:hsl(var(--primary)); color:hsl(var(--primary-foreground)); border-bottom:none; box-shadow:none;
+  font-size:11px; letter-spacing:.4px;}
+.bi .bi-table-wrap thead th.sortable:hover{background:hsl(var(--primary) / .88); color:hsl(var(--primary-foreground));}
+.bi .bi-table-wrap thead th .arrow{opacity:1;}
+.bi .bi-table-wrap tbody tr.total td{color:var(--brass);}
+
+/* status pills — the system's ok / warn / bad chips */
+.bi-pill-good{color:#2f5139; background:#edf2ee;}
+.bi-pill-warn{color:#5f4b1f; background:#f5f0e6;}
+.bi-pill-bad{color:#991b1b; background:#fef2f2;}
+.dark .bi-pill-good{color:hsl(142 45% 70%); background:hsl(142 30% 30% / .3);}
+.dark .bi-pill-warn{color:hsl(40 60% 70%); background:hsl(40 50% 35% / .3);}
+.dark .bi-pill-bad{color:hsl(0 80% 75%); background:hsl(0 60% 35% / .3);}
+
+/* dashboard tabs: underline, scroll on a phone */
+.bi-tabs{gap:0; margin-top:16px; padding-top:0; border-top:none; border-bottom:1px solid var(--border); scrollbar-width:none;}
+.bi-tabs::-webkit-scrollbar{display:none;}
+.bi-tabs button{margin-bottom:-1px; border-radius:0; border-bottom:2px solid transparent; padding:9px 14px; white-space:nowrap;}
+.bi-tabs button:hover{background:transparent; color:var(--text);}
+.bi-tabs button.active{background:transparent; color:var(--brass); border-bottom-color:var(--brass); font-weight:600;}
+
+/* toolbar under the ERP header */
+.bi-toolbar{background:hsl(var(--background) / .92); border-top:none;}
+.bi-seg button.active{box-shadow:none;}
+
+/* sections */
+.bi-section-head h2{font-size:15px; font-weight:600;}
+.bi-section-head h2::before{display:none;}
+
+/* empty / error */
+.bi-empty{padding:24px 8px; font-size:12.5px;}
+.bi-error{border:1px solid hsl(var(--destructive) / .3);}
+
+/* drill-down dialog: a sheet on a phone, a centred dialog above */
+.bi-drill-backdrop{position:fixed; inset:0; z-index:200; background:rgba(15,15,15,.5); display:flex; align-items:flex-start; justify-content:center; padding:56px 12px;}
+.bi-drill{width:100%; max-width:1100px; max-height:84vh; padding:0 !important; overflow:hidden;}
+.bi-drill-head{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:12px 16px;
+  border-bottom:1px solid hsl(var(--primary) / .15); background:hsl(var(--primary) / .05);}
+@media(max-width:640px){
+  .bi-drill-backdrop{padding:0; align-items:stretch;}
+  .bi-drill{max-height:none; height:100%; border-radius:0 !important; border:none !important;}
+}
+.bi-card.bi-empty-state{padding:36px 24px;}

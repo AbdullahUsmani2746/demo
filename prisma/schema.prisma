@@ -1,0 +1,3299 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expires])
+}
+
+model User {
+  id                           String               @id @default(cuid())
+  username                     String?              @unique @db.VarChar(25)
+  name                         String?
+  email                        String               @unique
+  emailVerified                DateTime?
+  password                     String?
+  image                        String?
+  // Primary role — an app_roles.code (prisma/sql/2026-11-16_roles.sql); more in user_roles
+  role                         String               @default("EMPLOYEE") @db.VarChar(40)
+  isActive                     Boolean              @default(true)
+  shiftId                      Int?
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @updatedAt
+  departmentId                 Int?
+  phone                        String?
+  employeeId                   Int?                 @unique
+  accounts                     Account[]
+  auditLogs                    AuditLog[]
+  invoiceKnockoffsCreated      InvoiceKnockoff[]    @relation("KnockoffCreatedBy")
+  invoiceKnockoffsReversed     InvoiceKnockoff[]    @relation("KnockoffReversedBy")
+  invoiceKnockoffRunsTriggered InvoiceKnockoffRun[]
+  notifications                Notification[]
+  notificationRules            NotificationRule[]
+  pushSubscriptions            PushSubscription[]
+  orderMaster                  OrderMaster[]
+  sessions                     Session[]
+  transactionsMaster           TransactionsMaster[] @relation("UserTransactions")
+  department                   Department?          @relation(fields: [departmentId], references: [id])
+  employee                     Employee?            @relation(fields: [employeeId], references: [id])
+  shift                        Shift?               @relation(fields: [shiftId], references: [id])
+  checksInHand                 ChecksInHand[]       @relation("UserChecksInHand")
+  permissionGrants             PermissionGrant[]
+  fieldPolicies                FieldPolicy[]
+  dataScopes                   DataScope[]
+  permissionsGrantedByMe       PermissionGrant[]    @relation("PermissionGrantedBy")
+  extraRoles                   UserRole[]
+
+  @@index([role])
+  @@index([isActive])
+  @@index([createdAt])
+  @@index([email])
+  @@index([username])
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  model_name String   @db.VarChar(100)
+  record_id  String   @db.VarChar(150)
+  action     String   @db.VarChar(10)
+  changes    Json?
+  snapshot   Json?
+  user_id    String?
+  user_name  String?  @db.VarChar(100)
+  dated      DateTime @default(now())
+  /// The document the row belongs to (a voucher line → its voucher) — lib/audit/catalog.js
+  doc_model  String?  @db.VarChar(100)
+  doc_id     String?  @db.VarChar(150)
+  /// One save = one batch (every row a request wrote)
+  batch_id   String?  @db.VarChar(40)
+  /// user | system (cron jobs, scripts)
+  source     String?  @db.VarChar(10)
+  user       User?    @relation(fields: [user_id], references: [id])
+
+  @@index([model_name, record_id])
+  @@index([dated])
+  @@index([user_id])
+  @@index([doc_model, doc_id])
+  @@index([batch_id])
+}
+
+/// Admin-defined "when this changes, tell these people" (Admin → Notifications
+/// → Alerts). Evaluated on every audited write — lib/notifications/alerts.js.
+model NotificationAlert {
+  id               Int       @id @default(autoincrement())
+  name             String    @db.VarChar(150)
+  description      String?   @db.VarChar(500)
+  is_active        Boolean   @default(true)
+  model_name       String    @db.VarChar(100) // Prisma model, e.g. TransactionsMaster
+  actions          String[]  @default([]) // create | update | delete (empty = all)
+  conditions       Json      @default("[]") // [{ field, op, value }]
+  match            String    @default("all") @db.VarChar(3) // all | any
+  recipients       Json      @default("{}") // { roles, users, departments, userFields }
+  notify_actor     Boolean   @default(false)
+  type             String    @default("info") @db.VarChar(10) // info | success | warning | error
+  title_template   String    @db.VarChar(200)
+  message_template String    @db.VarChar(500)
+  created_by       String?   @db.VarChar(50)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @default(now()) @updatedAt
+  last_fired_at    DateTime?
+  fire_count       Int       @default(0)
+
+  @@index([model_name, is_active])
+  @@map("notification_alerts")
+}
+
+model Shift {
+  id        Int      @id @default(autoincrement())
+  name      String
+  startTime String
+  endTime   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
+
+  @@index([name])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@index([expires])
+  @@index([token])
+}
+
+model MBSCD {
+  mbscd       Int    @id @unique @default(autoincrement())
+  mbscdDetail String @db.VarChar(100)
+  bscdItems   BSCD[]
+
+  @@index([mbscdDetail])
+}
+
+model BSCD {
+  bscd       Int     @id @unique @default(autoincrement())
+  mbscd      Int
+  bscdDetail String  @db.VarChar(100)
+  mainBscd   MBSCD   @relation(fields: [mbscd], references: [mbscd])
+  macnoItems MACNO[]
+
+  @@index([mbscd])
+  @@index([bscdDetail])
+}
+
+model MACNO {
+  macno    Int     @id @unique @default(autoincrement())
+  bscd     Int
+  macname  String  @db.VarChar(100)
+  isActive Boolean @default(true) @map("is_active")
+  bscdRef  BSCD    @relation(fields: [bscd], references: [bscd])
+  accounts ACNO[]
+
+  @@index([bscd])
+  @@index([macname])
+  @@index([isActive])
+}
+
+model ACNO {
+  acno                  Int                     @id @unique @default(autoincrement())
+  macno                 Int
+  acname                String                  @db.VarChar(250)
+  bankAccountNo         String?                 @map("bank_account_no") @db.VarChar(100)
+  address               String?                 @db.VarChar(300)
+  city                  String?                 @db.VarChar(50)
+  phoneFax              String?                 @map("phone_fax") @db.VarChar(250)
+  email                 String?                 @db.VarChar(250)
+  website               String?                 @db.VarChar(250)
+  crDays                Int?                    @map("cr_days")
+  crDays2               Int?                    @map("cr_days2")
+  areaCode              String?                 @map("area_code") @db.VarChar(10)
+  stRate                Decimal?                @map("st_rate") @db.Decimal(15, 2)
+  area                  String?                 @db.VarChar(50)
+  category              String?                 @map("catagory") @db.VarChar(50)
+  subCategory           String?                 @map("sub_catagory") @db.VarChar(25)
+  country               String?                 @db.VarChar(25)
+  customerBank          String?                 @map("customer_bank") @db.VarChar(250)
+  customerBankAddr      String?                 @map("customer_bank_addr") @db.VarChar(300)
+  stRegNo               String?                 @map("st_reg_no") @db.VarChar(50)
+  stReg                 String?                 @map("st_reg") @db.VarChar(50)
+  ntnNo                 String?                 @map("ntn_no") @db.VarChar(50)
+  contactPerson         String?                 @map("contact_person") @db.VarChar(50)
+  crLimit               Int?                    @map("cr_limit")
+  salesArea             String?                 @map("sales_ares") @db.VarChar(50)
+  tax_filing_status     String?                 @map("tax_filing_status") @db.VarChar(25)
+  tax_law_code          Int?
+  lock                  Boolean?                @default(false)
+  isActive              Boolean                 @default(true) @map("is_active")
+  customerStatus        String?                 @map("customer_status") @db.VarChar(50)
+  reconStatus           String?                 @map("recon_status") @db.VarChar(20)
+  reconciliationRemarks String?                 @map("reconciliation_remarks") @db.VarChar(500)
+  ledgerAcno            Int?                    @map("ledger_acno") // legacy ACNO.LEDGER_ACNO = sales person SP_CODE (salesArea holds the resolved User.id)
+  monthlyTargets        CustomerMonthlyTarget[]
+  bonds                 InboundMaster[]
+  items                 Item[]
+  LCBeneficiaries       LCMaster[]              @relation("LCBeneficiary")
+  LCAcno                LCMaster[]              @relation("LCAcno")
+  oderMaster            OrderMaster[]
+  partyManagement       PARTY_MANAGEMENT[]
+  salesForecast         SALES_FORECAST[]        @relation("ACNO_SALES_FORECAST")
+  salesItemCust         SALES_ITEM_CUST[]
+  taxChallans           TaxChallan[]
+  transactionsMaster    TransactionsMaster[]
+  transactions          Transactions[]
+  mainAccount           MACNO                   @relation(fields: [macno], references: [macno])
+  taxes                 TaxLaws?                @relation("ACNO_TaxSetup", fields: [tax_law_code], references: [tax_law_code])
+  checksInHand          ChecksInHand[]          @relation("ChecksInHandCustomer")
+  checksDepositedHere   ChecksInHand[]          @relation("ChecksInHandDepositBank")
+
+  @@index([macno])
+  @@index([acname])
+  @@index([city])
+  @@index([category])
+  @@index([email])
+  @@index([isActive])
+  @@index([phoneFax])
+  @@index([tax_law_code])
+  @@index([salesArea])
+  @@index([tax_filing_status])
+  @@index([crDays])
+  @@index([customerStatus])
+  @@map("acno")
+}
+
+model CustomerMonthlyTarget {
+  id                   Int       @id @default(autoincrement())
+  acno                 Int
+  lockedAt             DateTime?
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @updatedAt
+  dated                DateTime
+  lockedTargetRecovery Decimal?  @db.Decimal(15, 2)
+  // Overdue BALANCE frozen at month end — how much this customer still owed
+  // past their credit terms on the last day of `dated`'s month. The report
+  // otherwise recomputes it live, so it drifts as later receipts land;
+  // locking it keeps the month-end MIS reproducible.
+  // Not the same measure as lockedTargetRecovery, which is cash collected.
+  lockedOverdue        Decimal?  @map("locked_overdue") @db.Decimal(15, 2)
+  targetQty            Decimal?  @db.Decimal(10, 2)
+  targetRecovery       Decimal?  @db.Decimal(15, 2)
+  customer             ACNO      @relation(fields: [acno], references: [acno])
+
+  @@unique([acno, dated])
+  @@index([acno])
+  @@index([dated])
+}
+
+// ============================================================
+// SALES LOAN REGISTER — goods a sales person lends to a customer
+// ============================================================
+// A memo record only: nothing here touches stock, the ledger, invoices or any
+// report. acno / so_no / dispatch_tran_id / itcd are plain ids, deliberately
+// with no relation to ACNO / OrderMaster / TRANSACTIONS_MASTER / Item, so this
+// register can never block or alter those tables.
+//
+// Status is derived, never stored: per line, returned = SUM(returns.qty);
+// Open → nothing back, Partial → some back, Returned → all back.
+// A loan is Overdue when it is not fully returned by expected_return_date.
+// A loan is between TWO customers: goods out of customer A's (acno) Sale Order
+// / Dispatch are given to customer B (to_acno), who returns them later.
+model SalesLoan {
+  id                   Int             @id @default(autoincrement())
+  acno                 Int // FROM customer — whose Sale Order / Dispatch the goods come out of
+  sales_person         String?         @db.VarChar(50) // User.id — the FROM customer's sales person when the loan was made
+  to_acno              Int? // GIVEN TO customer — who receives the goods and returns them
+  to_sales_person      String?         @db.VarChar(50) // User.id — the GIVEN TO customer's sales person (they see the loan too)
+  so_no                Int? // optional Sale Order (of the FROM customer) the goods come from
+  dispatch_tran_id     Int? // optional Dispatch (of the FROM customer) the goods come from
+  issue_date           DateTime
+  expected_return_date DateTime?
+  purpose              String?         @db.VarChar(500)
+  remarks              String?         @db.VarChar(1000)
+  created_by           String?         @db.VarChar(50)
+  created_at           DateTime        @default(now())
+  updated_at           DateTime        @updatedAt
+  lines                SalesLoanLine[]
+
+  @@index([acno])
+  @@index([sales_person])
+  @@index([to_acno])
+  @@index([to_sales_person])
+  @@index([issue_date])
+  @@index([so_no])
+  @@map("SALES_LOAN")
+}
+
+model SalesLoanLine {
+  id         Int               @id @default(autoincrement())
+  loan_id    Int
+  itcd       Int
+  qty_issued Float
+  unit       String?           @db.VarChar(25)
+  loan       SalesLoan         @relation(fields: [loan_id], references: [id], onDelete: Cascade)
+  returns    SalesLoanReturn[]
+
+  @@index([loan_id])
+  @@index([itcd])
+  @@map("SALES_LOAN_LINE")
+}
+
+model SalesLoanReturn {
+  id          Int           @id @default(autoincrement())
+  line_id     Int
+  return_date DateTime
+  qty         Float
+  remarks     String?       @db.VarChar(500)
+  created_by  String?       @db.VarChar(50)
+  created_at  DateTime      @default(now())
+  line        SalesLoanLine @relation(fields: [line_id], references: [id], onDelete: Cascade)
+
+  @@index([line_id])
+  @@index([return_date])
+  @@map("SALES_LOAN_RETURN")
+}
+
+model SALES_ITEM_CUST {
+  id          Int       @id @default(autoincrement())
+  itcd        Int
+  acno        Int
+  rate        Float
+  cust_itcd   Int?
+  gst_rate    Float?
+  dated       DateTime? @default(now())
+  acnoDetails ACNO      @relation(fields: [acno], references: [acno])
+  item        Item      @relation(fields: [itcd], references: [itcd])
+
+  @@index([acno])
+  @@index([itcd])
+  @@index([acno, itcd])
+  @@index([dated])
+}
+
+model SaleReturnRemark {
+  id               Int       @id @default(autoincrement())
+  tran_id          Int       @unique // TRANSACTIONS_MASTER.tran_id of the Sale Return
+  reason_type      String    @db.VarChar(20) // TECHNICAL | COMMERCIAL
+  remarks          String?   @db.VarChar(1000)
+  status           String?   @db.VarChar(20) // TECHNICAL only: PENDING | APPROVED | REJECTED
+  entered_by       String?   @db.VarChar(50) // User.id
+  entered_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+  decided_by       String?   @db.VarChar(50) // User.id of the approver
+  decided_at       DateTime?
+  decision_remarks String?   @db.VarChar(500)
+
+  @@index([reason_type])
+  @@index([status])
+  @@map("SALE_RETURN_REMARK")
+}
+
+model Company {
+  id                 Int                  @id @default(autoincrement())
+  company            String?              @db.VarChar(100)
+  addr1              String?              @db.VarChar(100)
+  addr2              String?              @db.VarChar(100)
+  city               String?              @db.VarChar(50)
+  phone              String?              @db.VarChar(50)
+  fax                String?              @db.VarChar(50)
+  email              String?              @db.VarChar(50)
+  logo               String?              @db.VarChar(255)
+  Allowance          Allowance[]
+  Bank               Bank[]
+  bondLocations      BondLocation[]
+  commissionTerms    CommissionTerm[]
+  costCenters        CostCenter[]
+  Deduction          Deduction[]
+  deliveryModes      DeliveryMode[]
+  deliveryTerms      DeliveryTerm[]
+  departments        Department[]
+  designations       Designation[]
+  Employee           Employee[]
+  financialYears     FinancialYear[]
+  godowns            Godown[]
+  Leave              Leave[]
+  Manager            Manager[]
+  poPrdCats          PoPrdCat[]
+  seasons            Season[]
+  TransactionsMaster TransactionsMaster[]
+  users              Users[]
+  WorkLocation       WorkLocation[]
+
+  @@index([company])
+}
+
+model ProductMasterCategory {
+  id            Int            @id @default(autoincrement())
+  pmc_name      String?        @db.VarChar(250)
+  productGroups ProductGroup[]
+
+  @@index([pmc_name])
+}
+
+model ProductGroup {
+  id                      Int                   @id @default(autoincrement())
+  pg_name                 String?               @db.VarChar(250)
+  pmc_id                  Int
+  ProductMasterCategories ProductMasterCategory @relation(fields: [pmc_id], references: [id])
+
+  @@index([pmc_id])
+  @@index([pg_name])
+}
+
+model ProductCategory {
+  id      Int     @id @default(autoincrement())
+  pc_name String? @db.VarChar(250)
+  items   Item[]
+
+  @@index([pc_name])
+}
+
+model MainCategory {
+  id             Int            @id @default(autoincrement())
+  mc_name        String?        @db.VarChar(100)
+  items          Item[]
+  itemCategories ItemCategory[]
+
+  @@index([mc_name])
+}
+
+model ItemCategory {
+  id                   Int           @id @default(autoincrement())
+  ic_name              String        @db.VarChar(250)
+  wc_category_id       Int?          @unique
+  stock_acno           Int?
+  sale_acno            Int?
+  nogodown_sale_acno   Int? // sale account of a "Despatch Without Godown" Sale Order (no default) — lib/dispatch/withoutGodown.js
+  pos_acno             Int?
+  cogs_acno            Int?
+  cogm_acno            Int?
+  // Per-category posting accounts; empty = the Account Settings default
+  // (lib/accounts/itemAccounts.js).
+  purchase_acno        Int?
+  sale_return_acno     Int?
+  purchase_return_acno Int?
+  sales_tax_acno       Int?
+  purchase_tax_acno    Int?
+  pm_cost_acno         Int? // legacy ITEM_CATAGORY.PM_COST_ACNO
+  ccno                 Int? // legacy ITEM_CATAGORY.CCNO
+  sync_status          String?       @default("synced") @db.VarChar(20)
+  last_sync            DateTime?     @default(now())
+  mainCategoryId       Int?
+  items                Item[]
+  mainCategory         MainCategory? @relation(fields: [mainCategoryId], references: [id])
+
+  @@index([ic_name])
+  @@index([sync_status])
+}
+
+model Subtrates {
+  id          Int     @id @default(autoincrement())
+  subtrate    String  @unique @db.VarChar(50)
+  description String? @db.VarChar(255)
+  items       Item[]
+
+  @@index([subtrate])
+}
+
+model InkType {
+  id          Int     @id @default(autoincrement())
+  ink_type    String  @unique @db.VarChar(100)
+  description String? @db.VarChar(255)
+  items       Item[]  @relation("ItemInkType")
+
+  @@index([ink_type])
+}
+
+model SRLamination {
+  id                Int     @id @default(autoincrement())
+  sr_lamination     String  @unique @db.VarChar(100)
+  description       String? @db.VarChar(255)
+  itemsSrLamination Item[]  @relation("ItemSrLamination")
+
+  @@index([sr_lamination])
+}
+
+model ColorCode {
+  id          Int     @id @default(autoincrement())
+  color_code  String  @unique @db.VarChar(100)
+  description String? @db.VarChar(255)
+  items       Item[]  @relation("ItemColor")
+
+  @@index([color_code])
+}
+
+model BusinessUnit {
+  id            Int     @id @default(autoincrement())
+  business_unit String  @unique @db.VarChar(100)
+  description   String? @db.VarChar(255)
+  items         Item[]  @relation("ItemBusinessUnit")
+
+  @@index([business_unit])
+}
+
+model NatureOfInk {
+  id            Int     @id @default(autoincrement())
+  nature_of_ink String  @unique @db.VarChar(100)
+  description   String? @db.VarChar(255)
+  items         Item[]  @relation("ItemNatureOfInk")
+
+  @@index([nature_of_ink])
+}
+
+model PrintingProperty {
+  id                Int     @id @default(autoincrement())
+  printing_property String  @unique @db.VarChar(100)
+  description       String? @db.VarChar(255)
+  items             Item[]  @relation("ItemPrintingProperty")
+
+  @@index([printing_property])
+}
+
+model PARTY_MANAGEMENT {
+  id          Int     @id @default(autoincrement())
+  acno        Int
+  name        String  @db.VarChar(100)
+  designation String? @db.VarChar(100)
+  contact     String? @db.VarChar(25)
+  acnoDetails ACNO    @relation(fields: [acno], references: [acno])
+
+  @@index([acno])
+  @@index([name])
+  @@index([contact])
+}
+
+model Item {
+  itcd                  Int                          @id @unique @default(autoincrement())
+  item                  String?                      @db.VarChar(250)
+  ic_id                 Int
+  sku                   String?
+  price                 Float?
+  alternate_id          Int?
+  unit                  String?                      @db.VarChar(25)
+  cdate                 DateTime?                    @default(now())
+  code                  String?                      @db.VarChar(50)
+  subtrates             String?                      @db.VarChar(50)
+  valid_from            DateTime?
+  valid_to              DateTime?
+  with_white            Int?
+  viscosity             String?                      @db.VarChar(50)
+  color_bulk            String?                      @db.VarChar(50)
+  gloss                 String?                      @db.VarChar(50)
+  opacity               String?                      @db.VarChar(50)
+  fineness              String?                      @db.VarChar(50)
+  solid                 String?                      @db.VarChar(50)
+  adhesion              String?                      @db.VarChar(50)
+  e                     String?                      @db.VarChar(50)
+  a                     String?                      @db.VarChar(50)
+  l                     String?                      @db.VarChar(50)
+  b                     String?                      @db.VarChar(50)
+  weight                Float?
+  length                Float?
+  width                 Float?
+  height                Float?
+  stock                 Int?
+  description           String?                      @db.VarChar(500)
+  wc_product_id         Int?                         @unique
+  image_url             String?                      @db.VarChar(500)
+  wc_parent_id          Int?
+  sync_status           String?                      @default("synced")
+  last_sync             DateTime?
+  ink_type              String?                      @db.VarChar(100)
+  lamination            String?                      @db.VarChar(100)
+  series                String?                      @db.VarChar(100)
+  sr                    String?                      @db.VarChar(100)
+  business_unit         String?                      @db.VarChar(100)
+  color                 String?                      @db.VarChar(50)
+  discard               Boolean?                     @default(false)
+  is_Card               Boolean?                     @default(false)
+  nature_of_ink         String?                      @db.VarChar(100)
+  packing_material_code Int?
+  printing_property     String?                      @db.VarChar(100)
+  wastage_percentage    Float?
+  mc_id                 Int?
+  pc_id                 Int?
+  customer_code         Int?
+  import_type           String?
+  ltr_rate              Float?
+  re_order              Int?
+  future_cost_rate      Float?
+  plant_id              Int? // legacy ITEM.PLANT_ID: production item this in-process item belongs to
+  BomDetail             BomDetail[]
+  BomMaster             BomMaster[]
+  futureCosting         FutureCosting[]
+  inboundDetail         InboundDetail[]
+  businessUnitRef       BusinessUnit?                @relation("ItemBusinessUnit", fields: [business_unit], references: [business_unit])
+  colorRef              ColorCode?                   @relation("ItemColor", fields: [color], references: [color_code])
+  customerDetails       ACNO?                        @relation(fields: [customer_code], references: [acno])
+  itemCategories        ItemCategory                 @relation(fields: [ic_id], references: [id])
+  inkType               InkType?                     @relation("ItemInkType", fields: [ink_type], references: [ink_type])
+  srLaminationRef       SRLamination?                @relation("ItemSrLamination", fields: [lamination], references: [sr_lamination])
+  mainCategory          MainCategory?                @relation(fields: [mc_id], references: [id])
+  natureOfInkRef        NatureOfInk?                 @relation("ItemNatureOfInk", fields: [nature_of_ink], references: [nature_of_ink])
+  productCategory       ProductCategory?             @relation(fields: [pc_id], references: [id])
+  printingPropertyRef   PrintingProperty?            @relation("ItemPrintingProperty", fields: [printing_property], references: [printing_property])
+  subtrateRef           Subtrates?                   @relation(fields: [subtrates], references: [subtrate])
+  item_qualities        Item_Quality[]
+  lcDetail              LCDetail[]
+  machineDetails        MACHINE_INSTRUCTION_DETAIL[]
+  machineRef            MACHINE_INSTRUCTION_MASTER[]
+  monthlyOpeningStock   MonthlyOpeningStock[]
+  monthlyOpeningRate    MonthlyOpeningRate[]
+  orderMaster           OrderDetail[]
+  qualityMaster         QualityMaster[]
+  receipeDetail         RECEIPE_DETAIL[]
+  receipeMasters        RECEIPE_MASTER[]
+  ReqDetail             ReqDetail[]
+  salesForecast         SALES_FORECAST[]             @relation("ITEM_SALES_FORECAST")
+  salesItemCust         SALES_ITEM_CUST[]
+  Transactions          Transactions[]               @relation("ItemRelation")
+  TransactionsPacking   Transactions[]               @relation("PackingRelation")
+  productionPlanDetail  productionPlanDetail[]
+  productionPlanMaster  productionPlanMaster[]
+
+  @@index([ic_id])
+  @@index([itcd])
+  @@index([item])
+  @@index([sku])
+  @@index([code])
+  @@index([sync_status])
+  @@index([wc_product_id])
+  @@index([subtrates])
+  @@index([ink_type])
+  @@index([sr])
+  @@index([lamination])
+  @@index([business_unit])
+  @@index([nature_of_ink])
+  @@index([printing_property])
+  @@index([color])
+  @@index([valid_from, valid_to])
+  @@index([stock])
+  @@index([price])
+}
+
+model Quality_parameters {
+  parameter_name String         @id @unique @db.VarChar(100)
+  item_qualities Item_Quality[]
+}
+
+model Item_Quality {
+  id                 Int                @id @default(autoincrement())
+  itcd               Int
+  parameter_name     String
+  quality_standard   String?            @db.VarChar(100)
+  item               Item               @relation(fields: [itcd], references: [itcd])
+  quality_parameters Quality_parameters @relation(fields: [parameter_name], references: [parameter_name])
+
+  @@unique([itcd, parameter_name])
+  @@index([itcd])
+  @@index([parameter_name])
+}
+
+model QualityMaster {
+  proc_ord_no          Int?                  @unique
+  itcd                 Int
+  batch_size           Float?
+  status               QualityStatus         @default(DRAFT)
+  batch_no             Int?
+  mfg_date             DateTime?
+  expiry_date          DateTime?
+  id                   Int                   @id @default(autoincrement())
+  order_no             Int?
+  approved_by          String?               @db.VarChar(100)
+  approved_qty         Float?
+  bill_no              String?               @db.VarChar(100)
+  dated                DateTime?
+  godown               Int?
+  grn_no               Int?
+  grn_status           String?               @default("PENDING") @db.VarChar(25)
+  party_code           Int?
+  qa_barcode           String?               @unique @db.VarChar(100)
+  qc_barcode           String?               @unique @db.VarChar(100)
+  rejected_qty         Float?
+  remarks              String?               @db.VarChar(255)
+  details              QualityDetail[]
+  detailDetails        QualityDetailDetail[]
+  item                 Item                  @relation(fields: [itcd], references: [itcd])
+  orderMaster          OrderMaster?          @relation(fields: [order_no], references: [order_no])
+  productionPlanMaster productionPlanMaster? @relation(fields: [proc_ord_no], references: [id])
+
+  @@unique([order_no, itcd, id])
+  @@index([itcd])
+  @@index([status])
+  @@index([proc_ord_no])
+  @@index([order_no])
+  @@index([qa_barcode])
+  @@index([qc_barcode])
+  @@index([mfg_date])
+  @@index([expiry_date])
+  @@index([batch_no])
+  @@index([grn_status])
+  @@index([grn_no])
+  @@index([godown])
+  @@map("QUALITY_MASTER")
+}
+
+model QualityDetail {
+  id               Int                   @id @default(autoincrement())
+  proc_ord_no      Int?
+  parameter_name   String                @db.VarChar(50)
+  quality_standard String                @db.VarChar(50)
+  attempt_date     DateTime              @default(now())
+  attempt_no       Int
+  master_id        Int
+  order_no         Int?
+  reject_reason    String?               @db.VarChar(255)
+  itcd             Int?
+  master           QualityMaster         @relation(fields: [master_id], references: [id])
+  realizedValues   QualityDetailDetail[]
+
+  @@unique([order_no, itcd, attempt_no, id])
+  @@index([master_id])
+  @@index([attempt_date])
+  @@index([parameter_name])
+  @@map("QUALITY_DETAIL")
+}
+
+model QualityDetailDetail {
+  id               Int            @id @default(autoincrement())
+  proc_ord_no      Int?
+  attempt_no       Int
+  quality_realized String         @db.VarChar(50)
+  master_id        Int
+  order_no         Int?
+  detail_id        Int?
+  itcd             Int?
+  parameter_name   String?        @db.VarChar(50)
+  detail           QualityDetail? @relation(fields: [detail_id], references: [id])
+  master           QualityMaster  @relation(fields: [master_id], references: [id])
+
+  @@unique([order_no, itcd, attempt_no, id])
+  @@index([master_id])
+  @@index([attempt_no])
+  @@index([parameter_name])
+  @@map("QUALITY_DETAIL_DETAIL")
+}
+
+model Designation {
+  id               Int        @id @default(autoincrement())
+  desg_name        String?    @db.VarChar(100)
+  desg_description String?    @db.VarChar(255)
+  company_id       Int
+  company          Company    @relation(fields: [company_id], references: [id])
+  employees        Employee[]
+
+  @@index([company_id])
+  @@index([desg_name])
+}
+
+model Employement_type {
+  id        Int        @id @default(autoincrement())
+  name      String?    @db.VarChar(100)
+  employees Employee[]
+
+  @@index([name])
+}
+
+model Employement_catagory {
+  id        Int        @id @default(autoincrement())
+  name      String?    @db.VarChar(100)
+  employees Employee[]
+
+  @@index([name])
+}
+
+model City {
+  id        Int        @id @default(autoincrement())
+  name      String?    @db.VarChar(100)
+  employees Employee[]
+
+  @@index([name])
+}
+
+model Branch {
+  id        Int        @id @default(autoincrement())
+  name      String?    @db.VarChar(100)
+  employees Employee[]
+
+  @@index([name])
+}
+
+model Bank {
+  id            Int           @id @default(autoincrement())
+  name          String?       @db.VarChar(100)
+  company_id    Int
+  company       Company       @relation(fields: [company_id], references: [id])
+  employees     Employee[]
+  bank_branches bank_branch[]
+
+  @@index([company_id])
+  @@index([name])
+}
+
+model bank_branch {
+  id          Int        @id @default(autoincrement())
+  name        String?    @db.VarChar(100)
+  branch_code String?    @db.VarChar(100)
+  bank_id     Int
+  employee    Employee[]
+  bank        Bank       @relation(fields: [bank_id], references: [id])
+
+  @@index([bank_id])
+  @@index([branch_code])
+  @@index([name])
+}
+
+model Unit {
+  unit String @id @db.VarChar(25)
+}
+
+model Godown {
+  id                   Int                   @id @default(autoincrement())
+  godown               String                @db.VarChar(100)
+  // false = closed: hidden from every entry-form dropdown and refused by the
+  // write APIs (lib/godowns.js). Reports and the Godowns setup still list it.
+  is_active            Boolean               @default(true)
+  company_id           Int
+  company              Company               @relation(fields: [company_id], references: [id])
+  monthlyOpeningStock  MonthlyOpeningStock[]
+  OrderMaster          OrderMaster[]
+  ReqMasterAsIssuedBy  ReqMaster[]           @relation("SecondaryReqGodown")
+  ReqMasterAsIssuedFor ReqMaster[]           @relation("PrimaryReqGodown")
+  TransactionsMaster2  TransactionsMaster[]  @relation("SecondaryGodown")
+  TransactionsMaster   TransactionsMaster[]  @relation("PrimaryGodown")
+  Transaction          Transactions[]
+
+  @@index([company_id])
+  @@index([godown])
+}
+
+model BondLocation {
+  id             Int             @id @default(autoincrement())
+  location       String          @db.VarChar(100)
+  address        String?         @db.VarChar(255)
+  company_id     Int
+  company        Company         @relation(fields: [company_id], references: [id])
+  inboundMasters InboundMaster[]
+
+  @@index([company_id])
+  @@index([location])
+}
+
+model FinancialYear {
+  id         Int      @id @default(autoincrement())
+  date_from  DateTime
+  date_to    DateTime
+  status     String   @db.VarChar(50)
+  company_id Int
+  company    Company  @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([date_from, date_to])
+  @@index([status])
+}
+
+model Season {
+  id         Int      @id @default(autoincrement())
+  date_from  DateTime
+  date_to    DateTime
+  status     String   @db.VarChar(50)
+  company_id Int
+  company    Company  @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([date_from, date_to])
+  @@index([status])
+}
+
+model PoPrdCat {
+  id            Int     @id @default(autoincrement())
+  category_name String  @db.VarChar(50)
+  company_id    Int
+  company       Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([category_name])
+}
+
+model DeliveryMode {
+  id            Int     @id @default(autoincrement())
+  delivery_mode String  @db.VarChar(50)
+  rate_kg       Int
+  company_id    Int
+  company       Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([delivery_mode])
+}
+
+model Users {
+  user_id    String  @id @unique @db.VarChar(10)
+  user_name  String? @db.VarChar(50)
+  company_id Int
+  company    Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([user_name])
+}
+
+model Currency {
+  id           Int            @id @unique @default(autoincrement())
+  currency     String         @unique @db.VarChar(50)
+  transactions Transactions[]
+
+  @@index([currency])
+}
+
+model order_region_sequences {
+  region   String @db.VarChar(25)
+  category Int
+  last_no  Int    @default(0)
+
+  @@id([region, category])
+}
+
+model OrderMaster {
+  order_no                Int                  @id @default(autoincrement())
+  dated                   DateTime             @default(now())
+  godown                  Int?
+  userid                  String?              @db.VarChar(25)
+  status                  Int                  @default(1)
+  region                  String?              @db.VarChar(25)
+  st_rate                 Int?
+  due_date                DateTime?
+  req_no                  Int?
+  party_code              Int
+  delivery_terms          String?              @db.VarChar(25)
+  payment_terms           String?              @db.VarChar(25)
+  delivery_location       String?              @db.VarChar(500)
+  order_catagory          Int
+  p_cat                   String?              @db.VarChar(25)
+  additional_instructions String?              @db.VarChar(500)
+  freeOfCost              Boolean?             @default(false)
+  // Trial Process order: zero rates like Free of Cost. Either flag sends a
+  // Sale Order to status 3 (pending CEO approval) — lib/orders/saleOrderApproval.js
+  trialProcess            Boolean?             @default(false)
+  noGodown                Boolean?             @default(false) // SO saved without a godown → CEO approval
+  rateUnderNegotiation    Boolean?             @default(false) // SO rates not final → CEO approval
+  dispatchWithoutGodown   Boolean?             @default(false) // SO invoiced without production: dispatched from WITHOUT_GODOWN_DISPATCH, sale to ItemCategory.nogodown_sale_acno — lib/dispatch/withoutGodown.js
+  approval_reasons        String?              @db.VarChar(300) // "No Godown, Customer Bad Debt" — lib/orders/saleOrderApprovalRules.js
+  urgency_level           Boolean?             @default(false) // Sale Order: "Urgent" tick
+  approved_by             String?              @db.VarChar(50) // User.id who approved a status-3 order
+  approved_at             DateTime?
+  approval_remarks        String?              @db.VarChar(500)
+  sale_po                 String?
+  orderDetails            OrderDetail[]
+  godownDetails           Godown?              @relation(fields: [godown], references: [id])
+  acno                    ACNO                 @relation(fields: [party_code], references: [acno])
+  users                   User?                @relation(fields: [userid], references: [id])
+  qualityMaster           QualityMaster[]
+  transactionsMasterPO    TransactionsMaster[] @relation("OrderPO")
+  transactionsMasterSO    TransactionsMaster[] @relation("OrderSO")
+
+  @@index([dated])
+  @@index([party_code])
+  @@index([userid])
+  @@index([godown])
+  @@index([order_catagory])
+  @@index([status])
+  @@index([due_date])
+  @@index([req_no])
+}
+
+model OrderDetail {
+  id           Int         @id @default(autoincrement())
+  order_no     Int
+  itcd         Int?
+  no_of_packs  Float?
+  qty_per_pack Float?
+  qty          Float? // ALWAYS KILOGRAMS — stock is held in KG. On a `unit`="LTR" line this is derived: qty_ltr * Item.ltr_rate. See lib/units/litres.js
+  qty_ltr      Float? // Litres. Source of truth on a `unit`="LTR" line (qty is derived from it); informational on a KG line
+  unit         String?     @db.VarChar(25) // "KG" or "LTR" — the unit the line was transacted and priced in
+  rate         Float
+  amount       Float?
+  status       Int?        @default(1)
+  service_id   Int?
+  st_amount    Float?
+  st_rate      Float?
+  stock_g3     Float?
+  stock_g9     Float?
+  stock_total  Float?
+  items        Item?       @relation(fields: [itcd], references: [itcd])
+  orderMaster  OrderMaster @relation(fields: [order_no], references: [order_no])
+  service      Service?    @relation(fields: [service_id], references: [id])
+
+  @@index([order_no])
+  @@index([itcd])
+  @@index([status])
+  @@index([rate])
+}
+
+model BomMaster {
+  id                   Int                    @id @default(autoincrement())
+  instructions         String?                @db.VarChar(500)
+  finished_id          Int
+  dated                DateTime?              @default(now())
+  unit                 String?
+  remarks              String?                @db.VarChar(500)
+  target_qty           Float?
+  bomDetails           BomDetail[]
+  item                 Item                   @relation(fields: [finished_id], references: [itcd])
+  receipeMasters       RECEIPE_MASTER[]
+  productionPlanMaster productionPlanMaster[]
+
+  @@index([finished_id])
+  @@index([dated])
+}
+
+model BomDetail {
+  id                  Int       @id @default(autoincrement())
+  bom_id              Int
+  material_id         Int
+  material_percentage Float?
+  sno                 Int?
+  bomMaster           BomMaster @relation(fields: [bom_id], references: [id])
+  item                Item      @relation(fields: [material_id], references: [itcd])
+
+  @@index([bom_id])
+  @@index([material_id])
+}
+
+model productionPlanMaster {
+  id                      Int                       @id @default(autoincrement())
+  receipe_id              Int?
+  finished_id             Int?
+  bom_id                  Int?
+  qty                     Float?
+  dated                   DateTime?                 @default(now())
+  req_del_date            DateTime?
+  batch_no                String?                   @db.VarChar(50)
+  machine_id              Int?
+  time_min                Int?
+  actual_yield            Float?
+  viscosity               String?                   @db.VarChar(50)
+  sale_ord_no             Int?
+  sent_to_production_date DateTime?
+  status                  String?                   @db.VarChar(50)
+  transaction_id          Int?
+  type                    String?                   @db.VarChar(50)
+  barcode                 String?                   @unique @db.VarChar(100)
+  currentStage            String?                   @db.VarChar(50)
+  m2m                     Boolean?                  @default(false)
+  customer_name           String?                   @db.VarChar(500)
+  narration               String?                   @db.VarChar(500)
+  req_no                  Int?
+  scanLogs                ProcessScanLog[]
+  costEntry               ProductionCostEntry?
+  qualityMaster           QualityMaster?
+  changeLogs              productionPlanChangeLog[]
+  productionPlanDetail    productionPlanDetail[]
+  // Multi-output process orders (prisma/sql/2026-10-27_process_order_lines.sql)
+  outputs                 productionPlanOutput[]
+  issueLines              productionPlanIssue[]
+  bomMaster               BomMaster?                @relation(fields: [bom_id], references: [id])
+  item                    Item?                     @relation(fields: [finished_id], references: [itcd])
+  receipe                 RECEIPE_MASTER?           @relation(fields: [receipe_id], references: [receipe_id])
+  transactionMaster       TransactionsMaster?       @relation(fields: [transaction_id], references: [tran_id])
+
+  @@index([finished_id])
+  @@index([receipe_id])
+  @@index([bom_id])
+  @@index([dated])
+  @@index([status])
+  @@index([batch_no])
+  @@index([barcode])
+  @@index([sale_ord_no])
+  @@index([transaction_id])
+  @@index([req_del_date])
+}
+
+model productionPlanDetail {
+  id                   Int                  @id @default(autoincrement())
+  plan_id              Int
+  material_id          Int?
+  material_qty         Float?
+  material_percentage  Float?
+  material_desc        String?              @db.VarChar(200)
+  sno                  Int?
+  item                 Item?                @relation(fields: [material_id], references: [itcd])
+  productionPlanMaster productionPlanMaster @relation(fields: [plan_id], references: [id])
+  issueLine            productionPlanIssue?
+
+  @@index([plan_id])
+  @@index([material_id])
+}
+
+model productionPlanChangeLog {
+  id                   Int                  @id @default(autoincrement())
+  plan_id              Int
+  detail_id            Int?
+  field_name           String               @db.VarChar(100)
+  old_value            String?              @db.VarChar(255)
+  new_value            String?              @db.VarChar(255)
+  material_id          Int?
+  material_desc        String?              @db.VarChar(200)
+  changed_by           String?              @db.VarChar(100)
+  changed_at           DateTime             @default(now())
+  change_reason        String?              @db.VarChar(500)
+  productionPlanMaster productionPlanMaster @relation(fields: [plan_id], references: [id])
+
+  @@index([plan_id])
+  @@index([changed_at])
+  @@index([field_name])
+}
+
+// One production (finished) item of a process order. Line 1 is mirrored on
+// productionPlanMaster (finished_id / qty / batch_no / bom_id / actual_yield)
+// so single-item consumers keep working. Posted tran_code 8 lines carry
+// Transactions.source_line_no = line_no. See lib/manufacturing/processOrder.js.
+model productionPlanOutput {
+  id           Int                  @id @default(autoincrement())
+  plan_id      Int
+  line_no      Int
+  finished_id  Int?
+  bom_id       Int?
+  qty          Float?
+  actual_yield Float?
+  unit         String?              @db.VarChar(25)
+  godown       Int?
+  batch_no     String?              @db.VarChar(50)
+  plan         productionPlanMaster @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+
+  @@unique([plan_id, line_no])
+  @@index([finished_id])
+}
+
+// Issue godown / unit of one productionPlanDetail row and the production item
+// (productionPlanOutput.line_no) it is issued for. Posted tran_code 7 lines
+// carry Transactions.source_line_no = output_line.
+model productionPlanIssue {
+  id          Int                  @id @default(autoincrement())
+  plan_id     Int
+  detail_id   Int                  @unique
+  output_line Int                  @default(1)
+  godown      Int?
+  unit        String?              @db.VarChar(25)
+  plan        productionPlanMaster @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+  detail      productionPlanDetail @relation(fields: [detail_id], references: [id], onDelete: Cascade)
+
+  @@index([plan_id])
+}
+
+model MACHINE_INSTRUCTION_MASTER {
+  rec_id         Int                          @id @default(autoincrement())
+  machine_id     Int
+  time_min       Int?
+  descr          String?
+  machineDetails MACHINE_INSTRUCTION_DETAIL[]
+  item           Item                         @relation(fields: [machine_id], references: [itcd])
+
+  @@index([machine_id])
+}
+
+model MACHINE_INSTRUCTION_DETAIL {
+  id           Int                        @id @default(autoincrement())
+  rec_id       Int
+  machine_id   Int
+  part         String?
+  time_min     Int?
+  instructions String?
+  item         Item                       @relation(fields: [machine_id], references: [itcd])
+  machineRef   MACHINE_INSTRUCTION_MASTER @relation(fields: [rec_id], references: [rec_id])
+
+  @@index([rec_id])
+  @@index([machine_id])
+}
+
+model RECEIPE_MASTER {
+  receipe_id           Int                    @id @default(autoincrement())
+  finished_count       Int?
+  machine_id           Int?
+  dated                DateTime?
+  finished_id          Int
+  bom_id               Int?
+  time_min             Int?
+  status               String?                @db.VarChar(25)
+  receipeDetails       RECEIPE_DETAIL[]
+  bomRef               BomMaster?             @relation(fields: [bom_id], references: [id])
+  item                 Item                   @relation(fields: [finished_id], references: [itcd])
+  productionPlanMaster productionPlanMaster[]
+
+  @@index([finished_id])
+  @@index([bom_id])
+  @@index([status])
+  @@index([dated])
+}
+
+model RECEIPE_DETAIL {
+  id                 Int            @id @default(autoincrement())
+  receipe_id         Int
+  product_id         Int?
+  product_desc       String?
+  qty                Float?
+  product_percentage Float?
+  sno                Int?
+  item               Item?          @relation(fields: [product_id], references: [itcd])
+  receipeMaster      RECEIPE_MASTER @relation(fields: [receipe_id], references: [receipe_id])
+
+  @@index([receipe_id])
+  @@index([product_id])
+}
+
+model TransactionsMaster {
+  tran_id               Int                    @id @default(autoincrement())
+  company_id            Int?
+  dated                 DateTime?
+  time                  DateTime?
+  clr_date              DateTime?
+  tran_code             Int?
+  vr_no                 Int?
+  po_no                 Int?
+  so_no                 Int?
+  req_no                Int?
+  pycd                  Int?
+  check_no              String?
+  check_date            DateTime?
+  rmk                   String?
+  rmk1                  String?
+  rmk2                  String?
+  rmk3                  String?
+  rmk4                  String?
+  rmk5                  String?
+  // rmk6..rmk23: raw legacy columns from the SMS_46,13,14 import (see scripts/sql/sms-46-13-14-import.sql header)
+  rmk6                  String?
+  rmk7                  String?
+  rmk8                  String?
+  rmk9                  String?
+  rmk10                 String?
+  rmk11                 String?
+  rmk12                 String?
+  rmk13                 String?
+  rmk14                 String?
+  rmk15                 String?
+  rmk16                 String?
+  rmk17                 String?
+  rmk18                 String?
+  rmk19                 String?
+  rmk20                 String?
+  rmk21                 String?
+  rmk22                 String?
+  rmk23                 String?
+  user_id               String?
+  invoice_no            String?                @db.VarChar(150)
+  godown                Int?
+  godown2               Int?
+  tr_amount             Float?
+  tran_no               String?
+  wc_order_id           Int?                   @unique
+  sync_status           String?                @default("synced") @db.VarChar(20)
+  last_sync             DateTime?              @default(now())
+  dispatch_no           Int?
+  grn_no                Int?
+  service_id            Int?
+  attachments           String[]
+  ref_dispatch_no       String?                @db.VarChar(150)
+  // Dispatch "Manual DC No" / GRN "Manual GRN No" — the user's own paper number (prisma/sql/2026-11-12_manual_doc_no.sql)
+  manual_no             String?                @db.VarChar(50)
+  // Dispatch "City" — where the vehicle is taking the goods (prisma/sql/2026-11-13_dispatch_city.sql)
+  city                  String?                @db.VarChar(100)
+  // Dispatch "Route" — the way the vehicle goes (prisma/sql/2026-11-15_dispatch_route.sql)
+  route                 String?                @db.VarChar(150)
+  lc_no                 String?
+  bond_id               Int?
+  created_at            DateTime?              @default(now())
+  updated_at            DateTime?              @updatedAt
+  // Dispatch invoicing: which sales-invoice series this document's invoice_no
+  // belongs to. "E" = official book, "M" = unofficial book, chosen by the dual-book flags — see
+  // seriesForAccount() in lib/dispatchInvoicing/core.js.
+  //
+  // ** invoice_no is NOT unique on its own, and not unique per series either. **
+  // Each series restarts at 1 every 1 JULY, so a number is identified by
+  // series + fiscal year + number. E-1 exists once for every financial year.
+  // Anything looking an invoice up by number must also constrain `dated` to
+  // the fiscal year, or it will match one row per year.
+  invoice_series        String?                @db.VarChar(1)
+  // GRN: the vendor's bill date (vendor bill no is invoice_no).
+  bill_date             DateTime?
+  // Purchase / purchase-return invoicing: the vendor's own bill number
+  // (invoice_no is OUR invoice number from the automatic series).
+  vendor_bill_no        String?                @db.VarChar(60)
+  invoiceKnockoffs      InvoiceKnockoff[]      @relation("KnockoffSource")
+  inboundMasters        InboundMaster[]        @relation("InboundTranLink")
+  taxChallansAsInvoice  TaxChallan[]           @relation("InvoiceReference")
+  taxChallansAsPayment  TaxChallan[]           @relation("TaxPaymentVoucher")
+  taxChallansAsReceipt  TaxChallan[]           @relation("ReceiptVoucher")
+  bondEntry             InboundMaster?         @relation("BondGRN", fields: [bond_id], references: [id])
+  company               Company?               @relation(fields: [company_id], references: [id])
+  godown2Details        Godown?                @relation("SecondaryGodown", fields: [godown2], references: [id])
+  godownDetails         Godown?                @relation("PrimaryGodown", fields: [godown], references: [id])
+  lcEntry               LCMaster?              @relation("LCGRN", fields: [lc_no], references: [lc_no])
+  ordersPO              OrderMaster?           @relation("OrderPO", fields: [po_no], references: [order_no])
+  acno                  ACNO?                  @relation(fields: [pycd], references: [acno])
+  ordersSO              OrderMaster?           @relation("OrderSO", fields: [so_no], references: [order_no])
+  user                  User?                  @relation("UserTransactions", fields: [user_id], references: [id])
+  transactions          Transactions[]
+  productionPlanMasters productionPlanMaster[]
+
+  @@unique([dated, tran_code, vr_no])
+  @@index([dated])
+  @@index([tran_code])
+  @@index([pycd])
+  @@index([user_id])
+  @@index([invoice_no])
+  @@index([invoice_series])
+  @@index([godown])
+  @@index([godown2])
+  @@index([po_no])
+  @@index([so_no])
+  @@index([req_no])
+  @@index([bond_id])
+  @@index([lc_no])
+  @@index([check_no])
+  @@index([sync_status])
+  @@index([wc_order_id])
+  @@index([clr_date])
+  @@map("TRANSACTIONS_MASTER")
+}
+
+model Transactions {
+  id                    Int                @id @default(autoincrement())
+  tran_id               Int
+  acno                  Int?
+  itcd                  Int?
+  ccno                  Int?
+  po_qty                Float?
+  so_qty                Float?
+  narration1            String?            @db.VarChar(250)
+  narration2            String?            @db.VarChar(250)
+  narration3            String?            @db.VarChar(150)
+  narration4            String?            @db.VarChar(150)
+  narration5            String?            @db.VarChar(150)
+  chno                  String?            @db.VarChar(150)
+  check_date            DateTime?
+  party_name            String?            @db.VarChar(150)
+  stock                 Int?
+  unit                  String?            @db.VarChar(25)
+  damt                  Float?
+  camt                  Float?
+  qty                   Float? // ALWAYS KILOGRAMS — every stock calculation reads this. On a `unit`="LTR" line it is derived: qty_ltr * Item.ltr_rate
+  qty_ltr               Float? // Litres. Source of truth on a `unit`="LTR" line, and the basis its amount is priced on. See lib/units/litres.js
+  ack_qty               Float? // Acknowledged qty, in the line's BILLING unit (litres on a LTR line). NULL = the billable qty (qty / qty_ltr). Set by Invoicing (lib/invoicing/core.js); the invoice is priced on it. Stock never reads it.
+  original_qty          Float? // Add this line to track original quantity for returns
+  rate                  Float?
+  wht_rate              Float?
+  st_rate               Float?
+  godown                Int?
+  invoice_no            String?            @db.VarChar(150)
+  sub_tran_id           Int?               @default(1)
+  currency              Int?
+  gross_amount          Float?
+  fc_amount             Float?
+  no_of_pack            Float?
+  qty_per_pack          Float?
+  st_amount             Float?
+  additional_tax        Float?
+  packing_material_code Int?
+  req_qty               Float?
+  service_id            Int?
+  batch_no              String?            @db.VarChar(250)
+  returnable            Boolean?           @default(false)
+  additional_tax_amount Float?
+  asset_no              Int?               @unique
+  tax_amount            Float?
+  // Auto Material Issue / Production made by a dispatch: the dispatch line
+  // (1-based) this row belongs to (lib/dispatch/bomProduction.js).
+  source_line_no        Int?
+  // rmk1..rmk13: raw legacy line columns from the SMS_46,13,14 import (see scripts/sql/sms-46-13-14-import.sql header)
+  rmk1                  String?
+  rmk2                  String?
+  rmk3                  String?
+  rmk4                  String?
+  rmk5                  String?
+  rmk6                  String?
+  rmk7                  String?
+  rmk8                  String?
+  rmk9                  String?
+  rmk10                 String?
+  rmk11                 String?
+  rmk12                 String?
+  rmk13                 String?
+  split_from_line_id    Int?
+  // Files attached to this line (public URLs) — /api/voucher/attachments with lineId.
+  // The document's own files are TransactionsMaster.attachments.
+  attachments           String[]           @default([])
+  invoiceKnockoffs      InvoiceKnockoff[]  @relation("KnockoffSourceLine")
+  acnoDetails           ACNO?              @relation(fields: [acno], references: [acno])
+  costCenter            CostCenter?        @relation(fields: [ccno], references: [ccno])
+  currencyDetails       Currency?          @relation(fields: [currency], references: [id])
+  godownDetails         Godown?            @relation(fields: [godown], references: [id])
+  itemDetails           Item?              @relation("ItemRelation", fields: [itcd], references: [itcd])
+  packingDetails        Item?              @relation("PackingRelation", fields: [packing_material_code], references: [itcd])
+  serviceDetails        Service?           @relation(fields: [service_id], references: [id])
+  splitFromLine         Transactions?      @relation("LineSplit", fields: [split_from_line_id], references: [id])
+  splitSlices           Transactions[]     @relation("LineSplit")
+  transactionsMaster    TransactionsMaster @relation(fields: [tran_id], references: [tran_id])
+
+  @@index([tran_id])
+  @@index([acno])
+  @@index([split_from_line_id])
+  @@index([itcd])
+  @@index([packing_material_code])
+  @@index([ccno])
+  @@index([godown])
+  @@index([currency])
+  @@index([rate])
+  @@index([qty])
+  @@index([damt, camt])
+  @@index([invoice_no])
+}
+
+model TaxChallan {
+  id                 Int                 @id @default(autoincrement())
+  receipt_voucher_id Int?
+  invoice_id         Int?
+  customer_acno      Int
+  dated              DateTime            @default(now())
+  gross_amount       Float
+  tax_percent        Float
+  tax_amount         Float
+  amount_adjusted    Float
+  net_amount         Float
+  invoice_no         String              @db.VarChar(150)
+  status             String              @default("pending") @db.VarChar(20)
+  payment_date       DateTime?
+  payment_voucher_id Int?
+  challan_no         String?             @unique @db.VarChar(100)
+  created_at         DateTime            @default(now())
+  updated_at         DateTime            @updatedAt
+  jv_tran_id         Int?
+  customer           ACNO                @relation(fields: [customer_acno], references: [acno])
+  invoice            TransactionsMaster? @relation("InvoiceReference", fields: [invoice_id], references: [tran_id])
+  paymentVoucher     TransactionsMaster? @relation("TaxPaymentVoucher", fields: [payment_voucher_id], references: [tran_id])
+  receiptVoucher     TransactionsMaster? @relation("ReceiptVoucher", fields: [receipt_voucher_id], references: [tran_id])
+
+  @@index([receipt_voucher_id])
+  @@index([invoice_id])
+  @@index([customer_acno])
+  @@index([dated])
+  @@index([status])
+  @@index([challan_no])
+  @@index([invoice_no])
+  @@index([payment_voucher_id])
+  @@map("TAX_CHALLAN")
+}
+
+model InvoiceKnockoffRun {
+  id              Int                @id @default(autoincrement())
+  trigger         KnockoffRunTrigger
+  status          KnockoffRunStatus  @default(RUNNING)
+  started_at      DateTime           @default(now())
+  finished_at     DateTime?
+  lines_scanned   Int?
+  lines_matched   Int?
+  amount_matched  Float?
+  error_message   String?
+  triggered_by    String?
+  allocations     InvoiceKnockoff[]
+  triggeredByUser User?              @relation(fields: [triggered_by], references: [id])
+
+  @@index([status])
+  @@index([started_at])
+  @@map("INVOICE_KNOCKOFF_RUN")
+}
+
+model InvoiceKnockoff {
+  id                 Int                 @id @default(autoincrement())
+  source_tran_id     Int
+  source_line_id     Int
+  source_type        KnockoffSourceType
+  source_acno        Int
+  invoice_no         String              @db.VarChar(150)
+  invoice_party_acno Int
+  invoice_tran_id    Int?
+  allocated_amount   Float
+  is_manual          Boolean             @default(false)
+  reversed_at        DateTime?
+  reversed_by        String?
+  run_id             Int?
+  created_at         DateTime            @default(now())
+  created_by         String?
+  createdByUser      User?               @relation("KnockoffCreatedBy", fields: [created_by], references: [id])
+  reversedByUser     User?               @relation("KnockoffReversedBy", fields: [reversed_by], references: [id])
+  run                InvoiceKnockoffRun? @relation(fields: [run_id], references: [id])
+  sourceLine         Transactions        @relation("KnockoffSourceLine", fields: [source_line_id], references: [id])
+  sourceTran         TransactionsMaster  @relation("KnockoffSource", fields: [source_tran_id], references: [tran_id])
+
+  @@unique([source_line_id, invoice_no, invoice_party_acno], name: "uniq_source_line_invoice")
+  @@index([invoice_no, invoice_party_acno])
+  @@index([source_tran_id])
+  @@index([source_acno])
+  @@index([run_id])
+  @@index([reversed_at])
+  @@map("INVOICE_KNOCKOFF")
+}
+
+model DeliveryTerm {
+  id            Int     @id @default(autoincrement())
+  delivery_term String  @db.VarChar(50)
+  company_id    Int
+  company       Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([delivery_term])
+}
+
+model CommissionTerm {
+  id              Int     @id @default(autoincrement())
+  commission_term String  @db.VarChar(50)
+  company_id      Int
+  company         Company @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([commission_term])
+}
+
+model CostCenter {
+  ccno           Int            @id @default(autoincrement())
+  company_id     Int
+  ccname         String?        @db.VarChar(50)
+  cc_description String?        @db.VarChar(255)
+  company        Company        @relation(fields: [company_id], references: [id])
+  employees      Employee[]
+  Transaction    Transactions[]
+
+  @@index([company_id])
+  @@index([ccname])
+}
+
+model Department {
+  id               Int               @id @default(autoincrement())
+  dept_name        String?           @db.VarChar(100)
+  dept_description String?           @db.VarChar(255)
+  company_id       Int
+  company          Company           @relation(fields: [company_id], references: [id])
+  employees        Employee[]
+  Manager          Manager[]
+  user             User[]
+  scopes           DepartmentScope[]
+
+  @@index([company_id])
+  @@index([dept_name])
+}
+
+model WorkLocation {
+  id                   Int        @id @default(autoincrement())
+  location_name        String?    @db.VarChar(100)
+  location_description String?    @db.VarChar(255)
+  company_id           Int
+  employees            Employee[]
+  company              Company    @relation(fields: [company_id], references: [id])
+
+  @@index([company_id])
+  @@index([location_name])
+}
+
+model Allowance {
+  id                    Int        @id @default(autoincrement())
+  allowance             String     @db.VarChar(150)
+  allowance_description String     @db.VarChar(150)
+  rate                  String     @db.VarChar(150)
+  company_id            Int
+  company               Company    @relation(fields: [company_id], references: [id])
+  employees             Employee[] @relation("AllowanceToEmployee")
+
+  @@index([company_id])
+  @@index([allowance])
+}
+
+model Deduction {
+  id                    Int        @id @default(autoincrement())
+  deduction             String     @db.VarChar(150)
+  deduction_description String     @db.VarChar(150)
+  rate                  String     @db.VarChar(150)
+  company_id            Int
+  company               Company    @relation(fields: [company_id], references: [id])
+  employees             Employee[] @relation("DeductionToEmployee")
+
+  @@index([company_id])
+  @@index([deduction])
+}
+
+model Leave {
+  id                Int        @id @default(autoincrement())
+  leave             String     @db.VarChar(150)
+  leave_description String     @db.VarChar(150)
+  balance           Int        @default(0)
+  maxCarryForward   Int        @default(15)
+  lastUpdated       DateTime   @default(now())
+  company_id        Int
+  company           Company    @relation(fields: [company_id], references: [id])
+  employees         Employee[] @relation("EmployeeToLeave")
+
+  @@index([company_id])
+  @@index([leave])
+}
+
+model Manager {
+  id            Int        @id @default(autoincrement())
+  manager       String     @db.VarChar(150)
+  department_id Int
+  company_id    Int
+  employeeId    Int        @unique
+  employees     Employee[] @relation("EmployeeReportsToManager")
+  company       Company    @relation(fields: [company_id], references: [id])
+  department    Department @relation(fields: [department_id], references: [id])
+  employee      Employee   @relation("ManagerIsEmployee", fields: [employeeId], references: [id])
+
+  @@index([department_id])
+  @@index([company_id])
+  @@index([employeeId])
+  @@index([manager])
+}
+
+model Employee {
+  id                      Int                   @id @unique
+  firstName               String                @db.VarChar(25)
+  middleName              String?               @db.VarChar(25)
+  surname                 String                @db.VarChar(25)
+  dob                     DateTime
+  gender                  String                @db.VarChar(25)
+  phoneNumber             String                @db.VarChar(25)
+  emailAddress            String                @unique @db.VarChar(100)
+  status                  EmployeeStatus
+  cnicNumber              String?               @db.VarChar(25)
+  dor                     DateTime?
+  hireDate                DateTime
+  designationId           Int
+  departmentId            Int
+  workLocationId          Int?
+  employeecatId           Int?
+  employeetypeId          Int?
+  cityId                  Int?
+  branchId                Int?
+  managerId               Int?
+  company_id              Int
+  paymentMethod           PaymentMethod
+  bankId                  Int?
+  bank_bracnhId           Int?
+  accountName             String?               @db.VarChar(25)
+  accountNumber           String?               @db.VarChar(25)
+  payType                 PayType               @default(SALARY)
+  rate                    Float
+  payFrequency            PayFrequency          @default(MONTHLY)
+  costCenterId            Int
+  createdOn               DateTime              @default(now())
+  updatedOn               DateTime              @updatedAt
+  allowedGraphs           String[]              @default([])
+  bloodGroup              BloodGroup?
+  cnicDocumentUrl         String?               @db.VarChar(500)
+  educationalCertificates String[]              @default([])
+  emergencyContactName    String?               @db.VarChar(100)
+  emergencyContactPhone   String?               @db.VarChar(25)
+  experienceCertificates  String[]              @default([])
+  nextOfKinName           String?               @db.VarChar(100)
+  nextOfKinPhone          String?               @db.VarChar(25)
+  nextOfKinRelation       String?               @db.VarChar(50)
+  photographUrl           String?               @db.VarChar(500)
+  qualification           String?               @db.VarChar(150)
+  residentialAddress      String?               @db.VarChar(255)
+  // Legacy EMPLOYEE_MASTER fields with no equivalent above (kept so the import loses nothing)
+  legacyCategory          Int? // CATAGORY
+  fatherName              String?               @db.VarChar(100) // FATHER
+  maritalStatus           String?               @db.VarChar(10) // MARITAL_STATUS
+  jobStatus               String?               @db.VarChar(10) // JOB_STATUS
+  advanceAcno             Int? // ADVANCE_ACNO (acno of the staff advance account)
+  loanAcno                Int? // LOAN_ACNO (acno of the staff loan account)
+  allowanceAmount         Float? // ALLOWNCE
+  insCom                  String?               @db.VarChar(100) // INS_COM
+  eobiNo                  String?               @db.VarChar(25) // EOBI_NO
+  licCat                  String?               @db.VarChar(10) // LIC_CAT
+  leaveAll                String?               @db.VarChar(10) // LEAVE_ALL
+  salaryMode              Int? // SALARY_MODE
+  eobiContribution        Float? // EOBI_CONT
+  shiftCode               String?               @db.VarChar(10) // SHIFT
+  onDutyTime              String?               @db.VarChar(10) // ON_DUTY_TIME (6.3 = 6:30)
+  offDutyTime             String?               @db.VarChar(10) // OFF_DUTY_TIME
+  weekOffDay              String?               @db.VarChar(20) // WEEK_OFF_DAY
+  empGroup                Int? // EMP_GROUP
+  legacyEmpType           Int? // EMP_TYPE
+  contractMonths          Int? // CONT_MONTHS
+  phoneAll                String?               @db.VarChar(100) // PHONE, every number (phoneNumber keeps the first)
+  bankTitle               String?               @db.VarChar(100) // BANK_TITLE, full (accountName is 25 chars)
+  salesPersonCode         Int? // SALES_PERSON.SP_CODE for sales person employees
+  attendanceId            String?               @unique @db.VarChar(30) // user id on the attendance machine (blank = employee id)
+  bank                    Bank?                 @relation(fields: [bankId], references: [id])
+  bankBranch              bank_branch?          @relation(fields: [bank_bracnhId], references: [id])
+  branch                  Branch?               @relation(fields: [branchId], references: [id])
+  city                    City?                 @relation(fields: [cityId], references: [id])
+  company                 Company               @relation(fields: [company_id], references: [id])
+  costCenter              CostCenter            @relation(fields: [costCenterId], references: [ccno])
+  department              Department            @relation(fields: [departmentId], references: [id])
+  Designation             Designation           @relation(fields: [designationId], references: [id])
+  employeecat             Employement_catagory? @relation(fields: [employeecatId], references: [id])
+  employeetype            Employement_type?     @relation(fields: [employeetypeId], references: [id])
+  manager                 Manager?              @relation("EmployeeReportsToManager", fields: [managerId], references: [id])
+  workLocation            WorkLocation?         @relation(fields: [workLocationId], references: [id])
+  managerProfile          Manager?              @relation("ManagerIsEmployee")
+  user                    User?
+  employee_menu           employee_menu[]
+  allowances              Allowance[]           @relation("AllowanceToEmployee")
+  deductions              Deduction[]           @relation("DeductionToEmployee")
+  leaves                  Leave[]               @relation("EmployeeToLeave")
+  hrShiftAssignments      HrShiftAssignment[]
+  hrAttendance            HrAttendance[]
+  hrLeaveBalances         HrLeaveBalance[]
+  hrLeaveRequests         HrLeaveRequest[]
+  hrOffSwaps              HrOffSwap[]
+  hrSalaryStructures      HrSalaryStructure[]
+  hrLoans                 HrLoan[]
+  hrPayslips              HrPayslip[]
+
+  @@index([company_id])
+  @@index([designationId])
+  @@index([departmentId])
+  @@index([status])
+  @@index([emailAddress])
+  @@index([phoneNumber])
+  @@index([cnicNumber])
+  @@index([hireDate])
+  @@index([managerId])
+  @@index([payType])
+  @@index([payFrequency])
+  @@index([costCenterId])
+}
+
+model PeriodicAttendance {
+  id                   Int      @id @default(autoincrement())
+  compnayId            Int      @default(1)
+  employeeId           String
+  dateRange            String
+  totalBreakHours      String   @default("0")
+  totalWorkingHours    String?
+  totalDoubleTimeHours String   @default("0")
+  numberOfDays         String   @default("0")
+  status               String
+  rejectionReason      String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([employeeId])
+  @@index([compnayId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model PayrollProcess {
+  id                 Int           @id @default(autoincrement())
+  payroll_id         Int           @unique
+  date_from          DateTime
+  date_to            DateTime
+  month_no           Int
+  week_no            Int
+  year               Int
+  status             PayrollStatus @default(Draft)
+  companyId          Int
+  processedEmployees String[]
+  totalAmount        Float         @default(0)
+  created_at         DateTime      @default(now())
+  updated_at         DateTime      @updatedAt
+
+  @@index([payroll_id])
+  @@index([date_from, date_to])
+  @@index([status])
+  @@index([companyId])
+  @@index([month_no, year])
+}
+
+/// Finance → Account Settings: every account / account group the system posts
+/// to automatically (lib/accounts/accountSettingDefs.js). Seeded and created by
+/// prisma/sql/2026-10-24_account_settings.sql.
+model AccountSetting {
+  key        String   @id @db.VarChar(60)
+  kind       String   @default("ACCOUNT") @db.VarChar(10) // ACCOUNT | GROUP | LIST
+  section    String?  @db.VarChar(40)
+  label      String?  @db.VarChar(120)
+  acno       Int? // kind ACCOUNT
+  macnos     Int[]    @default([]) // kind GROUP (main accounts)
+  acnos      Int[]    @default([]) // kind LIST
+  updated_by String?  @db.VarChar(120)
+  updated_at DateTime @default(now()) @updatedAt
+
+  @@index([acno])
+  @@map("account_settings")
+}
+
+model Settings {
+  id           Int      @id @default(autoincrement())
+  key          String   @unique
+  value        String
+  description  String?
+  exclude      Boolean  @default(false)
+  created_at   DateTime @default(now())
+  last_updated DateTime @default(now()) @updatedAt
+
+  @@index([key])
+}
+
+model menus {
+  id            Int             @id @default(autoincrement())
+  title         String
+  url           String?
+  icon          String?
+  parent_id     Int?
+  order_no      Int             @default(0)
+  is_active     Boolean         @default(true)
+  employee_menu employee_menu[]
+  blocks        MenuBlock[]
+  parent        menus?          @relation("MenuHierarchy", fields: [parent_id], references: [id])
+  children      menus[]         @relation("MenuHierarchy")
+
+  @@index([parent_id])
+  @@index([order_no])
+  @@index([is_active])
+  @@index([title])
+}
+
+model employee_menu {
+  id          Int      @id @default(autoincrement())
+  employee_id Int
+  menu_id     Int
+  employee    Employee @relation(fields: [employee_id], references: [id])
+  menu        menus    @relation(fields: [menu_id], references: [id])
+
+  @@unique([employee_id, menu_id])
+  @@index([employee_id])
+  @@index([menu_id])
+}
+
+model ReqMaster {
+  tran_id        Int         @id @default(autoincrement())
+  dated          DateTime    @default(now())
+  userid         String      @db.VarChar(25)
+  issued_for     Int?
+  app_date       DateTime?
+  issued_by      Int?
+  req_catagory   ReqCategory
+  plan_id        Int?
+  status         String?     @default("Pending") @db.VarChar(25)
+  so_no          Int?
+  details        ReqDetail[]
+  godown2Details Godown?     @relation("SecondaryReqGodown", fields: [issued_by], references: [id])
+  godownDetails  Godown?     @relation("PrimaryReqGodown", fields: [issued_for], references: [id])
+
+  @@index([status])
+  @@index([plan_id])
+  @@index([dated])
+  @@index([userid])
+  @@index([issued_for])
+  @@index([issued_by])
+  @@index([req_catagory])
+  @@index([app_date])
+}
+
+model ReqDetail {
+  id           Int       @id @default(autoincrement())
+  dated        DateTime  @default(now())
+  tran_id      Int
+  itcd         Int?
+  qty          Float
+  ap_qty       Float?
+  s_id         Int?
+  dispatch_qty Float?
+  ordered_qty  Float?
+  so_no        Int?
+  remarks      String?   @db.VarChar(255)
+  item         Item?     @relation(fields: [itcd], references: [itcd])
+  service      Service?  @relation(fields: [s_id], references: [id])
+  master       ReqMaster @relation(fields: [tran_id], references: [tran_id])
+
+  @@index([tran_id])
+  @@index([itcd])
+  @@index([dated])
+  @@index([qty])
+}
+
+model TaxSetup {
+  tax_code Int       @id @default(autoincrement())
+  tax_name String    @unique @db.VarChar(100)
+  taxLaws  TaxLaws[]
+
+  @@index([tax_name])
+}
+
+model TaxLaws {
+  tax_law_code        Int      @id @default(autoincrement())
+  tax_code            Int
+  section_description String   @db.VarChar(255)
+  rate_filer          Int
+  rate_non_filer      Int
+  taxSetup            TaxSetup @relation(fields: [tax_code], references: [tax_code])
+  acno                ACNO[]   @relation("ACNO_TaxSetup")
+
+  @@index([tax_code])
+  @@index([section_description])
+}
+
+model SALES_FORECAST {
+  id          Int    @id @default(autoincrement())
+  month       String @db.VarChar(10)
+  customer    Int
+  itcd        Int
+  qty         Float?
+  customerRef ACNO   @relation("ACNO_SALES_FORECAST", fields: [customer], references: [acno])
+  itemRef     Item   @relation("ITEM_SALES_FORECAST", fields: [itcd], references: [itcd])
+
+  @@unique([month, customer, itcd])
+  @@index([month])
+  @@index([customer])
+  @@index([itcd])
+  @@index([qty])
+}
+
+model tran_code_sequences {
+  tran_code         Int     @id
+  sequence_name     String
+  off_sequence_name String?
+
+  @@index([sequence_name])
+}
+
+model ServiceCategory {
+  id           Int       @id @default(autoincrement())
+  sc_name      String    @db.VarChar(250)
+  // Default expense account for the category's services (a service's own
+  // expense_acno wins; Account Settings 'service_expense' is the last resort).
+  expense_acno Int?
+  services     Service[]
+}
+
+model Service {
+  id              Int             @id @default(autoincrement())
+  service_name    String?         @db.VarChar(250)
+  sc_id           Int
+  company_id      Int
+  // Expense account a Service Invoice line of this service is debited to.
+  expense_acno    Int?
+  // Inactive services are hidden from every picker; old documents keep them.
+  is_active       Boolean         @default(true)
+  orderDetails    OrderDetail[]
+  requestDetails  ReqDetail[]
+  serviceCategory ServiceCategory @relation(fields: [sc_id], references: [id])
+  transactions    Transactions[]
+}
+
+// Opening stock QUANTITY per item per godown for a month. Godown is
+// mandatory — the all-godown figure is SUM(opening_qty) across rows, never a
+// stored "aggregate" row. Rates live in MonthlyOpeningRate (item-level).
+// Read/write only through lib/openingStock.js.
+model MonthlyOpeningStock {
+  id            Int      @id @default(autoincrement())
+  month         Int
+  year          Int
+  itcd          Int
+  godown        Int
+  opening_qty   Float
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+  godownDetails Godown   @relation(fields: [godown], references: [id])
+  item          Item     @relation(fields: [itcd], references: [itcd])
+
+  @@unique([month, year, itcd, godown])
+  @@index([month, year])
+  @@index([itcd])
+  @@index([godown])
+}
+
+// Opening cost RATE per item for a month (godown-independent).
+// opening_rate = full blended rate (RM + CC); cc_rate / rm_rate are its split.
+// Values (qty × rate) are computed on read — see lib/openingStock.js.
+model MonthlyOpeningRate {
+  id           Int      @id @default(autoincrement())
+  month        Int
+  year         Int
+  itcd         Int
+  opening_rate Float    @default(0)
+  cc_rate      Float?
+  rm_rate      Float?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  item         Item     @relation(fields: [itcd], references: [itcd])
+
+  @@unique([month, year, itcd])
+  @@index([month, year])
+  @@index([itcd])
+}
+
+model FutureCosting {
+  id           Int      @id @default(autoincrement())
+  month        Int
+  year         Int
+  itcd         Int
+  rate         Float
+  closing_qty  Float?   @default(0)
+  closing_rate Float?   @default(0)
+  future_qty   Float?   @default(0)
+  future_rate  Float?   @default(0)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  item         Item     @relation(fields: [itcd], references: [itcd])
+
+  @@unique([month, year, itcd])
+  @@index([month, year])
+  @@index([itcd])
+}
+
+model CostingPeriod {
+  id         Int       @id @default(autoincrement())
+  month      Int
+  year       Int
+  is_locked  Boolean   @default(false)
+  locked_at  DateTime?
+  locked_by  String?   @db.VarChar(100)
+  created_at DateTime  @default(now())
+
+  @@unique([month, year], name: "month_year")
+  @@index([year, month])
+}
+
+// A locked date range (inclusive), on top of the month locks in CostingPeriod.
+// Unlocking keeps the row (is_active=false) so the history stays visible.
+// Read only through lib/periodLock.js.
+model PeriodLock {
+  id          Int       @id @default(autoincrement())
+  date_from   DateTime  @db.Date
+  date_to     DateTime  @db.Date
+  tran_codes  Int[]     @default([]) // document types covered; empty = all
+  reason      String?   @db.VarChar(255)
+  is_active   Boolean   @default(true)
+  locked_by   String?   @db.VarChar(100)
+  locked_at   DateTime  @default(now())
+  unlocked_by String?   @db.VarChar(100)
+  unlocked_at DateTime?
+
+  @@index([is_active, date_from, date_to])
+}
+
+// Re-opens locked dates for ONE user: chosen document types (empty = all) and
+// actions, until expires_at (null = until revoked). Month locks are only
+// overridden when override_month_lock is set. Read only through lib/periodLock.js.
+model PeriodLockException {
+  id                  Int       @id @default(autoincrement())
+  user_id             String
+  user_name           String?   @db.VarChar(150) // snapshot for display
+  date_from           DateTime  @db.Date
+  date_to             DateTime  @db.Date
+  tran_codes          Int[]     @default([])
+  can_create          Boolean   @default(false)
+  can_update          Boolean   @default(false)
+  can_delete          Boolean   @default(false)
+  override_month_lock Boolean   @default(false)
+  expires_at          DateTime?
+  reason              String    @db.VarChar(255)
+  is_active           Boolean   @default(true)
+  granted_by          String?   @db.VarChar(100)
+  granted_at          DateTime  @default(now())
+  revoked_by          String?   @db.VarChar(100)
+  revoked_at          DateTime?
+  use_count           Int       @default(0)
+  last_used_at        DateTime?
+
+  @@index([user_id, is_active, date_from, date_to])
+}
+
+// Who locked, unlocked, granted, revoked, used an exception or was blocked.
+// event: MONTH_LOCK | MONTH_UNLOCK | RANGE_LOCK | RANGE_UNLOCK | RANGE_RELOCK |
+//        EXCEPTION_GRANT | EXCEPTION_REVOKE | EXCEPTION_USED | BLOCKED
+model PeriodLockLog {
+  id           Int       @id @default(autoincrement())
+  event        String    @db.VarChar(30)
+  actor_id     String?
+  actor_name   String?   @db.VarChar(100)
+  lock_id      Int?
+  exception_id Int?
+  tran_code    Int?
+  action       String?   @db.VarChar(10)
+  doc_date     DateTime? @db.Date
+  detail       String?   @db.VarChar(500)
+  created_at   DateTime  @default(now())
+
+  @@index([created_at])
+  @@index([event, created_at])
+}
+
+model ProductionCostEntry {
+  id                        Int                    @id @default(autoincrement())
+  plan_id                   Int?                   @unique
+  itcd                      Int?
+  month                     Int
+  year                      Int
+  qty_costed                Float
+  total_cost                Float
+  cost_per_unit             Float
+  theoretical_cost          Float?
+  theoretical_cost_per_unit Float?
+  actual_issued_cost        Float?
+  actual_issued_qty         Float?
+  actual_cost_per_unit      Float?
+  wastage_cost              Float?
+  cost_variance             Float?
+  cc_rate                   Float?
+  cc_cost                   Float?
+  item_type                 String?                @db.VarChar(50)
+  bom_depth                 Int?                   @default(0)
+  is_orphan                 Boolean?               @default(false)
+  calculated_at             DateTime               @default(now())
+  calculated_by             String?                @db.VarChar(100)
+  details                   ProductionCostDetail[]
+  plan                      productionPlanMaster?  @relation(fields: [plan_id], references: [id])
+
+  @@index([plan_id])
+  @@index([itcd])
+  @@index([month, year])
+}
+
+model ProductionCostDetail {
+  id               Int                 @id @default(autoincrement())
+  entry_id         Int
+  material_id      Int
+  material_name    String              @db.VarChar(250)
+  material_code    String?             @db.VarChar(50)
+  bom_level        Int                 @default(0)
+  is_raw_material  Boolean             @default(true)
+  qty              Float
+  unit_cost        Float
+  total_cost       Float
+  cost_source      String?             @db.VarChar(50)
+  actual_qty       Float?
+  actual_unit_cost Float?
+  actual_cost      Float?
+  variance_qty     Float?
+  variance_cost    Float?
+  entry            ProductionCostEntry @relation(fields: [entry_id], references: [id], onDelete: Cascade)
+
+  @@index([entry_id])
+  @@index([material_id])
+}
+
+/// One row per recipient. `user_id` is always set for rows written through
+/// lib/notifications/emit.js; read state is therefore per user. `role` is kept
+/// only for legacy broadcast rows and is no longer written.
+model Notification {
+  id         Int       @id @default(autoincrement())
+  user_id    String?
+  role       String?   @db.VarChar(50)
+  event_code String?   @db.VarChar(60)
+  title      String    @db.VarChar(200)
+  message    String    @db.VarChar(500)
+  type       String?   @db.VarChar(50)
+  entity     String?   @db.VarChar(50)
+  entity_id  Int?
+  is_read    Boolean   @default(false)
+  read_at    DateTime?
+  expires_at DateTime?
+  created_at DateTime  @default(now())
+  user       User?     @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([role])
+  @@index([entity])
+  @@index([event_code])
+  @@index([user_id, is_read, expires_at, created_at(sort: Desc)])
+}
+
+/// A phone / browser that receives this user's notifications as Web Push
+/// (lib/notifications/push.js). One row per device (the browser's push
+/// endpoint); the user turns it on / off on Notifications → Phone
+/// notifications. Signing out on the device removes it. Rows that the push
+/// service reports gone (404 / 410) are deleted when a send fails.
+/// Table: prisma/sql/2026-11-11_push_notifications.sql
+model PushSubscription {
+  id           Int       @id @default(autoincrement())
+  user_id      String
+  endpoint     String    @unique
+  p256dh       String    @db.VarChar(200)
+  auth         String    @db.VarChar(100)
+  device       String?   @db.VarChar(200)
+  created_at   DateTime  @default(now())
+  last_sent_at DateTime?
+  failures     Int       @default(0)
+  user         User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("push_subscriptions")
+}
+
+/// Catalog of notification events. Seeded from lib/notifications/catalog.js on
+/// first use; admins toggle `is_active` (global switch) and `notify_actor`
+/// (always tell the user who performed the action) from Settings → Notifications.
+/// title_template / message_template: the admin's own wording (Admin →
+/// Notifications), with {placeholders} — see lib/notifications/template.js.
+/// NULL / blank = the code's default text. Added by
+/// prisma/sql/2026-11-06_notification_templates.sql.
+model NotificationEvent {
+  code             String             @id @db.VarChar(60)
+  category         String             @db.VarChar(50)
+  label            String             @db.VarChar(120)
+  description      String?            @db.VarChar(255)
+  is_active        Boolean            @default(true)
+  notify_actor     Boolean            @default(true)
+  title_template   String?            @db.VarChar(200)
+  message_template String?            @db.VarChar(500)
+  updated_at       DateTime           @default(now()) @updatedAt
+  rules            NotificationRule[]
+}
+
+/// Who receives an event. Exactly one of `role` / `user_id` is set.
+///   role row              → every active user with that role receives it
+///   user row enabled=true → this user always receives it (even if role is not subscribed)
+///   user row enabled=false→ this user never receives it (mutes a role subscription)
+model NotificationRule {
+  id         Int               @id @default(autoincrement())
+  event_code String            @db.VarChar(60)
+  role       String?           @db.VarChar(50)
+  user_id    String?
+  enabled    Boolean           @default(true)
+  created_at DateTime          @default(now())
+  event      NotificationEvent @relation(fields: [event_code], references: [code], onDelete: Cascade)
+  user       User?             @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([event_code, role])
+  @@unique([event_code, user_id])
+  @@index([event_code])
+  @@index([user_id])
+}
+
+model ProcessScanLog {
+  id          Int                  @id @default(autoincrement())
+  proc_ord_no Int
+  stage       String               @db.VarChar(50)
+  scanned_by  String?              @db.VarChar(100)
+  scanned_at  DateTime             @default(now())
+  barcode     String?              @db.VarChar(150)
+  is_late     Boolean              @default(false)
+  expected_at DateTime?
+  remarks     String?              @db.VarChar(255)
+  planMaster  productionPlanMaster @relation(fields: [proc_ord_no], references: [id])
+
+  @@index([proc_ord_no])
+  @@index([stage])
+  @@index([scanned_at])
+  @@index([is_late])
+  @@map("PROCESS_SCAN_LOG")
+}
+
+model LCMaster {
+  id               Int                  @id @default(autoincrement())
+  lc_date          DateTime?
+  contract_no      String?              @db.VarChar(50)
+  lc_no            String               @unique @db.VarChar(35)
+  lc_gl            Int?
+  import_type      String?              @db.VarChar(10)
+  indent_no        String?              @db.VarChar(35)
+  beneficiary      Int?
+  terms            String?              @db.VarChar(250)
+  mny_ship_date    DateTime?
+  lc_exp_date      DateTime?
+  bank             Int?
+  curr             String?              @db.VarChar(15)
+  lc_acno          Int?
+  per_inv_no       String?              @db.VarChar(25)
+  per_inv_date     DateTime?
+  inc_no           String?              @db.VarChar(25)
+  roi_no           String?              @db.VarChar(25)
+  cont_no          String?              @db.VarChar(50)
+  agent            String?              @db.VarChar(100)
+  agent_cont_per   String?              @db.VarChar(100)
+  vessel           String?              @db.VarChar(100)
+  voyage           String?              @db.VarChar(50)
+  etd              DateTime?
+  eta              DateTime?
+  vessel_int_no    String?              @db.VarChar(50)
+  container_no     String?              @db.VarChar(100)
+  cont_seal_no     String?              @db.VarChar(100)
+  bl_no            String?              @db.VarChar(50)
+  bl_date          DateTime?
+  ship_company     String?              @db.VarChar(100)
+  doc_arr_date     DateTime?
+  doc_rtd_due_date DateTime?
+  doc_rtd_date     DateTime?
+  doc_rtd_exc_rate Float?
+  remarks          String?              @db.VarChar(255)
+  is_hidden        Boolean?             @default(false)
+  created_at       DateTime?            @default(now())
+  updated_at       DateTime?            @updatedAt
+  inboundMasters   InboundMaster[]
+  details          LCDetail[]
+  beneficiaries    ACNO?                @relation("LCBeneficiary", fields: [beneficiary], references: [acno])
+  lcAcno           ACNO?                @relation("LCAcno", fields: [lc_acno], references: [acno])
+  grnTransactions  TransactionsMaster[] @relation("LCGRN")
+}
+
+model LCDetail {
+  id         Int      @id @default(autoincrement())
+  lcm_id     Int
+  bl_no      String?  @db.VarChar(50)
+  itcd       Int
+  qty        Float
+  fc_rate    Float
+  fc_amount  Float
+  exc_rate   Float
+  pkr_amount Float
+  bonded_wh  String?  @db.VarChar(100)
+  item       Item     @relation(fields: [itcd], references: [itcd])
+  master     LCMaster @relation(fields: [lcm_id], references: [id], onDelete: Cascade)
+
+  @@index([lcm_id])
+  @@index([itcd])
+}
+
+model InboundMaster {
+  id                Int                  @id @default(autoincrement())
+  bond_id           String?              @db.VarChar(50)
+  bond_location_id  Int
+  bond_limit        DateTime?
+  dated             DateTime?            @default(now())
+  tran_id           Int?
+  bond_ref          String?              @db.VarChar(100)
+  lCMasterId        Int?
+  lc_ref            String?              @db.VarChar(35) // LC number for display/reference
+  rmk               String?              @db.VarChar(500)
+  rmk1              String?              @db.VarChar(500)
+  lc_no             Int
+  transactions      InboundDetail[]
+  bondLocation      BondLocation         @relation(fields: [bond_location_id], references: [id])
+  lcmaster          LCMaster?            @relation(fields: [lCMasterId], references: [id])
+  acno              ACNO                 @relation(fields: [lc_no], references: [acno])
+  transactionMaster TransactionsMaster?  @relation("InboundTranLink", fields: [tran_id], references: [tran_id])
+  grnTransactions   TransactionsMaster[] @relation("BondGRN")
+
+  @@index([lc_no])
+  @@index([bond_location_id])
+  @@index([tran_id])
+}
+
+model InboundDetail {
+  id          Int           @id @default(autoincrement())
+  inbound_id  Int
+  bl_no       String?       @db.VarChar(50)
+  itcd        Int
+  qty         Float
+  master      InboundMaster @relation(fields: [inbound_id], references: [id], onDelete: Cascade)
+  itemDetails Item          @relation(fields: [itcd], references: [itcd])
+
+  @@index([inbound_id])
+  @@index([itcd])
+}
+
+model ChecksInHand {
+  id          Int       @id @default(autoincrement())
+  acno        Int
+  chqRcvDate  DateTime? @map("chq_rcv_date")
+  dated       DateTime  @default(now())
+  bank        String    @db.VarChar(50)
+  chqNo       String    @map("chq_no") @db.VarChar(25)
+  chqDate     DateTime  @map("chq_date")
+  amount      Decimal   @db.Decimal(18, 2)
+  rmk         String?   @db.VarChar(50)
+  chqBrBy     String?   @map("chq_br_by") @db.VarChar(50)
+  status      String    @default("PENDING") @db.VarChar(25)
+  depDate     DateTime? @map("dep_date")
+  user_id     String?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+  depAcno     Int?      @map("dep_acno")
+  customer    ACNO      @relation("ChecksInHandCustomer", fields: [acno], references: [acno])
+  depositBank ACNO?     @relation("ChecksInHandDepositBank", fields: [depAcno], references: [acno])
+  user        User?     @relation("UserChecksInHand", fields: [user_id], references: [id])
+
+  @@index([acno])
+  @@index([depAcno])
+  @@index([status])
+  @@index([chqDate])
+  @@index([depDate])
+  @@index([bank])
+  @@index([chqNo])
+  @@map("checks_in_hand")
+}
+
+// ============================================================
+// AUTHORISATION
+// ------------------------------------------------------------
+// Three layers on top of the existing menu access (employee_menu):
+//   Permission / PermissionGrant  — may this user perform an action?
+//   FieldPolicy                   — may they see / edit a given field?
+//   DataScope                     — which rows may they see or touch?
+//
+// ADMIN and ACCOUNTANT bypass all three unconditionally — see
+// FULL_ACCESS_ROLES in lib/auth/permissions.js. Everyone else is
+// DEFAULT DENY: nothing is permitted until it is granted.
+// ============================================================
+
+/// The catalogue of controllable actions. Seeded from VOUCHER_CONFIG and
+/// REPORT_CONFIG by scripts/seed-permissions.mjs — not edited by users.
+model Permission {
+  id     Int               @id @default(autoincrement())
+  code   String            @unique @db.VarChar(120) // "saleOrder.create"
+  module String            @db.VarChar(60) // groups the admin screen
+  label  String            @db.VarChar(200)
+  sort   Int               @default(0)
+  grants PermissionGrant[]
+
+  @@index([module])
+}
+
+/// Who holds a permission. Grant to a ROLE (broad) or a USER (specific).
+/// allow=false is an explicit DENY and always wins over any ALLOW.
+/// `constraints` carries optional limits, e.g.
+///   { "maxAmount": 500000, "backdateDays": 3, "godowns": [1,2] }
+model PermissionGrant {
+  id           Int        @id @default(autoincrement())
+  permissionId Int
+  userId       String?
+  role         String?    @db.VarChar(40) // app_roles.code
+  allow        Boolean    @default(true)
+  constraints  Json?
+  grantedById  String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  user         User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy    User?      @relation("PermissionGrantedBy", fields: [grantedById], references: [id])
+
+  @@unique([permissionId, userId])
+  @@unique([permissionId, role])
+  @@index([userId])
+  @@index([role])
+}
+
+/// Field-level visibility. access: HIDDEN | READONLY | EDIT.
+/// Enforced server-side (the API strips or refuses the field) and read by the
+/// form engine to hide or disable the input.
+model FieldPolicy {
+  id     Int     @id @default(autoincrement())
+  entity String  @db.VarChar(60) // "ACNO" | "SALES_ITEM_CUST" | "Employee"
+  field  String  @db.VarChar(60) // "rate" | "crLimit"
+  access String  @db.VarChar(10)
+  userId String?
+  role   String? @db.VarChar(40) // app_roles.code
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([entity, field, userId])
+  @@unique([entity, field, role])
+  @@index([entity])
+}
+
+/// Row-level scope, one row per user per dimension.
+/// mode: ALL (everything) | OWN (resolved from the data — customers whose
+/// sales person is this user, orders they created) | LIST (explicit values).
+model DataScope {
+  id        String   @id @default(cuid())
+  userId    String
+  dimension String   @db.VarChar(30) // "customer" | "region" | "godown"
+  mode      String   @db.VarChar(10)
+  values    String[] @default([])
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dimension])
+  @@index([userId])
+}
+
+/// Role catalogue — Admin → Roles (lib/auth/roleCatalog.js). Only ADMIN
+/// (Super Admin) skips permission checks (lib/auth/roles.js).
+/// prisma/sql/2026-11-16_roles.sql
+model AppRole {
+  code        String     @id @db.VarChar(40)
+  name        String     @db.VarChar(80)
+  description String?    @db.VarChar(300)
+  level       String     @default("staff") @db.VarChar(20) // system | management | head | staff | self
+  nav_mode    String     @default("assigned") @db.VarChar(10) // all | assigned
+  is_system   Boolean    @default(false)
+  is_active   Boolean    @default(true)
+  sort        Int        @default(0)
+  created_by  String?    @db.VarChar(50)
+  created_at  DateTime   @default(now()) @db.Timestamp(3)
+  updated_at  DateTime   @default(now()) @updatedAt @db.Timestamp(3)
+  users       UserRole[]
+
+  @@map("app_roles")
+}
+
+/// A user's roles besides the primary one on User.role.
+model UserRole {
+  user_id    String
+  role_code  String   @db.VarChar(40)
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now()) @db.Timestamp(3)
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  role       AppRole  @relation(fields: [role_code], references: [code], onUpdate: Cascade)
+
+  @@id([user_id, role_code])
+  @@index([role_code])
+  @@map("user_roles")
+}
+
+/// Legacy — the role columns are VARCHAR now (app_roles.code). Kept so the
+/// database type it names is not dropped.
+enum Role {
+  ADMIN
+  MANAGER
+  CASHIER
+  ACCOUNTANT
+  SALES
+  EMPLOYEE
+  HR_MANAGER
+}
+
+enum QualityStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+  REWORK
+  HOLD
+}
+
+enum MainProductCategory {
+  RAW_MATERIAL
+  SEMI_FINISHED
+  FINISHED
+}
+
+enum KnockoffSourceType {
+  RECEIPT
+  PAYMENT
+  JV
+}
+
+enum KnockoffRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum KnockoffRunTrigger {
+  CRON
+  MANUAL
+}
+
+enum BloodGroup {
+  A_POS
+  A_NEG
+  B_POS
+  B_NEG
+  AB_POS
+  AB_NEG
+  O_POS
+  O_NEG
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PaymentMethod {
+  CASH
+  DIRECT_DEPOSIT
+  CHEQUE
+}
+
+enum PayType {
+  HOUR
+  SALARY
+}
+
+enum PayFrequency {
+  MONTHLY
+  FORTNIGHTLY
+  WEEKLY
+}
+
+enum PayrollStatus {
+  Draft
+  Pending
+  PartiallyApproved
+  Approved
+}
+
+enum ReqCategory {
+  PURCHASE
+  TRANSFER
+  SERVICE
+  FG_TRANSFER
+  DISPATCH
+}
+
+// ── Ported from eastland 2026-10-25: approvals, menu blocks, department scope ──
+model ApprovalRule {
+  id             Int               @id @default(autoincrement())
+  name           String            @db.VarChar(150)
+  doc_type       String            @db.VarChar(60)
+  match          String            @default("all") @db.VarChar(10)
+  applies_on     String            @default("create") @db.VarChar(10) // create | update | both
+  mode           String            @default("hold") @db.VarChar(10) // hold | flag (save, block dispatch)
+  conditions     Json              @default("[]")
+  approver_users Json              @default("[]")
+  approver_roles Json              @default("[]")
+  message        String?           @db.VarChar(300)
+  is_active      Boolean           @default(true)
+  sort           Int               @default(0)
+  created_by     String?           @db.VarChar(50)
+  created_at     DateTime          @default(now())
+  updated_at     DateTime          @default(now()) @updatedAt
+  requests       ApprovalRequest[]
+
+  @@index([doc_type])
+}
+
+model ApprovalRequest {
+  id             Int           @id @default(autoincrement())
+  rule_id        Int?
+  rule_name      String?       @db.VarChar(150)
+  doc_type       String        @db.VarChar(60)
+  tran_code      Int?
+  kind           String        @default("voucher") @db.VarChar(10) // voucher | order
+  action         String        @default("create") @db.VarChar(10) // create | update
+  target_id      String?       @db.VarChar(60) // the document an edit is for
+  status         String        @default("pending") @db.VarChar(20)
+  payload        Json
+  ui_state       Json?
+  summary        String?       @db.VarChar(500)
+  requested_by   String        @db.VarChar(50)
+  requested_at   DateTime      @default(now())
+  decided_by     String?       @db.VarChar(50)
+  decided_at     DateTime?
+  remarks        String?       @db.VarChar(500)
+  posted_tran_id Int?
+  posted_no      String?       @db.VarChar(60)
+  post_error     String?       @db.VarChar(500)
+  updated_at     DateTime      @default(now()) @updatedAt
+  rule           ApprovalRule? @relation(fields: [rule_id], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([requested_by])
+  @@index([rule_id])
+  @@index([kind, target_id, status], map: "ApprovalRequest_target_idx")
+}
+
+model MenuBlock {
+  id         Int      @id @default(autoincrement())
+  menu_id    Int
+  user_id    String?  @db.VarChar(50)
+  role       String?  @db.VarChar(30)
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now())
+  menu       menus    @relation(fields: [menu_id], references: [id], onDelete: Cascade)
+
+  @@unique([menu_id, user_id])
+  @@unique([menu_id, role])
+  @@index([user_id])
+  @@index([role])
+}
+
+model DepartmentScope {
+  id           String     @id @default(cuid())
+  departmentId Int
+  dimension    String     @db.VarChar(30)
+  mode         String     @db.VarChar(10) // ALL | LIST
+  values       String[]   @default([])
+  updatedAt    DateTime   @updatedAt
+  department   Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, dimension])
+  @@index([departmentId])
+}
+
+/// Service Invoice line ↔ the GRNs / dispatches the service was for
+/// (lib/service/serviceInvoice.js). Tracking and reports only — the cost is
+/// posted to the service's expense account.
+model ServiceInvoiceLink {
+  id             Int      @id @default(autoincrement())
+  tran_id        Int // the Service Invoice (TRANSACTIONS_MASTER.tran_id)
+  line_no        Int // its service line, 1-based
+  source_tran_id Int // the linked GRN (tran_code 4) or dispatch (tran_code 6)
+  source_type    String   @db.VarChar(20) // GRN | DISPATCH | SALE_RETURN
+  created_at     DateTime @default(now())
+
+  @@unique([tran_id, line_no, source_tran_id])
+  @@index([tran_id])
+  @@index([source_tran_id])
+  @@map("service_invoice_links")
+}
+
+// ── Ported from eastland 2026-10-25: BI dashboards, designer, follow-ups ──
+// ── BI: questions, dashboards, who sees them (lib/bi/*) ─────────────────────
+// A saved question: dataset + measures + group-by + filters + visual, as JSON
+// (lib/bi/engine.js documents the shape). No SQL is ever stored.
+model BiQuestion {
+  id          Int          @id @default(autoincrement())
+  name        String       @db.VarChar(150)
+  description String?      @db.VarChar(500)
+  dataset     String       @db.VarChar(50)
+  config      Json
+  created_by  String?      @db.VarChar(50)
+  created_at  DateTime     @default(now())
+  updated_at  DateTime     @updatedAt
+  followups   BiFollowup[]
+
+  @@index([dataset])
+}
+
+// A flagged row of a question that someone must act on (config.followup) —
+// prisma/sql/2026-10-24_bi_followups.sql, lib/bi/followups.js.
+model BiFollowup {
+  id          Int              @id @default(autoincrement())
+  question_id Int
+  item_key    String           @db.VarChar(150)
+  item_label  String?          @db.VarChar(400)
+  flag_label  String?          @db.VarChar(80)
+  owner_id    String?          @db.VarChar(50)
+  party_id    Int?
+  status      String           @default("open") @db.VarChar(20) // open | done | cleared
+  result      String?          @db.VarChar(20) // approved | not_suitable | more_time | other
+  next_date   DateTime?
+  remarks     String?          @db.VarChar(1000)
+  due_since   DateTime         @default(now())
+  last_seen   DateTime         @default(now())
+  level       Int              @default(0)
+  done_at     DateTime?
+  done_by     String?          @db.VarChar(50)
+  created_at  DateTime         @default(now())
+  updated_at  DateTime         @default(now()) @updatedAt
+  question    BiQuestion       @relation(fields: [question_id], references: [id], onDelete: Cascade)
+  notes       BiFollowupNote[]
+
+  @@unique([question_id, item_key])
+  @@index([owner_id, status])
+  @@index([status])
+  @@index([party_id, status])
+}
+
+model BiFollowupNote {
+  id          Int        @id @default(autoincrement())
+  followup_id Int
+  user_id     String?    @db.VarChar(50)
+  result      String?    @db.VarChar(20)
+  remarks     String?    @db.VarChar(1000)
+  created_at  DateTime   @default(now())
+  followup    BiFollowup @relation(fields: [followup_id], references: [id], onDelete: Cascade)
+
+  @@index([followup_id])
+}
+
+// A page of questions: layout = { sections: [{ title, items: [{ questionId, width }] }] }
+/// Dated notes shown as flags on dashboard trend charts — prisma/sql/2026-11-17_bi_events.sql
+model BiEvent {
+  id         Int      @id @default(autoincrement())
+  dated      DateTime @db.Date
+  label      String   @db.VarChar(60)
+  note       String?  @db.VarChar(300)
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now()) @db.Timestamp(3)
+
+  @@index([dated])
+  @@map("bi_events")
+}
+
+model BiDashboard {
+  id             Int                     @id @default(autoincrement())
+  name           String                  @db.VarChar(150)
+  description    String?                 @db.VarChar(500)
+  layout         Json
+  default_period String                  @default("mtd") @db.VarChar(20)
+  is_active      Boolean                 @default(true)
+  created_by     String?                 @db.VarChar(50)
+  created_at     DateTime                @default(now())
+  updated_at     DateTime                @updatedAt
+  assignments    BiDashboardAssignment[]
+}
+
+// Who sees a dashboard: one of department / role / user per row.
+model BiDashboardAssignment {
+  id            Int         @id @default(autoincrement())
+  dashboard_id  Int
+  department_id Int?
+  role          String?     @db.VarChar(30)
+  user_id       String?     @db.VarChar(50)
+  is_landing    Boolean     @default(false)
+  dashboard     BiDashboard @relation(fields: [dashboard_id], references: [id], onDelete: Cascade)
+
+  @@index([dashboard_id])
+  @@index([department_id])
+  @@index([user_id])
+}
+
+// Which datasets a department may use. A department with no rows → all.
+model BiDatasetAccess {
+  id            Int    @id @default(autoincrement())
+  department_id Int
+  dataset       String @db.VarChar(50)
+
+  @@unique([department_id, dataset])
+}
+
+// ── HR · Attendance (prisma/sql/2026-10-30_hr_attendance.sql) ───────────────
+// Times of day are "HH:MM" (24h) in Asia/Karachi; instants (check_in, punch_time)
+// are stored as UTC like every other DateTime. lib/hr/time.js converts.
+
+/// HR → Shifts & Holidays. A shift whose end is before its start runs past midnight.
+model HrShift {
+  id                     Int                 @id @default(autoincrement())
+  code                   String              @unique @db.VarChar(20)
+  name                   String              @db.VarChar(100)
+  start_time             String              @db.VarChar(5)
+  end_time               String              @db.VarChar(5)
+  break_minutes          Int                 @default(0)
+  grace_minutes          Int                 @default(10) // late only after this
+  early_grace_minutes    Int                 @default(10) // leaving this much early is not "early"
+  half_day_late_minutes  Int                 @default(120) // arriving later than this = half day (0 = never)
+  half_day_minutes       Int                 @default(240) // worked less than this = absent (0 = never)
+  full_day_minutes       Int                 @default(0) // worked less than this = half day (0 = shift length − break)
+  overtime_enabled       Boolean             @default(true)
+  overtime_after_minutes Int                 @default(30) // overtime counts once out is this far past the end
+  lates_per_day_cut      Int                 @default(3) // every N lates in a month = 1 day cut (0 = no cut)
+  early_counts_as_late   Boolean             @default(true)
+  week_off_days          Int[]               @default([0]) // 0 = Sunday … 6 = Saturday
+  off_day_work           String              @default("COMP_OFF") @db.VarChar(10) // unplanned work on a week-off / holiday: COMP_OFF (earns a day) | OVERTIME
+  color                  String              @default("#800000") @db.VarChar(9)
+  is_active              Boolean             @default(true)
+  created_by             String?             @db.VarChar(50)
+  created_at             DateTime            @default(now())
+  updated_at             DateTime            @default(now()) @updatedAt
+  assignments            HrShiftAssignment[]
+  attendance             HrAttendance[]
+
+  @@map("hr_shifts")
+}
+
+/// Which shift an employee works from a date on (latest effective_from ≤ day wins).
+model HrShiftAssignment {
+  id                Int      @id @default(autoincrement())
+  employee_id       Int
+  shift_id          Int
+  effective_from    DateTime @db.Date
+  week_off_override Boolean  @default(false) // true = week_off_days below instead of the shift's
+  week_off_days     Int[]    @default([])
+  created_by        String?  @db.VarChar(50)
+  created_at        DateTime @default(now())
+  employee          Employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  shift             HrShift  @relation(fields: [shift_id], references: [id])
+
+  @@unique([employee_id, effective_from])
+  @@index([shift_id])
+  @@map("hr_shift_assignments")
+}
+
+model HrHoliday {
+  id         Int      @id @default(autoincrement())
+  date       DateTime @unique @db.Date
+  name       String   @db.VarChar(100)
+  is_paid    Boolean  @default(true)
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now())
+
+  @@map("hr_holidays")
+}
+
+/// One row per employee per day that has anything recorded. A working day with
+/// no row is absent; week-offs and holidays are derived (lib/hr/attendance/sheet.js).
+model HrAttendance {
+  id               Int             @id @default(autoincrement())
+  employee_id      Int
+  date             DateTime        @db.Date
+  shift_id         Int?
+  check_in         DateTime?
+  check_out        DateTime?
+  status           String          @db.VarChar(12) // PRESENT LATE HALF_DAY ABSENT LEAVE OFF HOLIDAY
+  status_override  Boolean         @default(false) // a person set the status; times do not change it
+  late_minutes     Int             @default(0)
+  early_minutes    Int             @default(0)
+  worked_minutes   Int             @default(0)
+  overtime_minutes Int             @default(0)
+  needs_review     Boolean         @default(false) // e.g. only one punch
+  source           String          @default("MANUAL") @db.VarChar(10) // MANUAL | DEVICE | IMPORT
+  remarks          String?         @db.VarChar(300)
+  locked           Boolean         @default(false) // payroll posted for this day
+  leave_type_id    Int? // status LEAVE: which leave (balance used = these rows)
+  leave_half       Boolean         @default(false) // half-day leave: ½ leave + ½ worked
+  leave_request_id Int? // written by an approved leave request (edit it there, not here)
+  created_by       String?         @db.VarChar(50)
+  updated_by       String?         @db.VarChar(50)
+  created_at       DateTime        @default(now())
+  updated_at       DateTime        @default(now()) @updatedAt
+  employee         Employee        @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  shift            HrShift?        @relation(fields: [shift_id], references: [id])
+  leaveType        HrLeaveType?    @relation(fields: [leave_type_id], references: [id])
+  leaveRequest     HrLeaveRequest? @relation(fields: [leave_request_id], references: [id], onDelete: SetNull)
+
+  @@unique([employee_id, date])
+  @@index([date])
+  @@index([leave_type_id])
+  @@index([leave_request_id])
+  @@map("hr_attendance")
+}
+
+/// Raw clock-ins from a machine or a file. Attendance rows are built from these.
+model HrPunch {
+  id             Int       @id @default(autoincrement())
+  device_user_id String    @db.VarChar(30)
+  employee_id    Int? // resolved from Employee.attendanceId (or id) when known
+  punch_time     DateTime
+  device_id      Int?
+  source         String    @default("DEVICE") @db.VarChar(10) // DEVICE | IMPORT
+  batch          String?   @db.VarChar(40)
+  created_at     DateTime  @default(now())
+  device         HrDevice? @relation(fields: [device_id], references: [id], onDelete: SetNull)
+
+  @@unique([device_user_id, punch_time])
+  @@index([employee_id, punch_time])
+  @@index([punch_time])
+  @@map("hr_punches")
+}
+
+/// ZKTeco machines reachable from the server (TCP 4370 by default).
+model HrDevice {
+  id              Int       @id @default(autoincrement())
+  name            String    @db.VarChar(100)
+  ip              String    @db.VarChar(64)
+  port            Int       @default(4370)
+  location        String?   @db.VarChar(100)
+  auto_sync       Boolean   @default(true)
+  is_active       Boolean   @default(true)
+  last_sync_at    DateTime?
+  last_sync_ok    Boolean?
+  last_sync_count Int       @default(0)
+  last_sync_error String?   @db.VarChar(300)
+  created_by      String?   @db.VarChar(50)
+  created_at      DateTime  @default(now())
+  punches         HrPunch[]
+
+  @@map("hr_devices")
+}
+
+// ── HR · Leave (prisma/sql/2026-10-31_hr_leave.sql) ─────────────────────────
+// Entitlement is worked out from the type (lib/hr/leave/policy.js); leave USED
+// is the attendance rows marked with the type; balances hold only what a person
+// adds: carry-forward and adjustments.
+
+/// HR → Leave → Leave types.
+model HrLeaveType {
+  id                   Int              @id @default(autoincrement())
+  code                 String           @unique @db.VarChar(20)
+  name                 String           @db.VarChar(100)
+  is_paid              Boolean          @default(true)
+  annual_days          Float            @default(0) // entitlement per leave year
+  accrual              String           @default("YEARLY") @db.VarChar(10) // YEARLY (all at once) | MONTHLY (1/12 a month)
+  prorate_joiners      Boolean          @default(true) // YEARLY: a joiner gets the months left
+  min_service_days     Int              @default(0) // usable only after this long in service
+  max_carry_forward    Float            @default(0) // days that move to next year
+  allow_negative       Boolean          @default(false) // may go below zero (e.g. unpaid leave)
+  allow_half_day       Boolean          @default(true)
+  count_off_days       Boolean          @default(false) // week-offs / holidays inside a leave count as leave
+  max_days_per_request Float? // null = no limit
+  comp_off             Boolean          @default(false) // spent from comp-off days earned (lib/hr/leave/compOff.js), not a yearly entitlement
+  comp_off_valid_days  Int              @default(30) // a comp-off day must be taken within this many days of earning it
+  gender               String?          @db.VarChar(10) // Male | Female | null = everyone
+  color                String           @default("#0284c7") @db.VarChar(9)
+  sort                 Int              @default(0)
+  is_active            Boolean          @default(true)
+  created_at           DateTime         @default(now())
+  updated_at           DateTime         @default(now()) @updatedAt
+  balances             HrLeaveBalance[]
+  requests             HrLeaveRequest[]
+  attendance           HrAttendance[]
+
+  @@map("hr_leave_types")
+}
+
+/// What a person added to a leave year: carried forward + adjustments.
+model HrLeaveBalance {
+  id            Int         @id @default(autoincrement())
+  employee_id   Int
+  leave_type_id Int
+  year          Int // leave year label (the year it starts in)
+  carry_forward Float       @default(0)
+  adjustment    Float       @default(0) // + extra days granted / − days taken away
+  note          String?     @db.VarChar(300)
+  updated_by    String?     @db.VarChar(50)
+  updated_at    DateTime    @default(now()) @updatedAt
+  employee      Employee    @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  leaveType     HrLeaveType @relation(fields: [leave_type_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, leave_type_id, year])
+  @@map("hr_leave_balances")
+}
+
+/// Planned off-day swap: works work_date (a week-off / holiday), off on off_date
+/// instead. Approved → the sheet reads them that way (lib/hr/attendance/swaps.js).
+model HrOffSwap {
+  id                  Int       @id @default(autoincrement())
+  employee_id         Int
+  work_date           DateTime  @db.Date
+  off_date            DateTime  @db.Date
+  reason              String?   @db.VarChar(500)
+  status              String    @default("pending") @db.VarChar(12) // pending | approved | rejected | cancelled
+  approval_request_id Int?
+  requested_by        String    @db.VarChar(50)
+  requested_at        DateTime  @default(now())
+  decided_by          String?   @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?   @db.VarChar(500)
+  updated_at          DateTime  @default(now()) @updatedAt
+  employee            Employee  @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+
+  @@index([employee_id, work_date])
+  @@index([employee_id, off_date])
+  @@index([status])
+  @@map("hr_off_swaps")
+}
+
+/// A leave application. Approved → its days are written to hr_attendance.
+model HrLeaveRequest {
+  id                  Int            @id @default(autoincrement())
+  employee_id         Int
+  leave_type_id       Int
+  from_date           DateTime       @db.Date
+  to_date             DateTime       @db.Date
+  half_day            Boolean        @default(false) // only when from = to
+  days                Float // working days it takes (week-offs / holidays left out unless the type counts them)
+  reason              String?        @db.VarChar(500)
+  status              String         @default("pending") @db.VarChar(12) // pending | approved | rejected | cancelled
+  approval_request_id Int?
+  requested_by        String         @db.VarChar(50)
+  requested_at        DateTime       @default(now())
+  decided_by          String?        @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?        @db.VarChar(500)
+  updated_at          DateTime       @default(now()) @updatedAt
+  employee            Employee       @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  leaveType           HrLeaveType    @relation(fields: [leave_type_id], references: [id])
+  attendance          HrAttendance[]
+
+  @@index([employee_id, from_date])
+  @@index([status])
+  @@map("hr_leave_requests")
+}
+
+// ── HR · Salary & loans (prisma/sql/2026-11-01_hr_salary_loans.sql) ──────────
+
+/// Allowances and deductions that make up a salary (HR → Salary → Pay components).
+/// Statutory items (EOBI, income tax) and loan recoveries are worked out by payroll.
+model HrPayComponent {
+  id            Int            @id @default(autoincrement())
+  code          String         @unique @db.VarChar(20)
+  name          String         @db.VarChar(100)
+  kind          String         @db.VarChar(10) // EARNING | DEDUCTION
+  calc          String         @default("FIXED") @db.VarChar(15) // FIXED | PERCENT_BASIC
+  default_value Float          @default(0) // amount, or % of basic
+  prorate       Boolean        @default(true) // paid by days worked (paid days / days in month)
+  taxable       Boolean        @default(true) // earnings: part of taxable income
+  gl_acno       Int? // payroll JV account (blank = Finance → Account Settings default)
+  sort          Int            @default(0)
+  is_active     Boolean        @default(true)
+  created_at    DateTime       @default(now())
+  updated_at    DateTime       @default(now()) @updatedAt
+  lines         HrSalaryLine[]
+
+  @@map("hr_pay_components")
+}
+
+/// An employee's salary from a date. A revision is pending until approved;
+/// the latest ACTIVE one with effective_from ≤ a day is the salary that day.
+model HrSalaryStructure {
+  id                  Int            @id @default(autoincrement())
+  employee_id         Int
+  effective_from      DateTime       @db.Date
+  basic               Float
+  status              String         @default("active") @db.VarChar(12) // pending | active | rejected | cancelled
+  reason              String?        @db.VarChar(500)
+  approval_request_id Int?
+  created_by          String?        @db.VarChar(50)
+  created_at          DateTime       @default(now())
+  decided_by          String?        @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?        @db.VarChar(500)
+  employee            Employee       @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  lines               HrSalaryLine[]
+
+  @@index([employee_id, effective_from])
+  @@index([status])
+  @@map("hr_salary_structures")
+}
+
+model HrSalaryLine {
+  id           Int               @id @default(autoincrement())
+  structure_id Int
+  component_id Int
+  value        Float // amount, or % of basic (component.calc)
+  structure    HrSalaryStructure @relation(fields: [structure_id], references: [id], onDelete: Cascade)
+  component    HrPayComponent    @relation(fields: [component_id], references: [id])
+
+  @@unique([structure_id, component_id])
+  @@map("hr_salary_lines")
+}
+
+/// Salary advance or loan, recovered in monthly instalments by payroll.
+/// Outstanding = amount − recoveries. Due in a month = min(instalment,
+/// outstanding) from start_month on, except skipped months (lib/hr/loans/schedule.js).
+model HrLoan {
+  id                  Int              @id @default(autoincrement())
+  employee_id         Int
+  kind                String           @db.VarChar(10) // ADVANCE | LOAN
+  amount              Float
+  installment         Float // recovered each month
+  start_month         String           @db.VarChar(7) // YYYY-MM of the first recovery
+  skip_months         String[]         @default([]) // YYYY-MM months not recovered
+  reason              String?          @db.VarChar(500)
+  status              String           @default("pending") @db.VarChar(12) // pending | active | settled | rejected | cancelled
+  approval_request_id Int?
+  disbursed_on        DateTime?        @db.Date
+  disbursement_ref    String?          @db.VarChar(60) // cheque / transfer reference
+  disburse_tran_id    Int? // the Payment voucher that paid it out (lib/hr/vouchers.js)
+  disburse_acno       Int? // cash / bank account it was paid from
+  requested_by        String           @db.VarChar(50)
+  requested_at        DateTime         @default(now())
+  decided_by          String?          @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?          @db.VarChar(500)
+  updated_at          DateTime         @default(now()) @updatedAt
+  employee            Employee         @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  recoveries          HrLoanRecovery[]
+  events              HrLoanEvent[]
+
+  @@index([employee_id])
+  @@index([status])
+  @@map("hr_loans")
+}
+
+model HrLoanRecovery {
+  id         Int      @id @default(autoincrement())
+  loan_id    Int
+  date       DateTime @db.Date
+  month      String?  @db.VarChar(7) // payroll month it was deducted in
+  amount     Float
+  source     String   @db.VarChar(10) // PAYROLL | CASH
+  reference  String?  @db.VarChar(60)
+  payroll_id Int? // hr_payroll_runs.id when recovered by payroll
+  tran_id    Int? // CASH: the Receipt voucher (lib/hr/vouchers.js)
+  cash_acno  Int? // CASH: cash / bank account it was received into
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now())
+  loan       HrLoan   @relation(fields: [loan_id], references: [id], onDelete: Cascade)
+
+  @@index([loan_id])
+  @@map("hr_loan_recoveries")
+}
+
+/// What happened to a loan, for its timeline.
+model HrLoanEvent {
+  id         Int      @id @default(autoincrement())
+  loan_id    Int
+  action     String   @db.VarChar(30)
+  detail     String?  @db.VarChar(500)
+  created_by String?  @db.VarChar(50)
+  created_at DateTime @default(now())
+  loan       HrLoan   @relation(fields: [loan_id], references: [id], onDelete: Cascade)
+
+  @@index([loan_id])
+  @@map("hr_loan_events")
+}
+
+// ── HR · Payroll (prisma/sql/2026-11-02_hr_payroll.sql) ─────────────────────
+
+/// A month's payroll for a set of employees.
+/// DRAFT → (submit) PENDING → (approve) APPROVED → (post) POSTED → (reverse) REVERSED.
+model HrPayrollRun {
+  id                  Int                @id @default(autoincrement())
+  month               String             @db.VarChar(7) // YYYY-MM
+  title               String?            @db.VarChar(150)
+  pay_date            DateTime           @db.Date // date of the journal voucher
+  status              String             @default("DRAFT") @db.VarChar(10)
+  notes               String?            @db.VarChar(500)
+  employees           Int                @default(0)
+  total_earnings      Float              @default(0)
+  total_deductions    Float              @default(0)
+  total_net           Float              @default(0)
+  total_employer      Float              @default(0) // employer EOBI
+  approval_request_id Int?
+  jv_tran_id          Int?
+  jv_vr_no            Int?
+  reversal_tran_id    Int?
+  created_by          String?            @db.VarChar(50)
+  created_at          DateTime           @default(now())
+  computed_at         DateTime?
+  submitted_by        String?            @db.VarChar(50)
+  submitted_at        DateTime?
+  decided_by          String?            @db.VarChar(50)
+  decided_at          DateTime?
+  decision_note       String?            @db.VarChar(500)
+  posted_by           String?            @db.VarChar(50)
+  posted_at           DateTime?
+  reversed_by         String?            @db.VarChar(50)
+  reversed_at         DateTime?
+  reverse_reason      String?            @db.VarChar(500)
+  updated_at          DateTime           @default(now()) @updatedAt
+  payslips            HrPayslip[]
+  payments            HrPayrollPayment[]
+
+  @@index([month])
+  @@index([status])
+  @@map("hr_payroll_runs")
+}
+
+/// Net salaries of a posted payroll paid out: one Payment voucher each
+/// (Dr salaries payable, Cr cash / bank). Undone by a reversal journal, never
+/// deleted (prisma/sql/2026-11-04_hr_accounting.sql).
+model HrPayrollPayment {
+  id               Int          @id @default(autoincrement())
+  run_id           Int
+  date             DateTime     @db.Date
+  acno             Int // cash / bank account paid from
+  amount           Float
+  employees        Int[]        @default([]) // employees paid by it (empty = the rest of the run)
+  reference        String?      @db.VarChar(60) // cheque / bank transfer
+  tran_id          Int // the Payment voucher
+  reversal_tran_id Int?
+  reversed_by      String?      @db.VarChar(50)
+  reversed_at      DateTime?
+  reverse_reason   String?      @db.VarChar(500)
+  created_by       String?      @db.VarChar(50)
+  created_at       DateTime     @default(now())
+  run              HrPayrollRun @relation(fields: [run_id], references: [id], onDelete: Restrict)
+
+  @@index([run_id])
+  @@map("hr_payroll_payments")
+}
+
+/// One employee in a run: the full calculation (data) plus the figures the
+/// journal, reports and next months' tax read.
+model HrPayslip {
+  id               Int          @id @default(autoincrement())
+  run_id           Int
+  employee_id      Int
+  month            String       @db.VarChar(7)
+  data             Json // breakdown (lib/hr/payroll/compute.js)
+  adjustments      Json         @default("[]") // one-off earnings / deductions entered on the run
+  loan_overrides   Json         @default("{}") // { loanId: amount } instead of the instalment due
+  hold             Boolean      @default(false) // salary on hold (not in the bank sheet)
+  paid_days        Float        @default(0)
+  total_earnings   Float        @default(0)
+  total_deductions Float        @default(0)
+  net              Float        @default(0)
+  taxable          Float        @default(0)
+  income_tax       Float        @default(0)
+  eobi_employee    Float        @default(0)
+  eobi_employer    Float        @default(0)
+  warnings         String[]     @default([])
+  run              HrPayrollRun @relation(fields: [run_id], references: [id], onDelete: Cascade)
+  employee         Employee     @relation(fields: [employee_id], references: [id])
+
+  @@unique([run_id, employee_id])
+  @@index([employee_id, month])
+  @@map("hr_payslips")
+}
+
+/// Salaried income-tax slabs per fiscal year (July–June; fiscal_year = the year it starts).
+/// Tax = fixed_amount + rate_percent % of income above from_amount.
+model HrTaxSlab {
+  id           Int    @id @default(autoincrement())
+  fiscal_year  Int
+  from_amount  Float
+  to_amount    Float? // null = no upper limit
+  fixed_amount Float  @default(0)
+  rate_percent Float  @default(0)
+
+  @@index([fiscal_year])
+  @@map("hr_tax_slabs")
+}
