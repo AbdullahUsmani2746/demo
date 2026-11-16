@@ -311,6 +311,12 @@ export const BOMS = [
   [803, [[101, 48], [204, 22], [301, 24], [403, 3], [402, 3]]],
 ];
 
+// Semi-finished bases made on the production floor (Daily Production report).
+export const SF_BOMS = [
+  [901, [[102, 34], [301, 38], [306, 22], [401, 4], [402, 2]]],
+  [902, [[103, 30], [202, 34], [303, 30], [401, 6]]],
+];
+
 // ── People ────────────────────────────────────────────────────────────────
 const DEPARTMENTS = [
   [1, "MANAGEMENT"], [2, "ACCOUNTS & FINANCE"], [3, "SALES & MARKETING"], [4, "SUPPLY CHAIN"],
@@ -516,7 +522,7 @@ async function main() {
   await seedFixedAssetDefaults();
 
   step("BOMs");
-  for (const [finished_id, mats] of BOMS) {
+  for (const [finished_id, mats] of [...BOMS, ...SF_BOMS]) {
     const fg = ITEMS.find((i) => i[0] === finished_id);
     await prisma.bomMaster.create({
       data: {
@@ -643,7 +649,52 @@ async function main() {
     create: { id: "demo-admin", username: "admin", name: "Demo Admin", email: "admin@apex-demo.example", role: "ADMIN", isActive: true, password },
   });
 
+  await seedSetupLists();
   step("done");
+}
+
+// The small setup lists every Setup screen shows (banks, seasons, delivery terms, import
+// accounts, bond locations, managers …) — company data, made up for the demo.
+async function seedSetupLists() {
+  step("setup lists (banks, seasons, terms, import accounts, managers)");
+  const company_id = 1;
+  for (const [name, branches] of [
+    ["HABIB BANK LIMITED", [["SITE AREA KARACHI", "0412"], ["GULBERG LAHORE", "1187"]]],
+    ["MCB BANK LIMITED", [["I.I. CHUNDRIGAR ROAD", "0031"], ["KORANGI INDUSTRIAL AREA", "0745"]]],
+    ["MEEZAN BANK LIMITED", [["SHAHRAH-E-FAISAL", "0102"]]],
+  ]) {
+    const bank = await prisma.bank.create({ data: { name, company_id } });
+    for (const [bname, branch_code] of branches) await prisma.bank_branch.create({ data: { name: bname, branch_code, bank_id: bank.id } });
+  }
+  await prisma.branch.createMany({ data: [{ name: "HEAD OFFICE KARACHI" }, { name: "LAHORE SALES OFFICE" }, { name: "FACTORY - KORANGI" }] });
+  await prisma.season.createMany({
+    data: [
+      { date_from: new Date("2026-03-01"), date_to: new Date("2026-08-31"), status: "SUMMER 2026", company_id },
+      { date_from: new Date("2026-09-01"), date_to: new Date("2027-02-28"), status: "WINTER 2026-27", company_id },
+    ],
+  });
+  await prisma.deliveryMode.createMany({ data: [["OWN VEHICLE", 0], ["TRANSPORTER - LOCAL", 4], ["TRANSPORTER - UPCOUNTRY", 9], ["COURIER", 35]].map(([delivery_mode, rate_kg]) => ({ delivery_mode, rate_kg, company_id })) });
+  await prisma.deliveryTerm.createMany({ data: ["EX-FACTORY", "DELIVERED CUSTOMER SITE", "FREIGHT PAID TO TERMINAL"].map((delivery_term) => ({ delivery_term, company_id })) });
+  await prisma.commissionTerm.createMany({ data: ["1% ON RECOVERY", "2% ON SALES ABOVE TARGET", "FIXED PER KG"].map((commission_term) => ({ commission_term, company_id })) });
+  await prisma.poPrdCat.createMany({ data: ["RAW MATERIAL - LOCAL", "RAW MATERIAL - IMPORTED", "PACKING MATERIAL", "STORES & SPARES"].map((category_name) => ({ category_name, company_id })) });
+  const pmcs = [["PRINTING INKS", ["FLEXO INKS", "GRAVURE INKS"]], ["COATINGS", ["INDUSTRIAL COATINGS"]], ["PAINTS", ["DECORATIVE PAINTS"]]];
+  for (const [pmc_name, groups] of pmcs) {
+    const pmc = await prisma.productMasterCategory.create({ data: { pmc_name } });
+    await prisma.productGroup.createMany({ data: groups.map((pg_name) => ({ pg_name, pmc_id: pmc.id })) });
+  }
+  await prisma.employement_type.createMany({ data: [{ name: "PERMANENT" }, { name: "CONTRACT" }, { name: "PROBATION" }, { name: "DAILY WAGES" }] });
+  await prisma.employement_catagory.createMany({ data: [{ name: "MANAGEMENT" }, { name: "STAFF" }, { name: "WORKER" }] });
+  // Department heads (Setup → Managers)
+  const users = await prisma.user.findMany({ where: { username: { in: ["gm", "accounts.manager", "sales.manager", "purchase.manager", "store.manager", "production.manager", "hr.manager"] } }, select: { name: true, employeeId: true, employee: { select: { departmentId: true } } } });
+  for (const u of users) {
+    if (u.employeeId && u.employee?.departmentId) await prisma.manager.create({ data: { manager: u.name, department_id: u.employee.departmentId, company_id, employeeId: u.employeeId } });
+  }
+  // Imports: LC accounts and foreign suppliers (beneficiaries) get their own main accounts
+  // (Account Settings → LC / Import accounts, Beneficiaries), and the bonded warehouse.
+  await prisma.mACNO.createMany({ data: [{ macno: 106, bscd: 11, macname: "LC MARGIN & IMPORTS IN TRANSIT" }, { macno: 205, bscd: 21, macname: "FOREIGN SUPPLIERS" }] });
+  await prisma.accountSetting.updateMany({ where: { key: "lc_accounts" }, data: { macnos: [106], updated_by: "demo seed" } });
+  await prisma.accountSetting.updateMany({ where: { key: "beneficiaries" }, data: { macnos: [205], updated_by: "demo seed" } });
+  await prisma.bondLocation.createMany({ data: [{ location: "KARACHI PORT - QICT BOND", address: "Qasim International Container Terminal, Port Qasim", company_id }, { location: "KICT BONDED WAREHOUSE", address: "West Wharf, Karachi", company_id }] });
 }
 
 // Settings → Fixed assets, per category (lib/fixedAssets). Re-runnable.

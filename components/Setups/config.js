@@ -1791,6 +1791,17 @@ const entityConfig = {
         sortable: true,
         uppercase: true
       },
+      // The server requires a main account from Account Settings → "LC / Import
+      // Accounts" (requireLcMacno); without this field every save was refused.
+      {
+        name: "macno",
+        label: "Main Account",
+        fieldType: "select",
+        fetchFrom: "/api/accounts/macno?group=lc_accounts",
+        optionLabelKey: "macname",
+        optionValueKey: "macno",
+        required: true,
+      },
     ],
     allowDelete: false
   },

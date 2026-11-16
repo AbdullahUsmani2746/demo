@@ -14,11 +14,12 @@
 // (backdateProcessOrder) — demo database only.
 // ============================================================
 import { PrismaClient } from "@prisma/client";
-import { AC, CUSTOMERS, VENDORS, TRANSPORTERS, ITEMS, BOMS, categoryOf, DEMO_PASSWORD } from "./seed-masters.mjs";
+import { AC, CUSTOMERS, VENDORS, TRANSPORTERS, ITEMS, BOMS, SF_BOMS, categoryOf, DEMO_PASSWORD } from "./seed-masters.mjs";
 import { seedFixedAssetDocuments } from "./fixedAssetDocuments.mjs";
 import { seedPosDocuments } from "./posDocuments.mjs";
 import { hrDocuments } from "./hrDocuments.mjs";
 import { applyDemoFeatures } from "./demoFeatures.mjs";
+import { moreDocuments } from "./moreDocuments.mjs";
 
 if (!(process.env.DEMO_DATABASE === "1" || process.env.DATABASE_URL?.includes("bizlogist_demo"))) {
   console.error("Refusing: DATABASE_URL is not the demo database.");
@@ -115,7 +116,7 @@ const get = (u, p) => call(u, "GET", p);
 
 // A voucher form sends its type (tran_code) and the next voucher no (/api/voucher/next-vr-no);
 // the save route keeps both as sent. GRN / dispatch numbers come from the DB trigger.
-const TRAN = { receipt: 1, payment: 2, journal: 3, grn: 4, dispatch: 6, dispatchReturn: 10, transfer: 11 };
+const TRAN = { receipt: 1, payment: 2, journal: 3, grn: 4, dispatch: 6, materialIssueLanded: 7, materialIssue: 7, grnReturn: 9, dispatchReturn: 10, transfer: 11 };
 async function voucher(u, type, body) {
   const tran_code = TRAN[type];
   const { nextVrNo } = await get(u, `/api/voucher/next-vr-no?tran_code=${tran_code}`);
@@ -127,7 +128,7 @@ const itemOf = new Map(ITEMS.map(([itcd, code, name, group, unit, price, ltr]) =
 const FG = [...itemOf.values()].filter((i) => i.ic === 1);
 const RM = [...itemOf.values()].filter((i) => i.ic === 3);
 const PM = [...itemOf.values()].filter((i) => i.ic === 4);
-const bomOf = new Map(BOMS.map(([fg, mats]) => [fg, mats]));
+const bomOf = new Map([...BOMS, ...SF_BOMS].map(([fg, mats]) => [fg, mats]));
 // Decorative paints are tinted / filled to order: produced on dispatch from their BOM (SMS feature).
 const PRODUCE_ON_DISPATCH = new Set([801, 802, 803]);
 // Who buys what
@@ -193,8 +194,11 @@ async function grn(d, vendor, rows, { opening = false } = {}) {
   let po_no = null;
   const rates = new Map(rows.map(([it]) => [it.itcd, r2(it.price * between(0.96, 1.05))]));
   if (!opening) {
+    // Some purchases start as a store requisition, approved by the store manager.
+    const poDate = addDays(d, -int(3, 8));
+    const req_no = chance(0.4) ? await more.purchaseRequisition(iso(addDays(poDate, -3)), iso(addDays(poDate, -2)), rows, godown) : null;
     const po = await post("purchase", "/api/orders/purchaseOrder", {
-      master: { party_code: { value: vendor, label: String(vendor) }, godown, dated: iso(addDays(d, -int(3, 8))), payment_terms: "30 DAYS" },
+      master: { party_code: { value: vendor, label: String(vendor) }, godown, dated: iso(poDate), payment_terms: "30 DAYS", ...(req_no ? { req_no } : {}) },
       lines: rows.map(([it, qty]) => ({ itcd: it.itcd, qty, rate: rates.get(it.itcd), amount: r2(qty * rates.get(it.itcd)), st_rate: 18, unit: it.unit })),
     });
     po_no = po.order_no;
@@ -256,12 +260,14 @@ async function saleOrder(d) {
     const rate = r2(fg.price * between(0.95, 1.08));
     lines.push({ itcd: fg.itcd, qty, rate, amount: r2(qty * rate), st_rate: 18, unit: "KG", left: qty });
   }
+  const planToday = chance(0.3);
   const res = await post(region === "NORTH" ? "sales.north" : "sales", "/api/orders/saleOrder", {
     master: {
       party_code: { value: party, label: String(party) }, godown: 3, dated: iso(d), region,
       delivery_terms: "EX-FACTORY", payment_terms: "CREDIT", due_date: iso(addDays(d, int(3, 10))),
     },
-    lines: lines.map(({ left, ...l }) => l),
+    // Some orders ask production to plan the first line the same day (Sale Order production plan).
+    lines: lines.map(({ left, ...l }, i) => (i === 0 && planToday ? { ...l, plan_pending: true, plan_date: iso(d), plan_qty: l.qty } : l)),
   });
   openSO.push({ order_no: res.order_no, party, date: d, lines });
 }
@@ -288,6 +294,7 @@ async function produce(d) {
         material_desc: itemOf.get(m).name, output_line: 1, godown: 1, unit: "KG",
       })),
     });
+    await more.qcProcessOrder(plan.id, fg.itcd, iso(d), { retest: chance(0.1) });
     const yieldQty = r2(qty * between(0.975, 0.995));
     await post("production.manager", "/api/manufacturing/production/send-to-production", { productionPlanId: plan.id, actualYield: yieldQty });
     await backdateProcessOrder(plan.id, d);
@@ -329,8 +336,10 @@ async function dispatchOrders(d) {
     for (const l of so.lines) {
       if (l.left <= 0) continue;
       const fg = itemOf.get(l.itcd);
-      const pack = fg.group === 8 ? 504 : 502;
-      const perPack = fg.group === 8 ? 18 : 20;
+      // Bulk printing ink goes in returnable MS drums (Drum Loan Ledger); the rest in tins / pails.
+      const drum = fg.group === 6 && l.left >= 360 && chance(0.4);
+      const pack = drum ? 501 : fg.group === 8 ? 504 : 502;
+      const perPack = drum ? 180 : fg.group === 8 ? 18 : 20;
       if (PRODUCE_ON_DISPATCH.has(l.itcd)) {
         const mats = bomOf.get(l.itcd).map(([m, pct]) => ({ itcd: m, qty: r2((l.left * pct) / 100), godown: 1 }));
         if (mats.some((m) => st(1, m.itcd) < m.qty)) continue;
@@ -356,7 +365,7 @@ async function dispatchOrders(d) {
         const usePack = st(3, pack) >= packs;
         return {
           itcd: l.itcd, qty, so_qty: l.qty, unit: "KG", godown: 3, batch_no: `B${batchNo}`,
-          ...(usePack ? { packing_material_code: pack, no_of_pack: packs, qty_per_pack: perPack } : {}),
+          ...(usePack ? { packing_material_code: pack, no_of_pack: packs, qty_per_pack: perPack, ...(pack === 501 ? { returnable: true } : {}) } : {}),
           ...(materials ? { materials } : {}),
         };
       }),
@@ -444,9 +453,12 @@ async function vendorPayments(d) {
     inv.paid += pay;
   }
   for (const [party, amount] of byParty) {
+    // Income tax withheld on supplies (feature tax.lineWht): the bank pays the net.
+    const wht = whtLaw && chance(0.35) ? { tax_law_code: whtLaw, narration5: "WHT 153(1)(a)" } : {};
     await voucher("accountant", "payment", {
       master: { dated: iso(d), pycd: pick([AC.bankHbl, AC.bankMcb]), rmk: "Payment to supplier" },
-      lines: [{ acno: party, damt: r2(amount), narration1: `Cheque ${int(100000, 999999)}`, chno: String(int(100000, 999999)) }],
+      lines: [{ acno: party, damt: r2(amount), narration1: `Cheque ${int(100000, 999999)}`, chno: String(int(100000, 999999)), ...wht }],
+      deductions: [],
     });
   }
 }
@@ -501,9 +513,143 @@ async function dispatchReturns() {
   }
 }
 
+let more = null;  // moreDocuments.mjs — QC, requisitions, imports, services, finance, costing
+let whtLaw = null; // tax law for withholding on supplier payments
+
+// A process order that is planned but not sent (QC exceptions) or produced on the floor (FG transfer).
+async function processOrder(itcd, d, { godown = 3, send = false } = {}) {
+  const fg = itemOf.get(itcd);
+  const qty = 400;
+  const mats = bomOf.get(itcd).map(([m, pct]) => [m, r2((qty * pct) / 100)]);
+  if (send && mats.some(([m, q]) => st(1, m) < q)) return {};
+  const bom = await prisma.bomMaster.findFirst({ where: { finished_id: itcd }, select: { id: true } });
+  const batch = `B${++batchNo}`;
+  const plan = await post("production", "/api/manufacturing/production", {
+    type: "new", dated: iso(d), bom_id: bom.id,
+    outputs: [{ line_no: 1, finished_id: itcd, qty, godown, batch_no: batch, bom_id: bom.id, unit: "KG" }],
+    productionPlanDetail: mats.map(([m, q], i) => ({
+      sno: i + 1, material_id: m, material_qty: q, material_percentage: bomOf.get(itcd)[i][1],
+      material_desc: itemOf.get(m).name, output_line: 1, godown: 1, unit: "KG",
+    })),
+  });
+  if (send) {
+    if (fg.ic === 1) await more.qcProcessOrder(plan.id, itcd, iso(d)); // QC is for finished goods
+
+    const yieldQty = r2(qty * 0.985);
+    await post("production.manager", "/api/manufacturing/production/send-to-production", { productionPlanId: plan.id, actualYield: yieldQty });
+    await backdateProcessOrder(plan.id, d);
+    for (const [m, q] of mats) move(1, m, -q);
+    move(godown, itcd, yieldQty);
+    return { planId: plan.id, date: iso(d), qty: yieldQty, fg };
+  }
+  return { planId: plan.id, date: iso(d) };
+}
+
+// Ink made on the production floor, sent to the FG store by an FG transfer requisition.
+async function fgTransfers() {
+  let n = 0;
+  for (const [itcd, day, accept] of [[605, "2026-11-10", true], [602, "2026-11-11", true], [601, "2026-11-12", false]]) {
+    const made = await processOrder(itcd, new Date(`${day}T00:00:00Z`), { godown: 2, send: true });
+    if (!made.planId) continue;
+    const qty = Math.floor(made.qty);
+    const r = await post("production", "/api/material/requisition", {
+      master: { req_catagory: { value: "FG_TRANSFER" }, dated: day, issued_by: { value: 2 }, issued_for: { value: 3 } },
+      lines: [{ itcd, qty, remarks: `Process order #${made.planId}` }],
+    });
+    const tran_id = r.tran_no ?? r.tran_id ?? r.data?.tran_id;
+    if (accept && tran_id) {
+      await call("storekeeper", "PATCH", "/api/manufacturing/fg-transfer", { tran_id, action: "accept" });
+      move(2, itcd, -qty); move(3, itcd, qty);
+    }
+    n++;
+  }
+  console.log(`  FG transfer requisitions: ${n} (one awaiting acceptance)`);
+}
+
+// Semi-finished bases made on the production floor (Daily Production report).
+async function semiFinished() {
+  let n = 0;
+  for (const [itcd, day] of [[901, "2026-10-08"], [902, "2026-10-15"], [901, "2026-10-27"], [902, "2026-11-05"], [901, "2026-11-11"]]) {
+    const made = await processOrder(itcd, new Date(`${day}T00:00:00Z`), { godown: 2, send: true });
+    if (made.planId) n++;
+  }
+  console.log(`  semi-finished process orders: ${n}`);
+}
+
+// Consumables bought and issued to cleaning / the lab (Direct Material Issuance Cost):
+// Material Consumption, "Production #" = CLEANING / LAB QC as the store writes it.
+async function directIssues() {
+  await grn(new Date("2026-10-05T00:00:00Z"), 3007, [[itemOf.get(1101), 120], [itemOf.get(1102), 600]]);
+  for (const [day, rmk5, rmk1, lines] of [
+    ["2026-10-12", "CLEANING", "STORES-CONSUMED", [[1102, 180], [1101, 20]]],
+    ["2026-10-20", "LAB QC", "LAB TESTING", [[301, 5], [303, 2], [1102, 15]]],
+    ["2026-10-29", "CLEANING", "STORES-CONSUMED", [[1102, 160], [1101, 25]]],
+    ["2026-11-06", "LAB QC", "LAB TESTING", [[304, 2], [305, 2]]],
+  ]) {
+    const ok = lines.filter(([it, q]) => st(1, it) >= q);
+    if (!ok.length) continue;
+    await voucher("store.manager", "materialIssue", {
+      master: { dated: day, godown: 1, rmk5, rmk1, rmk2: rmk5 === "CLEANING" ? "Mill and tank wash-down" : "Lab trials and QC samples" },
+      lines: ok.map(([itcd, qty]) => ({ itcd, qty, unit: itemOf.get(itcd).unit, godown: 1 })),
+    });
+    for (const [it, q] of ok) move(1, it, -q);
+  }
+}
+
+// Sales forecast for the next quarter (Sales Forecast screen), from each customer's Sep–Nov dispatches.
+async function salesForecast() {
+  const since = new Date("2026-09-01T00:00:00Z");
+  const base = new Map();
+  for (const x of dispatched) if (x.date >= since) for (const l of x.lines) base.set(`${x.party}:${l.itcd}`, (base.get(`${x.party}:${l.itcd}`) || 0) + l.qty);
+  const records = [];
+  for (const [key, qty] of base) {
+    const [customer, itcd] = key.split(":").map(Number);
+    ["Dec 2026", "Jan 2027", "Feb 2027"].forEach((month, i) => records.push({ month, customer, itcd, qty: round((qty / 2.5) * (1 + 0.04 * i) * between(0.9, 1.1), 25) }));
+  }
+  if (records.length) await post("sales.manager", "/api/reports/forecast", { records });
+  console.log(`  sales forecast: ${records.length} rows`);
+}
+
+// Clearing material sent out against an LC — its cost goes to the LC account (landed cost).
+async function issueLanded(lcAcno) {
+  const it = itemOf.get(306);
+  const qty = Math.min(400, Math.floor(st(1, 306)));
+  if (qty <= 0) return;
+  await voucher("store.manager", "materialIssueLanded", {
+    master: { dated: "2026-09-24", godown: 1, pycd: lcAcno, rmk1: "Yes", rmk: "Filler sent with the TiO2 consignment for clearing / blending" },
+    lines: [{ itcd: it.itcd, qty, rate: it.price, total: r2(qty * it.price) }],
+  });
+  move(1, 306, -qty);
+}
+
+// A few raw-material receipts go back to the supplier (quantity-only GRN return, priced in Purchase Return Invoicing).
+async function grnReturns() {
+  const picks = grnsToInvoice.filter((g) => g.invoiced && g.date > START).filter((_, i) => i % 17 === 5).slice(0, 4);
+  for (const g of picks) {
+    const m = await prisma.transactionsMaster.findUnique({ where: { tran_id: g.tran_id }, select: { grn_no: true, godown: true } });
+    const line = await prisma.transactions.findFirst({ where: { tran_id: g.tran_id, sub_tran_id: 1, itcd: { not: null } }, select: { itcd: true, qty: true } });
+    const qty = round(Math.max(10, Number(line.qty) * between(0.03, 0.08)), 5);
+    if (st(m.godown, line.itcd) < qty) continue;
+    const d = addDays(g.date, int(3, 9));
+    if (d >= END) continue;
+    const res = await voucher("storekeeper", "grnReturn", {
+      master: { dated: iso(d), pycd: g.vendor, grn_no: m.grn_no, godown: m.godown, rmk: pick(["Failed QC - off specification", "Damaged bags", "Excess supplied"]) },
+      lines: [{ itcd: line.itcd, qty, unit: itemOf.get(line.itcd).unit, godown: m.godown }],
+    });
+    move(m.godown, line.itcd, -qty);
+    const lines = await prisma.transactions.findMany({ where: { tran_id: res.voucherId, sub_tran_id: 1 }, select: { id: true, itcd: true } });
+    await post("accounts.officer", "/api/invoicing/purchase-return/generate", {
+      invoices: [{ tran_id: res.voucherId, lines: lines.map((t) => ({ line_id: t.id, rate: g.rates.get(t.itcd) ?? itemOf.get(t.itcd).price, st_rate: 18 })) }],
+    });
+  }
+}
+
 async function main() {
   console.log(`Posting demo documents to ${BASE} …`);
   await applyDemoFeatures(call);
+  more = moreDocuments({ call, prisma, rand });
+  whtLaw = (await prisma.taxLaws.findFirst({ where: { section_description: { startsWith: "153(1)(a)" } }, select: { tax_law_code: true } }))?.tax_law_code ?? null;
+  await more.setup();
   const hr = hrDocuments({ call, prisma });
   await hr.setup();
   let hrMonth = iso(START).slice(0, 7);
@@ -534,9 +680,29 @@ async function main() {
     if (dom === 1 || d.getUTCDay() === 6) console.log(`  ${iso(d)}  ok ${stats.ok}  fallback ${stats.fallback}  warnings ${stats.warnings}`);
   }
   await dispatchReturns();
+  await grnReturns();
+  await more.labNature();
+  await more.imports({ issueLanded });
+  await more.services([
+    { order: "2026-08-03", entry: "2026-08-07", invoice: "2026-08-12" },
+    { order: "2026-09-21", entry: "2026-09-24", invoice: "2026-09-30" },
+    { order: "2026-10-13", entry: "2026-10-16", invoice: "2026-10-22" },
+    { order: "2026-11-09", entry: "2026-11-11", invoice: "2026-11-12" },
+  ]);
+  await more.finance();
+  await more.qcExceptions((itcd) => processOrder(itcd, new Date("2026-11-13T00:00:00Z")));
+  await fgTransfers();
+  await more.receiptQc();
+  await semiFinished();
+  await directIssues();
+  await salesForecast();
+  for (const [day, it] of [["2026-11-12", 105], ["2026-11-13", 304]]) await more.purchaseRequisition(day, null, [[itemOf.get(it), 500]], 1);
+  await more.transferRequisitions([[505, 300], [506, 2000]], [[503, 120]]);
   await seedFixedAssetDocuments({ call });
   await seedPosDocuments({ call });
   await hr.finish();
+  await more.pendingAndLoans(await prisma.employee.findMany({ select: { id: true, firstName: true, surname: true } }));
+  await more.closeMonths();
   await applyDemoFeatures(call);
   await printCounts();
   console.log(`Done: ${stats.ok} calls ok, ${stats.fallback} entered by admin (role lacked the right), ${stats.warnings} with warnings.`);
@@ -555,6 +721,14 @@ async function printCounts() {
     "payroll runs": await prisma.hrPayrollRun.count(), payslips: await prisma.hrPayslip.count(), "leave requests": await prisma.hrLeaveRequest.count(),
     "attendance rows": await prisma.hrAttendance.count(), loans: await prisma.hrLoan.count(), settlements: await prisma.hrSettlement.count(),
   });
+  console.table({
+    "QC records": await prisma.qualityMaster.count(), "item standards": await prisma.item_Quality.count(), requisitions: await prisma.reqMaster.count(),
+    "LCs": await prisma.lCMaster.count(), "in-bond": await prisma.inboundMaster.count(), "machines": await prisma.mACHINE_INSTRUCTION_MASTER.count(),
+    "cheques in hand": await prisma.checksInHand.count(), "sales loans": await prisma.salesLoan.count(), "costing periods": await prisma.costingPeriod.count(),
+    "opening rates": await prisma.monthlyOpeningRate.count(), "production cost entries": await prisma.productionCostEntry.count(),
+    "dashboard assignments": await prisma.biDashboardAssignment.count(), "POS receipts": await prisma.posReceipt.count(),
+  });
+  if (more) console.table(more.counts);
 }
 
 const monthsPaid = new Set();

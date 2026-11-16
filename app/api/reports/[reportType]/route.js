@@ -441,7 +441,7 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
 export async function getDirectMaterialIssuanceCostReport(filters = {}) {
   const m = parseInt(filters.month) || (new Date().getMonth() + 1);
   const y = parseInt(filters.year) || new Date().getFullYear();
-  const dateFrom = new Date(y, m, 1, 0, 0, 0, 0);
+  const dateFrom = new Date(y, m - 1, 1, 0, 0, 0, 0); // first day of the chosen month (was the next month's: an empty, reversed range)
   const dateTo = new Date(y, m, 0, 23, 59, 59, 999); // last day of month (for rate sub-report)
   console.log("m: ", m)
   console.log("y:", y)
@@ -9126,9 +9126,12 @@ async function getMaterialIssuanceReport(filters) {
       }
 
       // Get production plan details if process order exists
-      if (t.rmk5) {
+      // rmk5 is a process order id only when numeric — a direct issue carries
+      // "CLEANING" / "LAB QC" there (Direct Material Issuance Cost), which made
+      // parseInt NaN and the whole report fail.
+      if (/^\d+$/.test(String(t.rmk5 ?? "").trim())) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
-          where: { id: parseInt(t.rmk5) },
+          where: { id: parseInt(t.rmk5, 10) },
         });
       }
 
@@ -14364,11 +14367,14 @@ async function getDailyProductionReport(filters) {
     where.finished_id = Number(filters.item);
   }
 
+  // Semi-finished production (was a fixed ic_id 2): the categories come from
+  // Settings → Production setup, so a company whose ids differ still gets rows.
+  const prodSetup = await getProductionSetup();
   const plans = await prisma.productionPlanMaster.findMany({
     where: {
       ...where,
       item: {
-        ic_id: 2,
+        ic_id: { in: prodSetup.semiFinishedCategoryIds },
       },
     },
     include: {

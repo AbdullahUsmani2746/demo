@@ -557,7 +557,7 @@ async function issueGodownScopeError(session, issueGodowns) {
 function normalizeMaster(master, tran_code) {
   const now = new Date();
 
-  if ([1, 2, 3, 4, 6, 9, 10, 7, 8, 20, 21].includes(tran_code)) {
+  if ([1, 2, 3, 4, 6, 9, 10, 7, 8, 19, 20, 21].includes(tran_code)) {
     master.dated = master.dated ? new Date(master.dated) : now;
     master.time = master.dated;
     // A Service Invoice's check_date is the vendor's ST invoice date: blank
@@ -1334,14 +1334,16 @@ export const POST = guardBy(
       tranCode: tran_code,
       label: VOUCHER_CONFIG[type]?.label || type,
       userId: ctx.session?.user?.id ?? null,
-      save: () => createVoucher(req, ctx),
+      // The body is already parsed: hand it over rather than reading the request a
+      // second time (a re-read after clone() fails intermittently: "Body is unusable").
+      save: () => createVoucher(req, { ...ctx, parsedBody: body }),
     });
   },
 );
 
 // actingSession: set only when an approved request is posted — the document is
 // then saved as its requester (runApprovedRequest, lib/approvals/rules.js).
-async function createVoucher(req, { params, actingSession = null }) {
+async function createVoucher(req, { params, actingSession = null, parsedBody = null }) {
   try {
     const { type } = await params;
     const tran_code = VOUCHER_CONFIG[type]?.tran_code;
@@ -1354,7 +1356,7 @@ async function createVoucher(req, { params, actingSession = null }) {
       return NextResponse.json({ message: "Invalid voucher type" }, { status: 400 });
     }
 
-    const body = await req.json();
+    const body = parsedBody ?? await req.json();
     const validationError = validateBody(body);
     if (validationError) {
       return NextResponse.json({ message: validationError }, { status: 400 });
@@ -1840,11 +1842,11 @@ export const PUT = guardBy(
       });
       if (held) return held;
     }
-    return updateVoucher(req, ctx);
+    return updateVoucher(req, { ...ctx, parsedBody: body }); // read the body once (see POST)
   },
 );
 
-async function updateVoucher(req, { params, actingSession = null }) {
+async function updateVoucher(req, { params, actingSession = null, parsedBody = null }) {
   try {
     const { type } = await params;
     const tran_code = VOUCHER_CONFIG[type]?.tran_code;
@@ -1858,7 +1860,7 @@ async function updateVoucher(req, { params, actingSession = null }) {
     // Parse body early so we can read dated for period-lock check. Both the
     // stored date and the new one are checked, so a voucher in a locked month
     // cannot be edited out of it by changing its date.
-    const putBody = await req.json();
+    const putBody = parsedBody ?? await req.json();
     const putTranId = Number(putBody?.master?.tran_id);
     const storedVoucher = putTranId
       ? await prisma.transactionsMaster.findUnique({

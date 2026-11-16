@@ -21,6 +21,11 @@ export const DEMO_FEATURES = {
   "documents.batchReuseWarning": true,
   "saleOrder.focTrialWarning": true,
   "dispatch.fulfilmentPanel": true,
+  // sale order → production plan made from the order line, the Lab's Nature on it
+  "saleOrder.planFromOrder": true,
+  "production.labNature": true,
+  // withholding tax deducted per payment line (Finance → Withholding Tax report)
+  "tax.lineWht": true,
   // accounting / costing
   "vouchers.subAccounts": true,
   "knockoff.matchReturns": true,

@@ -12394,7 +12394,7 @@ export const VOUCHER_CONFIG = {
 
 
   letterOfCredit: {
-    buttonText: "Letter Of Credit",
+    buttonText: "Create Letter Of Credit",
     label: "Letter Of Credit",
     ModalHeading: "Letter Of Credit",
     ModalHeadingEdit: "Edit Letter Of Credit",
@@ -12822,7 +12822,7 @@ export const VOUCHER_CONFIG = {
   },
 
   inBond: {
-    buttonText: "In-Bond Entry",
+    buttonText: "Create In-Bond Entry",
     label: "In-Bond Entry",
     ModalHeading: "In-Bond Entry",
     ModalHeadingEdit: "Edit In-Bond Entry",
