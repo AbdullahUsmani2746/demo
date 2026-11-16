@@ -82,6 +82,13 @@ const SPECIAL = [
   ["costing.reconcile", "Stock & Costing", "View the Stock ↔ GL reconciliation and the item cost trace (read-only)"],
   ["qualityControl.manage", "Manufacturing", "Record or amend QC results"],
   ["pos.manage", "Sales", "Operate the point of sale (orders, products, returns)"],
+  // Point of sale (lib/pos/*): finer rights than pos.manage (which keeps products / categories).
+  ["pos.sell", "Sales", "Sell at the point of sale (ring up, take payment, hold / recall bills)"],
+  ["pos.refund", "Sales", "Refund a point-of-sale receipt (POS return)"],
+  ["pos.discount", "Sales", "Give discounts at the point of sale (up to the maximum in Settings → Point of Sale)"],
+  ["pos.credit", "Sales", "Sell on credit to a customer account at the point of sale"],
+  ["pos.dayClose", "Sales", "Open and close POS shifts (Z report)"],
+  ["pos.allShifts", "Sales", "See and close every cashier's POS shift and receipts"],
   ["notification.manage", "Administration", "Change notification settings or mark notifications read"],
   ["employee.manage", "Administration", "Create or edit employee records"],
   ["fixedAsset.manage", "Fixed Assets", "Maintain fixed-asset records"],
@@ -256,7 +263,7 @@ function reportCategory(reportType) {
   const categories = {
     stock: ["stock", "stockActivity", "stockActivityView", "stockLedger", "stockMetrics", "tradingMargin", "monthlyStock", "monthlyStockValuation", "stockActivityWithRate", "stockWithCost", "fgstock", "fgdailystock"],
     production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "orderQc", "qcParameters", "batchCosting", "batchBalance", "batchLedger", "processOrderReconciliation", "processOrderTiming", "pendingReport", "productionPlanning", "costOfGoodsManufactured", "masterSample", "rmc", "dailyProduction", "monthWiseRMMovingAverage", "rmCosting"],
-    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "dispatch", "dispatchReturn", "dailyDispatch", "salesOrderBalance", "salesTeamMis", "customerMargin", "costOfSales", "customerFile", "ilfile", "pcfile", "prfile"],
+    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "posDailySales", "posSalesByItem", "posSalesByPayment", "posSalesByCashier", "posReturns", "customerAging", "salesPerformanceWeekly", "dispatch", "dispatchReturn", "dailyDispatch", "salesOrderBalance", "salesTeamMis", "customerMargin", "costOfSales", "customerFile", "ilfile", "pcfile", "prfile"],
     purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn", "grnReturn", "purchaseOrderBalance", "materialprocurement", "materialprocurementenquiry", "importedMaterialStock", "importedMaterialinTransit", "importedMaterialDeals", "costOfGoodsSold", "exbondReport", "purchasingfile"],
     financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "trialBalancePeriod", "trialBalanceSheet", "profitLoss", "accountsActivity", "payment", "receipt", "journal", "cbBook", "fundsFlow", "fundsPosition", "checksInHand", "profitLossMonthly", "withHoldingTax", "digitalInvoice"],
     service: ["serviceOrder", "serviceEntry", "serviceInvoice"],

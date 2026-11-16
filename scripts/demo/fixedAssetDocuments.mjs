@@ -2,11 +2,9 @@
 // documents (called from scripts/demo/seed-documents.mjs; can also be run on
 // an existing demo database with a `call(username, method, path, body)`).
 // Everything goes through the app's own API:
-//   Settings → Features: the four fixed-asset switches on (the demo company uses them)
 //   Fixed Assets GRNs June – August 2026 (registered + capitalisation journals)
 //   depreciation runs June – October, one relocation, one disposal (a sale at a loss)
 // Items / categories are found by code / name (masters: seed-masters.mjs).
-const wait = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 export const FA_DEMO_GRNS = [
   // [date, item code, qty, unit cost, department id, employee id, make]
@@ -23,14 +21,7 @@ export async function seedFixedAssetDocuments({ call, log = console.log }) {
   const get = (u, p) => call(u, "GET", p);
   const post = (u, p, b) => call(u, "POST", p, b);
 
-  await call("admin", "PUT", "/api/settings/features", {
-    values: {
-      "fixedAssets.autoRegisterFromGrn": true, "fixedAssets.depreciation": true,
-      "fixedAssets.disposalPosting": true, "fixedAssets.relocation": true,
-    },
-  });
-  await wait(11000); // each route caches the features 10 s
-
+  // The fixed-asset switches are on from the start (demoFeatures.mjs, applied by seed-documents.mjs).
   const items = (await get("admin", "/api/setup/fixed_asset_items?limit=500")).data || [];
   const itemByCode = new Map(items.map((i) => [i.code, i]));
   const vendors = (await get("admin", "/api/accounts/acno?group=fixed_asset_vendors,vendors")).data || [];
@@ -39,7 +30,7 @@ export async function seedFixedAssetDocuments({ call, log = console.log }) {
   for (const [date, code, qty, rate, dept, emp, make] of FA_DEMO_GRNS) {
     const item = itemByCode.get(code);
     if (!item) throw new Error(`Fixed asset item ${code} is missing — run seed-masters.mjs`);
-    const res = await post("storekeeper", "/api/voucher/fixedAssetsGrn", {
+    const res = await post("store.manager", "/api/voucher/fixedAssetsGrn", {
       master: { tran_code: 14, dated: date, pycd: vendor.acno, rmk3: `INV-${code}-${date.slice(5, 7)}`, rmk4: String(dept), rmk5: String(emp), rmk: "Fixed asset purchase" },
       lines: [{ itcd: item.itcd, qty, rate, narration2: make, narration4: "YEARS" }],
     });

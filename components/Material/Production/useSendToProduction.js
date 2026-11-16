@@ -35,9 +35,11 @@ export const useSendToProduction = () => {
       setIsSending(false);
       return { success: true, data };
     } catch (err) {
-      setError(err.message);
+      // The route's own reason (QC gate, period lock, stock …), not axios' "status code 422".
+      const message = err.response?.data?.error || err.response?.data?.message || err.message;
+      setError(message);
       setIsSending(false);
-      return { success: false, error: err.message };
+      return { success: false, error: message };
     }
   };
 

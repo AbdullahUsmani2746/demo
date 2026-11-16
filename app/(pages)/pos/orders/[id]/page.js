@@ -1,12 +1,9 @@
-import OrderDetail from '@/components/POS/OrderDetail';
-import { motion } from 'framer-motion';
-import React from 'react';
+import ReceiptsList from "@/components/POS/ReceiptsList";
 
-const OrderDetailPage = ({ params }) => {
-  return (
-    <div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4">
-      <OrderDetail orderId={params.id} />
-    </div>
-  );
+export const metadata = { title: "Receipt · Point of Sale" };
+
+// /pos/orders/<tran_id> — the receipts list with that receipt open.
+export default async function ReceiptPage({ params }) {
+  const { id } = await params;
+  return <ReceiptsList openId={Number(id) || null} />;
 }
-export default OrderDetailPage;

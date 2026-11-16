@@ -101,6 +101,24 @@ export const POST = guard("qualityControl.manage", async (request) => {
 
     const batchSize = parseFloat(received_qty);
 
+    // Never receive more than is still open on the order line: ordered minus
+    // every receipt that has not failed QC (pending + passed).
+    const taken = await prisma.qualityMaster.aggregate({
+      where: { order_no: parseInt(order_no), itcd: parseInt(itcd), status: { not: "REJECTED" } },
+      _sum: { batch_size: true },
+    });
+    const open = (orderDetail.qty || 0) - (taken._sum.batch_size || 0);
+    if (batchSize > open + 1e-9) {
+      return NextResponse.json(
+        { ok: false, error: `Only ${Math.max(0, open).toLocaleString("en-US", { maximumFractionDigits: 3 })} ${orderDetail.unit || ""} is still open on this order line.`.trim() },
+        { status: 400 }
+      );
+    }
+    const batchText = batch_no == null ? "" : String(batch_no).trim();
+    if (batchText && !/^\d{1,9}$/.test(batchText)) {
+      return NextResponse.json({ ok: false, error: "Batch number must be a whole number (up to 9 digits)." }, { status: 400 });
+    }
+
     // Prepare data for QA master
     const qaMasterData = {
       order_no: parseInt(order_no),
@@ -123,14 +141,14 @@ export const POST = guard("qualityControl.manage", async (request) => {
     };
 
     // Add batch info only if provided
-    if (batch_no && batch_no.trim() !== "") {
-      qaMasterData.batch_no = parseInt(batch_no.trim());
+    if (batchText) {
+      qaMasterData.batch_no = parseInt(batchText);
       
       if (mfg_date) {
         qaMasterData.mfg_date = new Date(mfg_date);
       }
       
-      if (expiry_date && expiry_date.trim() !== "") {
+      if (expiry_date && String(expiry_date).trim() !== "") {
         qaMasterData.expiry_date = new Date(expiry_date);
       }
     }
@@ -183,7 +201,7 @@ export const POST = guard("qualityControl.manage", async (request) => {
       message: "Goods receiving entry saved successfully",
       quality_master_id: result.id,
       received_qty: batchSize,
-      has_batch_info: !!(batch_no && batch_no.trim())
+      has_batch_info: !!batchText
     });
     
   } catch (error) {

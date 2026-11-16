@@ -27,7 +27,8 @@ function History_() {
   const { data, isLoading, error } = useQuery({ queryKey: ["hr-pay-history", id], queryFn: () => api(`/api/hr/pay-history/${id}`), enabled: Boolean(id) && features.on("hr.payHistory") });
   if (meta.isLoading || features.isLoading) return <PageSkeleton />;
   const r = meta.data?.rights;
-  if (!features.on("hr.payHistory") || !(r?.payrollView || r?.salaryView)) return <NoAccess />;
+  if (!features.on("hr.payHistory")) return <NoAccess title="Pay history is switched off." hint="Turn on “Pay history” in Settings → Features to use it." />;
+  if (!(r?.payrollView || r?.salaryView)) return <NoAccess />;
   const pick = (e) => {
     setEmp(e);
     const p = new URLSearchParams(sp);

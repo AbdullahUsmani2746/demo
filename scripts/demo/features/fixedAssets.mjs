@@ -57,6 +57,13 @@ export async function runFixedAssets({ admin, viewer, set, check, prisma }) {
   await set(FA_ON);
 
   // ── C. GRN registers ────────────────────────────────────────────────────
+  // Re-runnable: a disposal an earlier run of this test left (voucher remark
+  // "feature test") used the depreciation run reversed below — reverse it first.
+  const leftovers = await prisma.fixedAssetDisposal.findMany({ where: { reversed_at: null }, select: { tran_id: true } });
+  for (const { tran_id } of leftovers) {
+    const v = await prisma.transactionsMaster.findUnique({ where: { tran_id }, select: { rmk: true } });
+    if (v?.rmk === "feature test") await manager("POST", `/api/fixed-assets/disposals/${tran_id}/reverse`, { reason: "feature test re-run" });
+  }
   const demoDisposal = await prisma.fixedAssetDisposal.findFirst({ where: { reversed_at: null, kind: "SALE" }, orderBy: { id: "asc" } });
   if (demoDisposal) {
     const rv = await manager("POST", `/api/fixed-assets/disposals/${demoDisposal.tran_id}/reverse`, { reason: "feature test" });

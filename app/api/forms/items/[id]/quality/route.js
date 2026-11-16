@@ -5,7 +5,7 @@ import { guard } from "@/lib/auth/route";
 // GET all quality parameters for a specific item
 export async function GET(request, { params }) {
     try {
-        const itcd = parseInt(params.id);
+        const itcd = parseInt((await params).id);
 
         const itemQuality = await prisma.item_Quality.findMany({
             where: { itcd },
@@ -27,7 +27,7 @@ export async function GET(request, { params }) {
 // POST/UPDATE quality parameters for an item
 export const POST = guard("setup.items.manage", async (request, { params }) => {
     try {
-        const itcd = parseInt(params.id);
+        const itcd = parseInt((await params).id);
         const { qualityParameters } = await request.json();
 
         // Validate item exists
@@ -97,7 +97,7 @@ export const POST = guard("setup.items.manage", async (request, { params }) => {
 // DELETE all quality parameters for an item
 export const DELETE = guard("setup.items.manage", async (request, { params }) => {
     try {
-        const itcd = parseInt(params.id);
+        const itcd = parseInt((await params).id);
 
         await prisma.item_Quality.deleteMany({
             where: { itcd },

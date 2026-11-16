@@ -165,6 +165,12 @@ export default function EmployeeSetup() {
   // Row click → the HR profile (attendance, leave, pay …); Edit from there or the pencil.
   const [viewing, setViewing] = useState(null);
 
+  // ?search=… (e.g. from Admin → Logins & Roles) pre-fills the search.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("search");
+    if (q) setSearch(q);
+  }, []);
+
   useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(search.trim());

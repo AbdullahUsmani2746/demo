@@ -12,7 +12,8 @@ export async function GET(req) {
 
   const tranCodeNum = parseInt(tran_code)
 
-  let whereClause = { tran_code: tranCodeNum }
+  // A row without a number (NULL sorts first in DESC) must not restart the series.
+  let whereClause = { tran_code: tranCodeNum, vr_no: { not: null } }
 
   // Receipts and Payments run one voucher series each, across every cash and
   // bank group. They used to run separate cash/bank series off a paymentType

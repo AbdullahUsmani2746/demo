@@ -3,6 +3,8 @@ const nextConfig = {
   reactStrictMode: true,
 
   output: "standalone",
+  // NEXT_DIST_DIR lets a second build (e.g. a test run) sit beside .next.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   // node-cron (used by instrumentation.js) pulls in Node built-ins
   // (child_process, path, node:crypto) that webpack can't bundle —
   // this keeps it as a real runtime require() instead.

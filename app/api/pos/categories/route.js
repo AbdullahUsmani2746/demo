@@ -9,19 +9,7 @@ export async function GET() {
     
     const categories = await prisma.itemCategory.findMany({
       include: {
-        mainCategory: {
-          include: {
-            ProductCategories: {
-              include: {
-                ProductGroups: {
-                  include: {
-                    ProductMasterCategories: true 
-                  }
-                }
-              }
-            }
-          }
-        }
+        mainCategory: true, // only its name is shown (CategoryManager)
       }
     });
 

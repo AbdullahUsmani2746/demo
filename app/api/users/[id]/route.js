@@ -7,6 +7,7 @@ import { can } from "@/lib/auth/permissions";
 import { userRoleCodes } from "@/lib/auth/roleCatalog";
 import { checkRoleChange, roleAssignErrorResponse, saveExtraRoles } from "@/lib/auth/roleAssign";
 import { setAuditActor } from "@/lib/audit/context";
+import { loginConflict } from "@/lib/employees";
 
 const mayManage = async (session) => !!session?.user?.id && (await can(session, "users.manage"));
 
@@ -20,8 +21,28 @@ export async function PUT(request, { params }) {
     setAuditActor(session);
 
     const { id } = await params;
-    const { name, email, role: rawRole, roles: rawRoles, isActive, password, shiftId } =
+    const { name, email, role: rawRole, roles: rawRoles, isActive, password, shiftId, username: rawUsername } =
       await request.json();
+
+    const existing = await prisma.user.findUnique({ where: { id }, select: { id: true, email: true, username: true } });
+    if (!existing) return NextResponse.json({ error: "Login not found" }, { status: 404 });
+    if (isActive === false && id === session.user.id) {
+      return NextResponse.json({ error: "You cannot switch off your own login" }, { status: 400 });
+    }
+    if (password !== undefined && password !== null && password !== "" && String(password).length < 6) {
+      return NextResponse.json({ error: "Password must be at least 6 characters" }, { status: 400 });
+    }
+    // username: undefined = unchanged, "" / null = cleared
+    const username = rawUsername === undefined ? undefined : rawUsername ? String(rawUsername).trim() : null;
+    if (username && (username.includes("@") || username.length > 25)) {
+      return NextResponse.json({ error: "Username: up to 25 characters, no @ sign" }, { status: 400 });
+    }
+    const conflict = await loginConflict(prisma, {
+      username: username && username.toLowerCase() !== (existing.username || "").toLowerCase() ? username : null,
+      email: email && email.toLowerCase() !== existing.email.toLowerCase() ? email : null,
+      exceptUserId: id,
+    });
+    if (conflict) return NextResponse.json({ error: conflict }, { status: 409 });
 
     // Roles: `role` = primary; `roles` (optional) = every role. Omitted roles
     // keep the extra ones the person already has.
@@ -49,10 +70,11 @@ export async function PUT(request, { params }) {
         : undefined;
 
     const updateData = {
-      name,
-      email,
+      name: name || undefined,
+      email: email || undefined,
+      username,
       role,
-      isActive,
+      isActive: typeof isActive === "boolean" ? isActive : undefined,
     };
 
     // Only update password if provided
@@ -79,6 +101,8 @@ export async function PUT(request, { params }) {
       select: {
         id: true,
         name: true,
+        username: true,
+        employeeId: true,
         email: true,
         role: true,
         isActive: true,

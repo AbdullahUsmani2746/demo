@@ -53,6 +53,13 @@ const MENU = [
       rep("sales_matrix_monthwise", "MONTH-WISE SALES MATRIX", "Grid3x3"),
       ["SALES FORECAST", "/accounting/reports/forecast", "ChartLine"],
     ]],
+    // Data files a principal company asks its distributor for (codes: Settings "distributorFileCodes")
+    ["DISTRIBUTOR FILES", null, "FileSpreadsheet", [
+      rep("customerFile", "CUSTOMER FILE"),
+      rep("ilfile", "IL FILE"),
+      rep("pcfile", "PC FILE"),
+      rep("prfile", "PR FILE"),
+    ]],
   ]],
   ["LAB", null, "FlaskConical", [
     ["BOM", "/accounting/material?tab=bom", "ListTree"],
@@ -64,8 +71,6 @@ const MENU = [
     rep("masterSample", "MASTER SAMPLE REPORT"),
   ]],
   ["STORES", null, "Warehouse", [
-    ["PURCHASE REQUISITION", "/accounting/order/purchaseOrder", "ClipboardList"],
-    ["PURCHASE ORDER", "/accounting/order/purchaseOrderEdit", "ShoppingBag"],
     ["GOODS RECEIPT NOTE", "/accounting/report/grn", "PackageCheck"],
     // Hidden 2026-10-25: the GRN is the purchase (vendor bill details are
     // entered on the GRN) — a separate invoice would post it twice.
@@ -78,7 +83,6 @@ const MENU = [
     ["TRANSFER REQUISITION", "/accounting/material/requisitionTransfer", "ArrowLeftRight"],
     ["GODOWN TRANSFER", "/accounting/godown/transfer", "ArrowRightLeft"],
     ["ITEMS", "/accounting/forms/items", "Package"],
-    ["VENDORS", "/accounting/forms/vendor", "Truck"],
     ["PRINTING", null, "Printer", [
       ["STICKER PRINTING", "/accounting/stickerPrinting", "Sticker"],
       ["TAG PRINTING", "/accounting/tagPrinting", "Tag"],
@@ -90,10 +94,6 @@ const MENU = [
       rep("stockWithCost", "STOCK WITH COST"),
       rep("monthlyStock", "MONTHLY STOCK"),
       rep("monthlyStockValuation", "MONTHLY STOCK VALUATION"),
-      rep("purchase", "PURCHASE REGISTER"),
-      rep("purchaseOrder", "PURCHASE ORDER REPORT"),
-      rep("purchaseOrderBalance", "PURCHASE ORDER BALANCE"),
-      rep("purchaseReturn", "PURCHASE RETURN REPORT"),
       rep("grn", "GRN REPORT"),
       rep("grnReturn", "GRN RETURN REPORT"),
       rep("returnablePacking", "RETURNABLE PACKING"),
@@ -159,14 +159,19 @@ const MENU = [
     // Quantity-only return made against a dispatch (priced in Sale Return
     // Invoicing). Uses the reworked saleReturn screen.
     ["DISPATCH RETURN", "/accounting/return/saleReturn", "Undo2"],
-    rep("dispatch", "DISPATCH REPORT"),
-    rep("dailyDispatch", "DAILY DISPATCH", "CalendarDays"),
-    rep("dispatchReturn", "DISPATCH RETURN REPORT"),
+    ["DESPATCH REPORTS", null, "FileChartColumn", [
+      rep("dispatch", "DISPATCH REPORT"),
+      rep("dailyDispatch", "DAILY DISPATCH", "CalendarDays"),
+      rep("dispatchReturn", "DISPATCH RETURN REPORT"),
+    ]],
   ]],
   ["FINANCE", null, "Landmark", [
-    ["CHART OF ACCOUNTS", null, "BookOpen", [
+    ["FINANCE SETUP", null, "BookOpen", [
       ["ADD ACCOUNT", "/accounting/add-account", "CirclePlus"],
       ["SHOW ACCOUNTS", "/accounting/show-account", "BookOpen"],
+      ["ACCOUNT SETTINGS", "/accounting/settings/accounts", "Landmark"],
+      // Feature "vouchers.subAccounts" — hidden from the sidebar while it is off
+      ["SUB ACCOUNTS", "/accounting/sub-accounts", "Layers"],
     ]],
     ["VOUCHERS", null, "NotebookPen", [
       ["PAYMENT VOUCHER", "/accounting/voucher/payment", "ArrowUpRight"],
@@ -175,9 +180,6 @@ const MENU = [
       ["DEBIT NOTE", "/accounting/invoice/debit", "FileMinus"],
       ["CREDIT NOTE", "/accounting/invoice/credit", "FilePlus"],
     ]],
-    ["ACCOUNT SETTINGS", "/accounting/settings/accounts", "Landmark"],
-    // Feature "vouchers.subAccounts" — hidden from the sidebar while it is off (lib/features/apply.js)
-    ["SUB ACCOUNTS", "/accounting/sub-accounts", "Layers"],
     // Physical documents (GRN, dispatch and their returns) carry quantities
     // only; they are priced and posted here.
     ["INVOICING", null, "FileCheck", [
@@ -211,14 +213,6 @@ const MENU = [
       rep("withHoldingTax", "WITHHOLDING TAX"),
       rep("digitalInvoice", "FBR DIGITAL INVOICE"),
       ["ALL REPORTS", "/accounting/reports", "FolderOpen"],
-    ]],
-    // Data files a principal company asks its distributor for (codes: Settings "distributorFileCodes")
-    ["DISTRIBUTOR FILES", null, "FileSpreadsheet", [
-      rep("customerFile", "CUSTOMER FILE"),
-      rep("purchasingfile", "PURCHASING FILE"),
-      rep("ilfile", "IL FILE"),
-      rep("pcfile", "PC FILE"),
-      rep("prfile", "PR FILE"),
     ]],
   ]],
   // One desk for the accounts staff: only the screens their access list names
@@ -291,13 +285,15 @@ const MENU = [
       rep("hrGratuityProvision", "GRATUITY PROVISION"),
       rep("hrHeadcount", "EMPLOYEE LIST & TURNOVER"),
     ]],
-    setup("employees", "EMPLOYEES", "Users"),
-    setup("departments", "DEPARTMENTS", "Building"),
-    setup("designations", "DESIGNATIONS", "IdCard"),
-    setup("work_locations", "WORK LOCATIONS", "MapPin"),
-    setup("managers", "MANAGERS", "UserCog"),
-    setup("employee_types", "EMPLOYEE TYPES", "UserRoundCog"),
-    setup("employee_categories", "EMPLOYEE CATEGORIES", "Tags"),
+    ["HR SETUP", null, "Settings2", [
+      setup("employees", "EMPLOYEES", "Users"),
+      setup("departments", "DEPARTMENTS", "Building"),
+      setup("designations", "DESIGNATIONS", "IdCard"),
+      setup("work_locations", "WORK LOCATIONS", "MapPin"),
+      setup("managers", "MANAGERS", "UserCog"),
+      setup("employee_types", "EMPLOYEE TYPES", "UserRoundCog"),
+      setup("employee_categories", "EMPLOYEE CATEGORIES", "Tags"),
+    ]],
     ["PAYROLL SETUP", null, "Wallet", [
       setup("cost_centers", "COST CENTERS", "ChartPie"),
       setup("banks", "BANKS", "Landmark"),
@@ -311,8 +307,6 @@ const MENU = [
   ]],
   ["FIXED ASSETS", null, "Building2", [
     ["FIXED ASSETS GRN", "/accounting/report/fixedAssetsGrn", "PackageCheck"],
-    setup("fixed_asset_items", "FIXED ASSET ITEMS", "Boxes"),
-    setup("fixed_asset_categories", "FIXED ASSET CATEGORIES", "FolderTree"),
     // lib/fixedAssets — depreciation / relocation menus hide while their
     // Settings → Features switch is off (catalog `screens`).
     ["FIXED ASSET REGISTER", "/accounting/fixed-assets", "ClipboardList"],
@@ -324,6 +318,10 @@ const MENU = [
       rep("fixedAssetMovement", "FIXED ASSET MOVEMENT", "ArrowLeftRight"),
       rep("fixedAssetSchedule", "DEPRECIATION SCHEDULE", "CalendarRange"),
       rep("fixedAssetDisposals", "DISPOSAL GAIN / LOSS", "Scale"),
+    ]],
+    ["FIXED ASSET SETUP", null, "Settings2", [
+      setup("fixed_asset_items", "FIXED ASSET ITEMS", "Boxes"),
+      setup("fixed_asset_categories", "FIXED ASSET CATEGORIES", "FolderTree"),
     ]],
   ]],
   ["MANAGEMENT", null, "LayoutDashboard", [
@@ -369,42 +367,43 @@ const MENU = [
     rep("orderQc", "ORDER QC REPORT"),
     rep("qcParameters", "QC PARAMETERS REPORT"),
   ]],
-  ["SUPPLY CHAIN", null, "Link", [
-    ["SERVICE ORDER", "/accounting/order/serviceOrder", "Wrench"],
-    ["SERVICE ENTRY", "/accounting/report/serviceEntry", "ClipboardPen"],
-    ["SERVICE INVOICE", "/accounting/report/serviceInvoice", "ReceiptText"],
-    setup("services", "SERVICES", "Wrench"),
-    setup("service_categories", "SERVICE CATEGORIES", "FolderTree"),
-    rep("materialprocurement", "MATERIAL PROCUREMENT"),
-    rep("materialprocurementenquiry", "PROCUREMENT ENQUIRY"),
-    rep("serviceOrder", "SERVICE ORDER REPORT"),
-    rep("serviceEntry", "SERVICE ENTRY REPORT"),
-    rep("serviceInvoice", "SERVICE INVOICE REPORT"),
+  ["PURCHASE & SUPPLY CHAIN", null, "Link", [
+    ["PURCHASE REQUISITION", "/accounting/order/purchaseOrder", "ClipboardList"],
+    ["PURCHASE ORDER", "/accounting/order/purchaseOrderEdit", "ShoppingBag"],
+    ["VENDORS", "/accounting/forms/vendor", "Truck"],
+    ["SERVICES", null, "Wrench", [
+      ["SERVICE ORDER", "/accounting/order/serviceOrder", "Wrench"],
+      ["SERVICE ENTRY", "/accounting/report/serviceEntry", "ClipboardPen"],
+      ["SERVICE INVOICE", "/accounting/report/serviceInvoice", "ReceiptText"],
+      setup("services", "SERVICES", "Wrench"),
+      setup("service_categories", "SERVICE CATEGORIES", "FolderTree"),
+    ]],
+    ["PURCHASE REPORTS", null, "FileChartColumn", [
+      rep("purchase", "PURCHASE REGISTER"),
+      rep("purchaseOrder", "PURCHASE ORDER REPORT"),
+      rep("purchaseOrderBalance", "PURCHASE ORDER BALANCE"),
+      rep("purchaseReturn", "PURCHASE RETURN REPORT"),
+      rep("materialprocurement", "MATERIAL PROCUREMENT"),
+      rep("materialprocurementenquiry", "PROCUREMENT ENQUIRY"),
+      rep("serviceOrder", "SERVICE ORDER REPORT"),
+      rep("serviceEntry", "SERVICE ENTRY REPORT"),
+      rep("serviceInvoice", "SERVICE INVOICE REPORT"),
+      rep("purchasingfile", "PURCHASING FILE"),
+    ]],
   ]],
 ];
 
 // ---------- people with their own menu list ----------
 // These employees get exactly these entries (paths as in menus-ids.json) and
 // no department modules; the seed removes any other menu they hold.
-// Access list from the accounts team, 2026-10-26.
 const DESK = "ACCOUNTS DESK";
 const DESK_FULL = [
   `${DESK} > VOUCHERS`, `${DESK} > CASH & BANK BOOK`, `${DESK} > SALES & PURCHASE`,
   `${DESK} > SALE RETURNS`, `${DESK} > LEDGERS`, `${DESK} > BALANCES & AGING`, `${DESK} > DRUM LOAN LEDGER`,
 ];
 const DESK_PARTY = [`${DESK} > LEDGERS`, `${DESK} > BALANCES & AGING`, `${DESK} > DRUM LOAN LEDGER`];
-const EMPLOYEE_MENUS = {
-  178: DESK_FULL, // AFIA RANJHOO
-  98: DESK_FULL, // UNZILA SALEEM
-  141: DESK_FULL, // MUHAMMAD UMAIR
-  169: DESK_PARTY, // HASHIR ASIF
-  // MUHAMMAD HUSNAIN: no journal voucher; cash book limited to 1977 by his
-  // report.cbBook.view grant (constraints.accounts).
-  179: [
-    `${DESK} > VOUCHERS > PAYMENT VOUCHER`, `${DESK} > VOUCHERS > RECEIPT VOUCHER`,
-    ...DESK_FULL.filter((p) => p !== `${DESK} > VOUCHERS`),
-  ],
-};
+// Per-person menu lists are data (Settings → Employee menus), not code.
+const EMPLOYEE_MENUS = {};
 
 // ---------- which modules each department gets ----------
 // Granted through employee_menu (the sidebar reads that, by employee) to every
@@ -412,9 +411,9 @@ const EMPLOYEE_MENUS = {
 // Keys must match Department.dept_name exactly; values are top-level titles.
 const ALL_MODULES = MENU.map(([title]) => title);
 const DEPARTMENT_MODULES = {
-  "OPERATIONS": ["SALES", "STORES", "PRODUCTION", "DESPATCH", "QUALITY ASSURANCE", "SUPPLY CHAIN", "IMPORT", "MANAGEMENT"],
+  "OPERATIONS": ["SALES", "STORES", "PRODUCTION", "DESPATCH", "QUALITY ASSURANCE", "PURCHASE & SUPPLY CHAIN", "IMPORT", "MANAGEMENT"],
   "DISPATCH": ["DESPATCH", "STORES"],
-  "ADMINISTRATION - FACTORY": ["HR OPERATIONS", "FIXED ASSETS", "STORES", "SUPPLY CHAIN"],
+  "ADMINISTRATION - FACTORY": ["HR OPERATIONS", "FIXED ASSETS", "STORES", "PURCHASE & SUPPLY CHAIN"],
   "PLANT": ["PRODUCTION", "LAB", "QUALITY ASSURANCE"],
   "BOILER": ["PRODUCTION"],
   "SECURITY": ["DESPATCH"],
@@ -559,7 +558,7 @@ const sql = [
     .join(",\n"),
   ") AS g(dept_name, module) ON g.dept_name = d.dept_name",
   "JOIN menus m ON m.title = g.module AND m.parent_id IS NULL",
-  `WHERE e.id NOT IN (${Object.keys(EMPLOYEE_MENUS).join(", ")})`,
+  ...(Object.keys(EMPLOYEE_MENUS).length ? [`WHERE e.id NOT IN (${Object.keys(EMPLOYEE_MENUS).join(", ")})`] : []),
   "ON CONFLICT (employee_id, menu_id) DO NOTHING;",
   "",
   "-- People with their own menu list: exactly these entries.",

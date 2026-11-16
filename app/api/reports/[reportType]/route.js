@@ -29,9 +29,9 @@ import { getHrReport } from "@/lib/reports/hr";
 import { hrReportKey } from "@/lib/hr/reports/catalog";
 import { getMaterialProcurementReport, calculateMaterialProcurementSummary } from "@/lib/reports/materialProcurement";
 import { getProductionSetup, isFinishedCategory } from "@/lib/production/setup";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { authorize, authErrorResponse } from "@/lib/auth/route";
+import { requirePermission } from "@/lib/auth/permissions";
+import { setAuditActor } from "@/lib/audit/context";
 import { applyReportScope, ScopeChoiceRequired } from "@/lib/auth/reportScope";
 import { scopedSalesPersons } from "@/lib/auth/salesScope";
 import { buildLedgerRows, ledgerDrCr, wantsLedgerDetail } from "@/lib/reports/ledgerDetail";
@@ -44,6 +44,7 @@ import { isBlendedCosting } from "@/lib/costing/issueRate";
 import { getCcComponents } from "@/lib/costing/ccRates";
 import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
 import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingApprovals";
+import { getPosReport } from "@/lib/reports/pos";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
@@ -128,7 +129,19 @@ export async function POST(request, { params }) {
     if (!isNaN(d)) { d.setHours(23, 59, 59, 999); filters.dateTo = d; }
   }
 
-  const session = await getServerSession(authOptions);
+  const preview = body.preview === true;
+  // Who may: anyone who may open the report previews; posting the JV also
+  // needs the Journal Voucher right (it creates a tran_code 3 voucher).
+  let session;
+  try {
+    ({ session } = await authorize(`report.${reportType}.view`));
+    if (!preview) await requirePermission(session, "journal.create");
+  } catch (error) {
+    const res = authErrorResponse(error);
+    if (res) return res;
+    throw error;
+  }
+  setAuditActor(session); // the JV's writes are attributed to this user
   // Only attach user_id if it maps to a real user — a stale JWT (e.g. after a DB
   // reseed) otherwise trips the TRANSACTIONS_MASTER_user_id_fkey constraint.
   let userId = session?.user?.id ?? null;
@@ -136,7 +149,6 @@ export async function POST(request, { params }) {
     const u = await prisma.user.findUnique({ where: { id: String(userId) }, select: { id: true } });
     userId = u ? u.id : null;
   }
-  const preview = body.preview === true;
 
   try {
     if (reportType === "costOfGoodsManufactured") {
@@ -976,10 +988,16 @@ export async function GET(request, { params }) {
         data = await getStockLedgerReport(filters);
         summary = calculateStockLedgerSummary(data);
         break;
+      // Point of sale (lib/reports/pos.js) — a cashier sees only their own till.
       case "posTransactions":
-        data = await getPOSTransactionsReport(filters);
-        summary = calculatePOSSummary(data);
+      case "posDailySales":
+      case "posSalesByItem":
+      case "posSalesByPayment":
+      case "posSalesByCashier":
+      case "posReturns": {
+        ({ data, summary } = await getPosReport(reportType, filters, session));
         break;
+      }
       case "tradingMargin":
         data = await getTradingMarginReport(filters);
         summary = calculateTradingMarginSummary(data);
@@ -4177,7 +4195,8 @@ async function stockOpeningSql(startDate, godownId) {
       ${stockGodownWhereSql(godownId)}
     GROUP BY t.itcd`;
 
-  if (!anchor) return movements;
+  // Same columns either way (itcd, opening_qty) — callers read o.opening_qty.
+  if (!anchor) return Prisma.sql`SELECT m.itcd, m.qty AS opening_qty FROM (${movements}) m`;
 
   return Prisma.sql`
     SELECT
@@ -5040,76 +5059,6 @@ function calculateStockLedgerSummary(data) {
     pending_in: pending.reduce((sum, item) => sum + (item.qty_in || 0), 0),
     pending_out,
     available_balance: closing_balance - pending_out,
-  };
-}
-
-async function getPOSTransactionsReport(filters) {
-  const where = {
-    tran_code: 5, // POS transaction code
-    dated: {
-      gte: filters.dateFrom ? new Date(filters.dateFrom) : undefined,
-      lte: filters.dateTo ? new Date(filters.dateTo) : undefined,
-    },
-  };
-
-  if (filters.customer && filters.customer !== "all") {
-    where.pycd = filters.customer;
-  }
-
-  if (filters.paymentMode && filters.paymentMode !== "all") {
-    where.payment_mode = filters.paymentMode;
-  }
-
-  const transactions = await prisma.transactionsMaster.findMany({
-    where,
-    include: {
-      acno: true,
-      transactions: {
-        include: {
-          itemDetails: true,
-        },
-      },
-    },
-    orderBy: {
-      dated: "desc",
-    },
-  });
-
-  return transactions.map((t) => {
-    const filteredTransactions = t.transactions.filter((tran) =>
-      [1, 2].includes(tran.sub_tran_id)
-    );
-
-    return {
-      ...t,
-      transactions: filteredTransactions,
-      dated: new Date(t.dated).toLocaleDateString(),
-      customer_name: t.acno?.acname || "Walk-in Customer",
-      payment_mode: t.pycd === "0001" ? "Cash" : "Card",
-      total_qty: filteredTransactions.reduce(
-        (sum, line) => sum + (line.qty || 0),
-        0
-      ),
-      total_amount: filteredTransactions.reduce(
-        (sum, line) => sum + (line.gross_amount || 0),
-        0
-      ),
-      discount: t.discount || 0,
-      net_amount: filteredTransactions.reduce(
-        (sum, line) => sum + (line.gross_amount || 0), //damt
-        0
-      ),
-    };
-  });
-}
-
-function calculatePOSSummary(data) {
-  return {
-    total_transactions: data.length,
-    total_qty: data.reduce((sum, t) => sum + t.total_qty, 0),
-    total_amount: data.reduce((sum, t) => sum + t.total_amount, 0),
-    total_discount: data.reduce((sum, t) => sum + (t.discount || 0), 0),
-    total_net_amount: data.reduce((sum, t) => sum + t.net_amount, 0),
   };
 }
 
@@ -8578,6 +8527,16 @@ function calculateBOMSummary(data) {
   };
 }
 
+// A QC realized value belongs to its QualityDetail row by detail_id (or parameter_name);
+// position is only the last resort for very old rows that have neither.
+function realizedFor(realized, detail, index) {
+  return (
+    realized.find((r) => r.detail_id && r.detail_id === detail.id) ||
+    realized.find((r) => r.parameter_name && r.parameter_name === detail.parameter_name) ||
+    (realized.every((r) => !r.detail_id && !r.parameter_name) ? realized[index] : undefined)
+  );
+}
+
 async function getQCReport(filters) {
   const where = {
     proc_ord_no: { not: null }, // Only Production QC
@@ -8711,9 +8670,9 @@ async function getQCReport(filters) {
 
         // Match realized values with details by order
         latestDetails.forEach((detail, index) => {
-          if (latestRealized[index]) {
+          if (realizedFor(latestRealized, detail, index)) {
             parameterMap[detail.parameter_name] =
-              latestRealized[index].quality_realized || "";
+              realizedFor(latestRealized, detail, index).quality_realized || "";
           }
         });
       }
@@ -8774,7 +8733,7 @@ async function getQCReport(filters) {
 
           // Match realized values with details by index/order
           sortedDetails.forEach((detail, index) => {
-            const realized = attemptRealized[index];
+            const realized = realizedFor(attemptRealized, detail, index);
 
             transactions.push({
               parameter_name: detail.parameter_name,
@@ -8882,347 +8841,83 @@ function getStatusAttemptNo(itcd) {
 }
 
 async function getOrderQCReport(filters) {
-  // Build order where clause
-  const orderWhere = {
-    order_catagory: 4, // Only purchase orders
-  };
-
-  // Filter by date range (based on order date)
+  // One row per receipt (QualityMaster with order_no, made on QA Entry) of a
+  // purchase order dated in the period. Status is the receipt's own status;
+  // parameter values come from its latest tested attempt, tied by detail_id /
+  // parameter_name. The row drills to the receipt's QC sheet and the order.
+  const where = { order_no: { not: null }, proc_ord_no: null, orderMaster: { order_catagory: 4 } };
   if (filters.dateFrom || filters.dateTo) {
-    orderWhere.dated = {};
+    where.orderMaster.dated = {};
     if (filters.dateFrom) {
-      orderWhere.dated.gte = new Date(filters.dateFrom);
+      const from = new Date(filters.dateFrom);
+      from.setHours(0, 0, 0, 0);
+      where.orderMaster.dated.gte = from;
     }
     if (filters.dateTo) {
-      const toDate = new Date(filters.dateTo);
-      toDate.setHours(23, 59, 59, 999);
-      orderWhere.dated.lte = toDate;
+      const to = new Date(filters.dateTo);
+      to.setHours(23, 59, 59, 999);
+      where.orderMaster.dated.lte = to;
     }
   }
+  if (filters.item) where.itcd = parseInt(filters.item);
+  if (filters.status && filters.status !== "all") where.status = filters.status;
 
-  // Fetch all purchase orders with their details
-  const allOrders = await prisma.orderMaster.findMany({
-    where: orderWhere,
+  const receipts = await prisma.qualityMaster.findMany({
+    where,
     include: {
-      acno: {
-        select: { acname: true },
-      },
-      orderDetails: {
-        include: {
-          items: { select: { item: true } },
-        },
-        orderBy: { id: "asc" },
-      },
+      item: { select: { item: true, code: true } },
+      orderMaster: { select: { dated: true, acno: { select: { acname: true } } } },
+      details: { orderBy: [{ attempt_no: "desc" }, { id: "asc" }] },
+      detailDetails: { orderBy: { id: "desc" } },
     },
-    orderBy: { order_no: "desc" },
+    orderBy: [{ order_no: "desc" }, { id: "desc" }],
   });
-
-  // Filter by item if provided
-  let filteredOrders = allOrders;
-  if (filters.item) {
-    const itemFilter = parseInt(filters.item);
-    filteredOrders = allOrders.filter((order) =>
-      order.orderDetails.some((detail) => detail.itcd === itemFilter)
-    );
-  }
-
-  // Get all order numbers for batch status query
-  const orderNos = filteredOrders.map((o) => o.order_no);
-
-  // Get all qualityMaster records for these orders separately
-  const qcMasterMap = new Map();
-  if (orderNos.length > 0) {
-    const qcMasters = await prisma.qualityMaster.findMany({
-      where: {
-        order_no: { in: orderNos },
-        proc_ord_no: null, // Only Order QC
-      },
-      include: {
-        item: true,
-      },
-    });
-
-    // Create a map: key = "orderNo:itcd", value = qcMaster
-    for (const qc of qcMasters) {
-      const key = `${qc.order_no}:${qc.itcd}`;
-      qcMasterMap.set(key, qc);
-    }
-  }
-
-  // Get all item statuses for all orders (similar to orderqualitycontrol route)
-  const statusMap = new Map();
-  if (orderNos.length > 0) {
-    const statusRecords = await prisma.qualityDetailDetail.findMany({
-      where: {
-        order_no: { in: orderNos },
-      },
-      orderBy: { id: "desc" },
-    });
-
-    for (const record of statusRecords) {
-      // Decode attempt_no: itcd = floor(attempt_no / 1000), attempt = attempt_no % 1000
-      const decodedItcd = Math.floor(record.attempt_no / 1000);
-      const decodedAttempt = record.attempt_no % 1000;
-
-      // Status records have attempt = 0
-      if (decodedAttempt === 0 && record.quality_realized) {
-        const key = `${record.order_no}:${decodedItcd}`;
-        if (!statusMap.has(key)) {
-          // Map enum to readable status
-          let status = record.quality_realized;
-          if (status === "approve") status = "APPROVED";
-          else if (status === "reject") status = "REJECTED";
-          else if (status === "draft") status = "DRAFT";
-          else if (status === "rework") status = "REWORK";
-          statusMap.set(key, status);
-        }
-      }
-    }
-  }
-
-  // Get all unique parameters across all items to create dynamic columns
-  const allParameters = await prisma.quality_parameters.findMany({
-    orderBy: { parameter_name: "asc" },
-  });
+  const allParameters = await prisma.quality_parameters.findMany({ orderBy: { parameter_name: "asc" } });
   const parameterNames = allParameters.map((p) => p.parameter_name);
+  const isAttempt = (n) => Number.isInteger(n) && n > 0 && n < 1000;
 
-  // Process all order items (not just those with qualityMaster)
-  const allItems = [];
-  for (const order of filteredOrders) {
-    if (!order.orderDetails || order.orderDetails.length === 0) continue;
-
-    for (const orderDetail of order.orderDetails) {
-      const orderNo = order.order_no;
-      const itcd = orderDetail.itcd;
-
-      // Find corresponding qualityMaster if it exists
-      const qcKey = `${orderNo}:${itcd}`;
-      const qcMaster = qcMasterMap.get(qcKey) || null;
-
-      // Get status for this item
-      const statusKey = `${orderNo}:${itcd}`;
-      let itemStatus = statusMap.get(statusKey) || "DRAFT";
-
-      // Filter by status if provided
-      if (filters.status && filters.status !== "all" && filters.status !== "") {
-        if (itemStatus !== filters.status) {
-          continue; // Skip this item if status doesn't match
-        }
-      }
-
-      // Get status attempt_no (itcd * 1000)
-      const statusAttemptNo = getStatusAttemptNo(itcd);
-
-      // Get all details and realized values if QC master exists
-      let allDetails = [];
-      let allRealized = [];
-      let statusRecord = null;
-      let rejectReason = "";
-      let parameterMap = {};
-
-      if (qcMaster) {
-        // Get all details for this QC record (excluding status records)
-        allDetails = await prisma.qualityDetail.findMany({
-          where: {
-            master_id: qcMaster.id,
-            order_no: orderNo,
-            attempt_no: { not: statusAttemptNo }, // Exclude status attempt
-          },
-          orderBy: [{ attempt_no: "desc" }, { parameter_name: "asc" }],
-        });
-
-        // Get all realized values (excluding status)
-        allRealized = await prisma.qualityDetailDetail.findMany({
-          where: {
-            master_id: qcMaster.id,
-            order_no: orderNo,
-            attempt_no: { not: statusAttemptNo }, // Exclude status attempt
-          },
-          orderBy: [{ attempt_no: "desc" }, { id: "asc" }],
-        });
-
-        // Get status from QualityDetailDetail
-        statusRecord = await prisma.qualityDetailDetail.findFirst({
-          where: {
-            master_id: qcMaster.id,
-            order_no: orderNo,
-            attempt_no: statusAttemptNo,
-          },
-          orderBy: { id: "desc" },
-        });
-
-        // Update status from statusRecord if available
-        if (statusRecord?.quality_realized) {
-          let status = statusRecord.quality_realized;
-          if (status === "approve") status = "APPROVED";
-          else if (status === "reject") status = "REJECTED";
-          else if (status === "draft") status = "DRAFT";
-          else if (status === "rework") status = "REWORK";
-          itemStatus = status;
-        }
-
-        // Get reject_reason from the latest detail with reject_reason
-        const latestDetailWithReason = allDetails.find((d) => d.reject_reason);
-        rejectReason = latestDetailWithReason?.reject_reason || "";
-
-        // Get the latest attempt number and create parameter map
-        const decodedAttempts = allDetails.map((d) => {
-          const decoded = decodeAttemptNo(d.attempt_no);
-          return {
-            ...d,
-            decodedAttemptNo: decoded.attemptNo,
-            decodedItcd: decoded.itcd,
-          };
-        });
-
-        // Group by decoded attempt number to find the latest attempt
-        const attemptsByDecodedNo = new Map();
-        decodedAttempts.forEach((d) => {
-          if (d.decodedItcd === itcd) {
-            const attemptNo = d.decodedAttemptNo;
-            if (!attemptsByDecodedNo.has(attemptNo)) {
-              attemptsByDecodedNo.set(attemptNo, []);
-            }
-            attemptsByDecodedNo.get(attemptNo).push(d);
-          }
-        });
-
-        const latestDecodedAttemptNo =
-          attemptsByDecodedNo.size > 0
-            ? Math.max(...Array.from(attemptsByDecodedNo.keys()))
-            : null;
-
-        // Create a map of parameter_name -> quality_realized for the latest attempt
-        if (latestDecodedAttemptNo !== null) {
-          const latestAttemptDetails =
-            attemptsByDecodedNo.get(latestDecodedAttemptNo) || [];
-          const latestEncodedAttemptNo = latestAttemptDetails[0]?.attempt_no;
-
-          if (latestEncodedAttemptNo) {
-            const latestDetails = allDetails.filter(
-              (d) => d.attempt_no === latestEncodedAttemptNo
-            );
-            const latestRealized = allRealized.filter(
-              (r) => r.attempt_no === latestEncodedAttemptNo
-            );
-
-            // Match realized values with details by order
-            latestDetails.forEach((detail, index) => {
-              if (latestRealized[index]) {
-                parameterMap[detail.parameter_name] =
-                  latestRealized[index].quality_realized || "";
-              }
-            });
-          }
-        }
-      }
-
-      const row = {
-        id: qcMaster?.id || `order-${orderNo}-item-${itcd}`, // Use composite ID if no QC master
-        order_date: order.dated || null,
-        order_no: orderNo,
-        tran_code: 400, // Purchase Order drill (CLAUDE.md rule 15)
-        itcd: itcd,
-        item_name: orderDetail.items?.item || "",
-        batch_no: qcMaster?.batch_no || "",
-        batch_size: qcMaster?.batch_size || orderDetail.qty || 0,
-        status: itemStatus, // Keep original status for filtering
-        display_status: itemStatus, // Display status for report
-        reject_reason: rejectReason, // Reject reason for export
-      };
-
-      // Add parameter columns
-      parameterNames.forEach((paramName) => {
-        row[paramName] = parameterMap[paramName] || "";
+  const data = receipts.map((qc) => {
+    const tested = qc.details.filter((d) => isAttempt(d.attempt_no) && d.parameter_name !== "store_receiving_entry");
+    const latest = tested.length ? Math.max(...tested.map((d) => d.attempt_no)) : null;
+    const decision = qc.details.find((d) => d.attempt_no === 0 && d.parameter_name === "qa_decision");
+    const transactions = tested
+      .sort((a, b) => b.attempt_no - a.attempt_no || a.parameter_name.localeCompare(b.parameter_name))
+      .map((d) => {
+        const realized = realizedFor(qc.detailDetails.filter((r) => r.attempt_no === d.attempt_no), d, 0);
+        return {
+          parameter_name: d.parameter_name,
+          quality_standard: d.quality_standard,
+          quality_realized: realized?.quality_realized || "",
+          attempt_no: d.attempt_no,
+          attempt_date: d.attempt_date,
+          reject_reason: d.reject_reason || null,
+        };
       });
-
-      // Create transactions array for detail view with decoded attempts
-      let transactions = [];
-
-      if (allDetails.length > 0) {
-        // Group details by decoded attempt number
-        const detailsByAttempt = new Map();
-        allDetails.forEach((detail) => {
-          const decoded = decodeAttemptNo(detail.attempt_no);
-          if (decoded.itcd === itcd) {
-            const attemptNo = decoded.attemptNo;
-            if (!detailsByAttempt.has(attemptNo)) {
-              detailsByAttempt.set(attemptNo, []);
-            }
-            detailsByAttempt.get(attemptNo).push(detail);
-          }
-        });
-
-        // Sort attempts by decoded attempt number
-        const sortedAttemptNos = Array.from(detailsByAttempt.keys()).sort(
-          (a, b) => b - a
-        );
-
-        sortedAttemptNos.forEach((decodedAttemptNo) => {
-          const attemptDetails = detailsByAttempt.get(decodedAttemptNo);
-          const encodedAttemptNo = attemptDetails[0]?.attempt_no;
-
-          // Sort attemptDetails by id to match the order of realized values (which are sorted by id)
-          // This ensures they match by insertion order
-          const sortedDetails = [...attemptDetails].sort((a, b) => a.id - b.id);
-
-          // Get realized values for this attempt, sorted by id (which matches insertion order)
-          const attemptRealized = allRealized
-            .filter((r) => r.attempt_no === encodedAttemptNo)
-            .sort((a, b) => a.id - b.id);
-
-          // Match realized values with details by index/order
-          sortedDetails.forEach((detail, index) => {
-            const realized = attemptRealized[index];
-
-            transactions.push({
-              parameter_name: detail.parameter_name,
-              quality_standard: detail.quality_standard,
-              quality_realized: realized?.quality_realized || "",
-              attempt_no: decodedAttemptNo, // Use decoded attempt number
-              attempt_date: detail.attempt_date,
-              reject_reason: detail.reject_reason || null,
-            });
-          });
-        });
-      } else {
-        // If no attempts, get parameters from item_Quality for this item
-        const itemQualityParams = await prisma.item_Quality.findMany({
-          where: { itcd },
-          orderBy: { parameter_name: "asc" },
-        });
-
-        transactions = itemQualityParams.map((param) => ({
-          parameter_name: param.parameter_name,
-          quality_standard: param.quality_standard || "",
-          quality_realized: "",
-          attempt_no: null,
-          attempt_date: null,
-          reject_reason: null,
-        }));
-      }
-
-      allItems.push({
-        ...row,
-        transactions: transactions,
-      });
+    const row = {
+      id: qc.id,
+      order_date: qc.orderMaster?.dated || null,
+      order_no: qc.order_no,
+      tran_code: 400, // Purchase Order drill (CLAUDE.md rule 15)
+      tran_id: qc.order_no,
+      itcd: qc.itcd,
+      item_name: qc.item?.item || "",
+      vendor_name: qc.orderMaster?.acno?.acname || "",
+      batch_no: qc.batch_no ? String(qc.batch_no) : "",
+      batch_size: qc.batch_size || 0,
+      grn_no: qc.grn_no ?? null,
+      status: qc.status,
+      display_status: qc.status,
+      reject_reason: decision?.reject_reason || "",
+    };
+    for (const name of parameterNames) {
+      row[name] = transactions.find((t) => t.attempt_no === latest && t.parameter_name === name)?.quality_realized || "";
     }
-  }
+    return { ...row, transactions };
+  });
 
   return {
-    data: allItems,
-    parameterColumns: parameterNames.map((paramName) => ({
-      field: paramName,
-      headerName: paramName.toUpperCase(),
-      width: 60,
-    })),
-    // Add STATUS column at the end
-    statusColumn: {
-      field: "display_status",
-      headerName: "STATUS",
-      width: 60,
-      valueGetter: (params) => params.row.display_status || "",
-    },
+    data,
+    parameterColumns: parameterNames.map((paramName) => ({ field: paramName, headerName: paramName.toUpperCase(), width: 60 })),
   };
 }
 
@@ -9325,7 +9020,6 @@ async function getMaterialProductionReport(filters) {
           where: { id: parseInt(t.rmk5) },
           include: {
             item: true,
-            orderMaster: true,
           },
         });
 
@@ -9358,7 +9052,7 @@ async function getMaterialProductionReport(filters) {
         production_item: productionItem,
         batch_no: batchNo,
         process_order_no: t.rmk5,
-        sales_order_no: t.so_no || productionPlan?.orderMaster?.order_no,
+        sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         actual_yield_qty: totalQty,
         total_amount: totalAmount,
       };
@@ -9435,9 +9129,6 @@ async function getMaterialIssuanceReport(filters) {
       if (t.rmk5) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
           where: { id: parseInt(t.rmk5) },
-          include: {
-            orderMaster: true,
-          },
         });
       }
 
@@ -9450,7 +9141,7 @@ async function getMaterialIssuanceReport(filters) {
         issued_items: issuedItems,
         issued_item: issuedItems[0] || null, // First item for main view
         process_order_no: t.rmk5,
-        sales_order_no: t.so_no || productionPlan?.orderMaster?.order_no,
+        sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         issued_qty: totalQty,
         total_amount: totalAmount,
       };

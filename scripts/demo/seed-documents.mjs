@@ -16,6 +16,9 @@
 import { PrismaClient } from "@prisma/client";
 import { AC, CUSTOMERS, VENDORS, TRANSPORTERS, ITEMS, BOMS, categoryOf, DEMO_PASSWORD } from "./seed-masters.mjs";
 import { seedFixedAssetDocuments } from "./fixedAssetDocuments.mjs";
+import { seedPosDocuments } from "./posDocuments.mjs";
+import { hrDocuments } from "./hrDocuments.mjs";
+import { applyDemoFeatures } from "./demoFeatures.mjs";
 
 if (!(process.env.DEMO_DATABASE === "1" || process.env.DATABASE_URL?.includes("bizlogist_demo"))) {
   console.error("Refusing: DATABASE_URL is not the demo database.");
@@ -76,6 +79,7 @@ async function login(username) {
 }
 
 const stats = { ok: 0, fallback: 0, failed: 0, warnings: 0 };
+const fallbacks = new Map(); // "<user> <METHOD> <path>" → count — a role template that lacks a right shows here
 async function call(username, method, path, body, attempt = 1) {
   const s = await login(username);
   const res = await fetch(`${BASE}${path}`, {
@@ -93,6 +97,8 @@ async function call(username, method, path, body, attempt = 1) {
   }
   if (res.status === 403 && username !== "admin") {
     stats.fallback++;
+    const key = `${username} ${method} ${path.split("?")[0]}`;
+    fallbacks.set(key, (fallbacks.get(key) || 0) + 1);
     return call("admin", method, path, body);
   }
   if (!res.ok) {
@@ -450,12 +456,12 @@ async function monthlyExpenses(d) {
     [AC.rent, 450000, "Office & warehouse rent"], [AC.utilities, round(between(140000, 210000), 100), "Electricity & gas - head office"],
     [AC.factoryPower, round(between(780000, 1150000), 100), "Factory electricity (K-Electric)"], [AC.telephone, round(between(38000, 52000), 100), "Phones & internet"],
     [AC.printing, round(between(25000, 60000), 100), "Stationery"], [AC.professional, chance(0.4) ? 180000 : 0, "Audit / legal fee"],
-    [AC.salesPromotion, round(between(60000, 160000), 100), "Trade promotion"], [AC.travelling, round(between(70000, 140000), 100), "Field staff travel"],
+    [AC.salesPromotion, round(between(60000, 160000), 100), "Trade promotion", "TRADE SCHEMES"], [AC.travelling, round(between(70000, 140000), 100), "Field staff travel", "FIELD STAFF"],
     [AC.factoryRepairs, round(between(90000, 260000), 100), "Machine repairs"], [AC.bankCharges, round(between(6000, 15000), 10), "Bank charges"],
   ].filter((l) => l[1] > 0);
   await voucher("accounts.manager", "payment", {
     master: { dated: iso(d), pycd: AC.bankHbl, rmk: `Monthly expenses ${d.toLocaleString("en", { month: "long", timeZone: "UTC" })}` },
-    lines: lines.map(([acno, damt, n]) => ({ acno, damt, narration1: n })),
+    lines: lines.map(([acno, damt, n, sub]) => ({ acno, damt, narration1: n, ...(sub ? { sub_account: sub } : {}) })),
   });
   // Markup on running finance, accrued by JV
   await voucher("accounts.manager", "journal", {
@@ -469,7 +475,7 @@ async function monthlyExpenses(d) {
   await voucher("cashier", "payment", {
     master: { dated: iso(d), pycd: AC.cash, rmk: "Petty cash expenses" },
     lines: [
-      { acno: AC.travelling, damt: round(between(15000, 30000), 10), narration1: "Local conveyance" },
+      { acno: AC.travelling, damt: round(between(15000, 30000), 10), narration1: "Local conveyance", sub_account: "LOCAL CONVEYANCE" },
       { acno: AC.printing, damt: round(between(4000, 9000), 10), narration1: "Photocopies & courier" },
     ],
   });
@@ -497,6 +503,10 @@ async function dispatchReturns() {
 
 async function main() {
   console.log(`Posting demo documents to ${BASE} …`);
+  await applyDemoFeatures(call);
+  const hr = hrDocuments({ call, prisma });
+  await hr.setup();
+  let hrMonth = iso(START).slice(0, 7);
   await openingBalances(START);
   await openingStock(START);
   await packingTransfer(START);
@@ -504,6 +514,8 @@ async function main() {
   for (let d = addDays(START, 1); d < END; d = addDays(d, 1)) {
     if (!isWorkday(d)) continue;
     const dom = d.getUTCDate();
+    // First working day of a month: last month's attendance, leave, loans and payroll.
+    if (iso(d).slice(0, 7) !== hrMonth) { await hr.month(hrMonth, iso(d)); hrMonth = iso(d).slice(0, 7); }
     if (d.getUTCDay() === 1) await weeklyPurchasing(d);
     if (d.getUTCDay() === 3) await packingTransfer(d);
     if (dom >= 5 && dom <= 6 && !(await monthDone(d))) await monthlyExpenses(d);
@@ -523,7 +535,26 @@ async function main() {
   }
   await dispatchReturns();
   await seedFixedAssetDocuments({ call });
+  await seedPosDocuments({ call });
+  await hr.finish();
+  await applyDemoFeatures(call);
+  await printCounts();
   console.log(`Done: ${stats.ok} calls ok, ${stats.fallback} entered by admin (role lacked the right), ${stats.warnings} with warnings.`);
+  for (const [k, n] of fallbacks) console.log(`  fallback ×${n}: ${k}`);
+}
+
+async function printCounts() {
+  const q = (sql) => prisma.$queryRawUnsafe(sql).then((r) => r.map((x) => Object.fromEntries(Object.entries(x).map(([k, v]) => [k, typeof v === "bigint" ? Number(v) : v]))));
+  console.log("Orders by category (OrderMaster.order_catagory):");
+  console.table(await q(`SELECT order_catagory, COUNT(*) n FROM "OrderMaster" GROUP BY 1 ORDER BY 1`));
+  console.log("Vouchers by tran_code (invoiced = invoice_no set):");
+  console.table(await q(`SELECT tran_code, COUNT(*) n, COUNT(invoice_no) invoiced FROM "TRANSACTIONS_MASTER" GROUP BY 1 ORDER BY 1`));
+  console.table({
+    "process orders": await prisma.productionPlanMaster.count(), "fixed assets": await prisma.fixedAsset.count(),
+    "depreciation runs": await prisma.fixedAssetDepreciationRun.count(), disposals: await prisma.fixedAssetDisposal.count(),
+    "payroll runs": await prisma.hrPayrollRun.count(), payslips: await prisma.hrPayslip.count(), "leave requests": await prisma.hrLeaveRequest.count(),
+    "attendance rows": await prisma.hrAttendance.count(), loans: await prisma.hrLoan.count(), settlements: await prisma.hrSettlement.count(),
+  });
 }
 
 const monthsPaid = new Set();

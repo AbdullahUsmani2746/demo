@@ -1,13 +1,6 @@
-import Checkout from '@/components/POS/Checkout';
-import { motion } from 'framer-motion';
-import React from 'react';
+import { redirect } from "next/navigation";
 
-const CheckoutPage = ()=> {
-  return (
-    <div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4">
-      <h2 className="text-2xl font-bold mb-4">Checkout</h2>
-      <Checkout />
-    </div>
-  );
+// Payment is taken on the till itself (Sell → Pay).
+export default function CheckoutPage() {
+  redirect("/pos/cart");
 }
-export default CheckoutPage;

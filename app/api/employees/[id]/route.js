@@ -17,7 +17,7 @@ import {
     validationErrorBody,
 } from "@/lib/employees";
 import { guard } from "@/lib/auth/route";
-import { assignableLevels, checkRoleChange, roleAssignErrorResponse } from "@/lib/auth/roleAssign";
+import { assignableLevels, checkRoleChange, roleAssignErrorResponse, saveExtraRoles } from "@/lib/auth/roleAssign";
 import { userRoleCodes } from "@/lib/auth/roleCatalog";
 
 export async function GET(req, { params }) {
@@ -80,6 +80,7 @@ export const PUT = guard("employee.manage", async (req, { params }) => {
 
         let userUpdate = null;
         let userCreate = null;
+        let extraRoles = null; // null = leave the login's extra roles alone
         if (access.grantAccess) {
             if (!(await canAdministerEmployeeAccess(session))) {
                 return NextResponse.json(
@@ -92,11 +93,11 @@ export const PUT = guard("employee.manage", async (req, { params }) => {
             if (access.role || linkedUser) {
                 const current = linkedUser ? await userRoleCodes(linkedUser.id, linkedUser.role) : [];
                 try {
-                    ({ primary: access.role } = await checkRoleChange({
+                    ({ primary: access.role, extra: extraRoles } = await checkRoleChange({
                         session,
                         userId: linkedUser?.id ?? null,
                         primary: access.role || linkedUser?.role,
-                        extra: current.slice(1),
+                        extra: Array.isArray(access.roles) ? access.roles : current.slice(1),
                         active: access.isActive !== false,
                         limitLevels: await assignableLevels(session),
                     }));
@@ -168,8 +169,10 @@ export const PUT = guard("employee.manage", async (req, { params }) => {
                 include: EMPLOYEE_INCLUDE,
             });
 
-            if (userUpdate) await tx.user.update(userUpdate);
-            if (userCreate) await tx.user.create(userCreate);
+            let loginId = null;
+            if (userUpdate) loginId = (await tx.user.update({ ...userUpdate, select: { id: true } })).id;
+            if (userCreate) loginId = (await tx.user.create({ ...userCreate, select: { id: true } })).id;
+            if (loginId && extraRoles) await saveExtraRoles(loginId, extraRoles, session.user.id, tx);
             return updated;
         }, { timeout: 15000 });
         // Read back the login after the commit — only writes in the transaction.

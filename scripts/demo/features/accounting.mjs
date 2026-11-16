@@ -18,10 +18,12 @@ export async function runAccountingPort({ admin, set, vr, check, prisma }) {
       check("grn.directRateByItem: demo data (godown, vendor, item) present", false);
     } else {
       await prisma.item.update({ where: { itcd: item.itcd }, data: { grn_direct_rate: true } });
-      const grn = async () => {
+      // Each save differs in quantity: the save guard (lib/voucher/saveGuard.js)
+      // refuses the same GRN saved twice within two minutes.
+      const grn = async (qty) => {
         const r = await admin("POST", "/api/voucher/grn", {
           master: { tran_code: 4, dated: day, pycd: vendor, godown, rmk: "feature test GRN direct rate" },
-          lines: [{ itcd: item.itcd, no_of_pack: 1, qty_per_pack: 10, qty: 10, rate: 123.45 }],
+          lines: [{ itcd: item.itcd, no_of_pack: 1, qty_per_pack: qty, qty, rate: 123.45 }],
         });
         const line = r.body?.voucherId
           ? await prisma.transactions.findFirst({ where: { tran_id: r.body.voucherId, itcd: item.itcd, sub_tran_id: 1 }, select: { rate: true, damt: true, camt: true } })
@@ -29,10 +31,10 @@ export async function runAccountingPort({ admin, set, vr, check, prisma }) {
         return { r, line };
       };
       await set({ "grn.directRateByItem": false });
-      const g0 = await grn();
+      const g0 = await grn(10);
       check("grn.directRateByItem OFF: GRN saved quantity only (rate 0)", g0.r.status === 201 && Number(g0.line?.rate) === 0, `${g0.r.status} ${g0.r.body?.message || ""} ${JSON.stringify(g0.line)}`);
       await set({ "grn.directRateByItem": true });
-      const g1 = await grn();
+      const g1 = await grn(11);
       check("grn.directRateByItem ON: ticked item keeps the typed rate, no amounts", g1.r.status === 201 && Number(g1.line?.rate) === 123.45 && !Number(g1.line?.damt) && !Number(g1.line?.camt), `${g1.r.status} ${g1.r.body?.message || ""} ${JSON.stringify(g1.line)}`);
       const api = await admin("GET", `/api/forms/items/grn-direct-rate?itcds=${item.itcd}`);
       check("grn.directRateByItem ON: item reported as direct-rate", (api.body?.itcds || []).map(Number).includes(item.itcd), JSON.stringify(api.body));
@@ -49,11 +51,15 @@ export async function runAccountingPort({ admin, set, vr, check, prisma }) {
       orderBy: { tran_id: "desc" },
     });
     const line = dispatch && (await prisma.transactions.findFirst({ where: { tran_id: dispatch.tran_id, itcd: { not: null } }, select: { itcd: true } }));
-    const ret = (master, itcd = line?.itcd, extra = {}) =>
-      admin("POST", "/api/voucher/saleReturn", {
+    // Each return a different quantity: the save guard refuses the same return saved twice within two minutes.
+    let n = 0;
+    const ret = (master, itcd = line?.itcd, extra = {}) => {
+      const qty = ++n;
+      return admin("POST", "/api/voucher/saleReturn", {
         master: { tran_code: 10, dated: day, pycd: dispatch.pycd, godown: dispatch.godown, rmk: "feature test sale return", ...master },
-        lines: [{ itcd, no_of_pack: 1, qty_per_pack: 1, qty: 1, ...extra }],
+        lines: [{ itcd, no_of_pack: 1, qty_per_pack: qty, qty, ...extra }],
       });
+    };
     if (!dispatch || !line) {
       check("saleReturn: demo dispatch present", false);
     } else {
@@ -91,10 +97,11 @@ export async function runAccountingPort({ admin, set, vr, check, prisma }) {
     } else {
       const payable = law.tax_acno ?? cash.pycd;
       if (!law.tax_acno) await prisma.taxLaws.update({ where: { tax_law_code: law.tax_law_code }, data: { tax_acno: payable } });
-      const pay = async () => {
+      // Each payment a different amount: the save guard refuses the same payment saved twice within two minutes.
+      const pay = async (damt) => {
         const r = await admin("POST", "/api/voucher/payment", {
           master: { tran_code: 2, vr_no: await vr(2), dated: day, pycd: cash.pycd, rmk: "feature test WHT" },
-          lines: [{ acno: party.acno, damt: 10000, narration1: "WHT test", tax_law_code: law.tax_law_code }],
+          lines: [{ acno: party.acno, damt, narration1: "WHT test", tax_law_code: law.tax_law_code }],
         });
         const ded = r.body?.voucherId
           ? await prisma.transactions.findMany({ where: { tran_id: r.body.voucherId, sub_tran_id: 2 }, select: { acno: true, camt: true, tax_law_code: true } })
@@ -102,10 +109,10 @@ export async function runAccountingPort({ admin, set, vr, check, prisma }) {
         return { r, ded };
       };
       await set({ "tax.lineWht": false });
-      const p0 = await pay();
+      const p0 = await pay(10000);
       check("tax.lineWht OFF: no deduction is built", p0.r.status === 201 && p0.ded.length === 0, `${p0.r.status} ${p0.r.body?.message || ""} ${JSON.stringify(p0.ded)}`);
       await set({ "tax.lineWht": true });
-      const p1 = await pay();
+      const p1 = await pay(12000);
       check("tax.lineWht ON: a WHT deduction on the law's payable account", p1.r.status === 201 && p1.ded.length === 1 && Number(p1.ded[0].acno) === Number(payable) && Number(p1.ded[0].camt) > 0, `${p1.r.status} ${p1.r.body?.message || ""} ${JSON.stringify(p1.ded)}`);
       await set({ "tax.lineWht": false });
       if (!law.tax_acno) await prisma.taxLaws.update({ where: { tax_law_code: law.tax_law_code }, data: { tax_acno: null } });

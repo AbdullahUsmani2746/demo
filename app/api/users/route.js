@@ -8,6 +8,7 @@ import { usersWithRoles } from "@/lib/auth/roles";
 import { roleCodesByUser } from "@/lib/auth/roleCatalog";
 import { checkRoleChange, roleAssignErrorResponse, saveExtraRoles } from "@/lib/auth/roleAssign";
 import { setAuditActor } from "@/lib/audit/context";
+import { loginConflict } from "@/lib/employees";
 
 // Logins are managed by holders of users.manage (Admin → Roles), not by a
 // role name. Roles: `role` = primary, `roles` = every role (primary first).
@@ -24,6 +25,9 @@ export async function GET(req) {
     const { searchParams } = new URL(req.url);
     const search = searchParams.get("search") || "";
     const role = searchParams.get("role");
+    // link = employee | none (logins without an employee: Super Admin, auditors …)
+    const link = searchParams.get("link");
+    const active = searchParams.get("active"); // yes | no
     const page = parseInt(searchParams.get("page") || "1");
     const limit = parseInt(searchParams.get("limit") || "1000000");
     const skip = (page - 1) * limit;
@@ -33,9 +37,14 @@ export async function GET(req) {
         OR: [
           { name: { contains: search, mode: "insensitive" } },
           { email: { contains: search, mode: "insensitive" } },
+          { username: { contains: search, mode: "insensitive" } },
         ],
       }),
       ...(role && role !== "all" && { AND: [usersWithRoles([role])] }),
+      ...(link === "employee" && { employeeId: { not: null } }),
+      ...(link === "none" && { employeeId: null }),
+      ...(active === "yes" && { isActive: true }),
+      ...(active === "no" && { isActive: false }),
     };
 
     const [users, total] = await Promise.all([
@@ -44,6 +53,9 @@ export async function GET(req) {
         select: {
           id: true,
           name: true,
+          username: true,
+          employeeId: true,
+          employee: { select: { id: true, firstName: true, surname: true } },
           email: true,
           role: true,
           isActive: true,
@@ -88,45 +100,48 @@ export async function POST(request) {
     }
     setAuditActor(session);
 
-    const { name, email, password, role: rawRole, roles: rawRoles, shiftId } = await request.json();
+    const { name, email, password, role: rawRole, roles: rawRoles, shiftId, username: rawUsername, isActive } = await request.json();
+    const username = rawUsername ? String(rawUsername).trim() : null;
 
     if (!name || !email || !password || !rawRole) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        { error: "Name, email, password and role are required" },
         { status: 400 }
       );
+    }
+    if (String(password).length < 6) {
+      return NextResponse.json({ error: "Password must be at least 6 characters" }, { status: 400 });
+    }
+    if (username && (username.includes("@") || username.length > 25)) {
+      return NextResponse.json({ error: "Username: up to 25 characters, no @ sign" }, { status: 400 });
     }
 
     let role;
     let extra;
     try {
-      ({ primary: role, extra } = await checkRoleChange({ session, primary: rawRole, extra: rawRoles }));
+      ({ primary: role, extra } = await checkRoleChange({ session, primary: rawRole, extra: rawRoles, active: isActive !== false }));
     } catch (e) {
       const r = roleAssignErrorResponse(e);
       if (r) return NextResponse.json(r.body, { status: r.status });
       throw e;
     }
 
-    const existingUser = await prisma.user.findUnique({
-      where: { email },
-    });
-
-    if (existingUser) {
-      return NextResponse.json(
-        { error: "User already exists" },
-        { status: 400 }
-      );
-    }
+    const conflict = await loginConflict(prisma, { username, email });
+    if (conflict) return NextResponse.json({ error: conflict }, { status: 409 });
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const parsedShiftId = shiftId ? parseInt(shiftId, 10) : null;
 
+    // A login made here has no employee (Super Admin, auditors …); an
+    // employee's login is made on the Employee screen (Login & Roles).
     const userData = {
       name,
       email,
+      username,
       password: hashedPassword,
       role,
+      isActive: isActive !== false,
     };
 
     if (parsedShiftId) {

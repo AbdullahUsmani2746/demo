@@ -118,7 +118,7 @@ export const POST = guard("qualityControl.manage", async (request) => {
         grn_status: qualityRecord.grn_status || "PENDING",
         grn_no: qualityRecord.grn_no || null,
         route: scannedQaBarcode
-          ? `/accounting/forms/orderqualitycontrol/${qualityRecord.order_no}?itcd=${qualityRecord.itcd}`
+          ? `/accounting/forms/orderqualitycontrol/${qualityRecord.order_no}?qc=${qualityRecord.id}`
           : `/accounting/forms/orderqualitycontrol`,
       },
     });

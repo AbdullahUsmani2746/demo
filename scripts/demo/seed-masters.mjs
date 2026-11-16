@@ -80,6 +80,8 @@ export const AC = {
   depreciation: 5217, faGainLoss: 4113,
   stockRm: 1031, stockPm: 1032, stockFg: 1033,
   salaryPayable: 2031, eobiPayable: 2032, accruedExpenses: 2033, otherDeductions: 2034,
+  pfPayable: 2035, gratuityPayable: 2036, settlementPayable: 2037, noticeRecovery: 4114,
+  pfExpense: 5234, gratuityExpense: 5235, leaveEncashment: 5236,
   outputTax: 2041, incomeTaxPayable: 2042, whtPayable: 2043,
   bankLoan: 2211,
   capital: 3011, retained: 3012,
@@ -120,6 +122,10 @@ const ACCOUNTS = [
   [AC.eobiPayable, 203, "EOBI PAYABLE"],
   [AC.accruedExpenses, 203, "ACCRUED EXPENSES"],
   [AC.otherDeductions, 203, "OTHER SALARY DEDUCTIONS"],
+  [AC.pfPayable, 203, "PROVIDENT FUND PAYABLE"],
+  [AC.gratuityPayable, 203, "PROVISION FOR GRATUITY"],
+  [AC.settlementPayable, 203, "FINAL SETTLEMENTS PAYABLE"],
+  [AC.noticeRecovery, 411, "NOTICE PAY RECOVERED"],
   [AC.outputTax, 204, "SALES TAX PAYABLE (OUTPUT)"],
   [AC.incomeTaxPayable, 204, "INCOME TAX DEDUCTED ON SALARIES"],
   [AC.whtPayable, 204, "WITHHOLDING TAX PAYABLE"],
@@ -153,6 +159,9 @@ const ACCOUNTS = [
   [AC.salaries, 523, "SALARIES & WAGES"],
   [AC.overtime, 523, "OVERTIME"],
   [AC.eobiExpense, 523, "EOBI - EMPLOYER CONTRIBUTION"],
+  [AC.pfExpense, 523, "PROVIDENT FUND - EMPLOYER CONTRIBUTION"],
+  [AC.gratuityExpense, 523, "GRATUITY EXPENSE"],
+  [AC.leaveEncashment, 523, "LEAVE ENCASHMENT"],
   [AC.bankCharges, 531, "BANK CHARGES"],
   [AC.markup, 531, "MARKUP ON RUNNING FINANCE"],
 ];
@@ -360,11 +369,11 @@ const ROLE_MODULES = {
   ACCOUNTS_MANAGER: ["FINANCE", "ACCOUNTS DESK", "FIXED ASSETS", "MANAGEMENT"],
   ACCOUNTANT: ["FINANCE", "ACCOUNTS DESK"],
   ACCOUNTS_OFFICER: ["FINANCE", "ACCOUNTS DESK"],
-  CASHIER: ["ACCOUNTS DESK"],
+  CASHIER: ["ACCOUNTS DESK", "POINT OF SALE"],
   SALES_MANAGER: ["SALES", "DESPATCH"],
   SALES: ["SALES", "DESPATCH"],
-  PURCHASE_MANAGER: ["SUPPLY CHAIN", "IMPORT"],
-  PURCHASE_OFFICER: ["SUPPLY CHAIN", "IMPORT"],
+  PURCHASE_MANAGER: ["PURCHASE & SUPPLY CHAIN", "IMPORT"],
+  PURCHASE_OFFICER: ["PURCHASE & SUPPLY CHAIN", "IMPORT"],
   STORE_MANAGER: ["STORES", "DESPATCH"],
   STORE_KEEPER: ["STORES", "DESPATCH"],
   PRODUCTION_MANAGER: ["PRODUCTION", "LAB", "QUALITY ASSURANCE"],
@@ -426,10 +435,16 @@ async function main() {
     sales: AC.salesLocal, purchase: AC.purchases, sales_return: AC.salesReturn, purchase_return: AC.purchaseReturn,
     stock: AC.stockRm, sales_tax_output: AC.outputTax, sales_tax_input: AC.inputTax,
     freight_inward: AC.freightIn, freight_outward: AC.freightOut, service_expense: AC.serviceExpense,
-    conversion_cost: AC.conversionCost, cogs: AC.cogs, stock_lost: AC.stockLost, qc_cost: AC.qcCost, pos_sales: AC.salesPos,
+    conversion_cost: AC.conversionCost, cogs: AC.cogs, stock_lost: AC.stockLost, qc_cost: AC.qcCost, pos_sales: AC.salesPos, pos_cash: AC.cash, pos_card: AC.bankHbl, pos_tax: AC.outputTax,
     payroll_salary_expense: AC.salaries, payroll_overtime_expense: AC.overtime, payroll_salary_payable: AC.salaryPayable,
     payroll_eobi_expense: AC.eobiExpense, payroll_eobi_payable: AC.eobiPayable, payroll_tax_payable: AC.incomeTaxPayable,
     payroll_staff_advances: AC.staffAdvances, payroll_staff_loans: AC.staffLoans, payroll_other_deductions: AC.otherDeductions,
+    payroll_pf_payable: AC.pfPayable, payroll_pf_expense: AC.pfExpense,
+    payroll_gratuity_expense: AC.gratuityExpense, payroll_gratuity_payable: AC.gratuityPayable,
+    payroll_leave_encashment_expense: AC.leaveEncashment, payroll_notice_recovery: AC.noticeRecovery,
+    payroll_settlement_payable: AC.settlementPayable,
+    // Fixed assets: fallbacks when a category has no accounts of its own (fa_category_defaults has them)
+    fa_cost: AC.plant, fa_accumulated_depreciation: AC.accDepPlant,
     fa_depreciation_expense: AC.depreciation, fa_disposal_gain_loss: AC.faGainLoss,
   };
   const { ACCOUNT_SETTING_DEFS } = await import("../../lib/accounts/accountSettingDefs.js");
@@ -447,6 +462,29 @@ async function main() {
   await grp("cash_bank", [101]);
   await grp("fixed_asset_vendors", [201]);
   await grp("conversion_overheads", [503]);
+  // Withholding tax laws (feature tax.lineWht): a payment line may deduct one; payable = WHT account
+  {
+    const tax = await prisma.taxSetup.upsert({ where: { tax_name: "INCOME TAX WITHHOLDING" }, update: {}, create: { tax_name: "INCOME TAX WITHHOLDING" } });
+    for (const [section_description, rate_filer, rate_non_filer] of [
+      ["153(1)(a) SUPPLY OF GOODS", 4.5, 9],
+      ["153(1)(b) RENDERING OF SERVICES", 8, 16],
+      ["155 RENT OF PROPERTY", 15, 30],
+    ]) {
+      const found = await prisma.taxLaws.findFirst({ where: { tax_code: tax.tax_code, section_description } });
+      if (!found) await prisma.taxLaws.create({ data: { tax_code: tax.tax_code, section_description, rate_filer, rate_non_filer, tax_acno: AC.whtPayable } });
+    }
+  }
+  // Selling & distribution expenses (522) are booked per sub account (feature vouchers.subAccounts)
+  await grp("sub_account_groups", [522]);
+  for (const [acno, names] of [
+    [AC.travelling, ["FIELD STAFF", "LOCAL CONVEYANCE", "OUTSTATION TOURS"]],
+    [AC.salesPromotion, ["TRADE SCHEMES", "DEALER MEETS"]],
+    [AC.freightOut, ["LOCAL DELIVERY", "UPCOUNTRY"]],
+  ]) {
+    for (const acname of names) {
+      if (!(await prisma.subAccount.findFirst({ where: { acno, acname } }))) await prisma.subAccount.create({ data: { acno, acname } });
+    }
+  }
   await prisma.accountSetting.updateMany({ where: { key: "blocked_voucher_accounts" }, data: { acnos: [AC.salesLocal] } });
 
   step("cities, godowns, units, categories, items");
@@ -538,7 +576,8 @@ async function main() {
     childrenOf.get(m.parent_id).push(m);
   }
   const subtree = (id) => [id, ...(childrenOf.get(id) || []).flatMap((c) => subtree(c.id))];
-  const moduleId = (title) => menus.find((m) => m.parent_id == null && m.title === title)?.id;
+  // A module is a top-level menu; a single screen elsewhere in the tree (e.g. POINT OF SALE) may be named too.
+  const moduleId = (title) => (menus.find((m) => m.parent_id == null && m.title === title) || menus.find((m) => m.title === title))?.id;
 
   let empId = 1001;
   const people = [
@@ -582,6 +621,19 @@ async function main() {
     const menuIds = [...new Set(modules.flatMap((t) => (moduleId(t) ? subtree(moduleId(t)) : [])))];
     if (menuIds.length) {
       await prisma.employee_menu.createMany({ data: menuIds.map((menu_id) => ({ employee_id: id, menu_id })), skipDuplicates: true });
+    }
+  }
+  // HR data scope (rule 4): the HR officer keeps every department's staff, and
+  // finance pays every employee's loans / settlements — a recorded "All" on
+  // Departments (HR), as an admin would tick on Admin → Permissions.
+  for (const username of ["hr", "accounts.manager"]) {
+    const user = await prisma.user.findUnique({ where: { username }, select: { id: true } });
+    if (user) {
+      await prisma.dataScope.upsert({
+        where: { userId_dimension: { userId: user.id, dimension: "department" } },
+        update: { mode: "ALL", values: [] },
+        create: { userId: user.id, dimension: "department", mode: "ALL", values: [] },
+      });
     }
   }
   // The Super Admin login is the owner's own demo account.

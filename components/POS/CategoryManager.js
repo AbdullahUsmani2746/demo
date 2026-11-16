@@ -54,7 +54,7 @@ const CategoryManager = () => {
   const filteredCategories = categories.filter(
     (category) =>
       category.ic_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      category.mainCategory.mc_name
+      category.mainCategory?.mc_name
         .toLowerCase()
         .includes(searchTerm.toLowerCase())
   );
@@ -124,7 +124,7 @@ const CategoryManager = () => {
                 </h3>
                 <p className="text-sm text-gray-500 flex items-center mt-1">
                   <span className="w-2 h-2 bg-blue-400 rounded-full mr-2" />
-                  {category.mainCategory.mc_name}
+                  {category.mainCategory?.mc_name}
                 </p>
               </div>
             </div>
@@ -199,7 +199,7 @@ const CategoryManager = () => {
                 {category.ic_name}
               </h3>
               <p className="text-sm text-gray-500">
-                {category.mainCategory.mc_name} • {category.itemCount} items
+                {category.mainCategory?.mc_name} • {category.itemCount} items
               </p>
             </div>
           </div>

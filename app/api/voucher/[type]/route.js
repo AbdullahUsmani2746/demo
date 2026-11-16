@@ -581,6 +581,11 @@ function normalizeMaster(master, tran_code) {
       master.godown = parseOptionalInt(master.godown);
       master.godown2 = parseOptionalInt(master.godown2);
     }
+  } else if (tran_code === 14) {
+    // Fixed Assets GRN: the date arrives as YYYY-MM-DD (or an ISO string) —
+    // Prisma needs a Date. (Disposal 15 / relocation 16: lib/fixedAssets/voucher.js.)
+    master.dated = master.dated ? new Date(master.dated) : now;
+    master.time = master.dated;
   }
 
   master.po_no = master.po_no && PO_ALLOWED.has(tran_code) ? Number(master.po_no) : null;

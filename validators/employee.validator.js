@@ -93,6 +93,8 @@ export const employeeAccessSchema = z.object({
   username: usernameSchema.optional().nullable(),
   email: z.string().trim().email("Enter a valid login email").optional(),
   role: z.string().trim().max(40).optional(),
+  // Extra roles (user_roles) besides the main one; omitted = keep what the login has.
+  roles: z.array(z.string().trim().max(40)).max(50).optional(),
   password: z.string().min(6, "Password must be at least 6 characters").optional(),
   isActive: z.boolean().default(true),
 });

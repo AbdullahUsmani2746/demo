@@ -20,7 +20,7 @@ const money = (n) => (Number(n) || 0).toLocaleString("en-US", { minimumFractionD
 const FROM = { asset: "this asset", category: "category", company: "company default" };
 
 function StatusBadge({ status }) {
-  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${status === "DISPOSED" ? CHIP.bad : CHIP.ok}`}>{status === "DISPOSED" ? "Disposed" : "In use"}</span>;
+  return <span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold ${status === "DISPOSED" ? CHIP.bad : CHIP.ok}`}>{status === "DISPOSED" ? "Disposed" : "In use"}</span>;
 }
 
 function Field({ label, children, hint }) {
@@ -319,7 +319,7 @@ export default function FixedAssetRegisterPage() {
                         <td className="px-3 py-2 font-mono font-semibold text-primary">{a.asset_label}</td>
                         <td className="px-3 py-2">{a.item}</td>
                         <td className="px-3 py-2 text-muted-foreground">{a.category}</td>
-                        <td className="px-3 py-2 tabular-nums">{a.in_service}</td>
+                        <td className="whitespace-nowrap px-3 py-2 tabular-nums">{a.in_service}</td>
                         <td className="px-3 py-2">{methodLabel(a.rules.method)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{money(a.cost)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{money(a.accumulated)}</td>

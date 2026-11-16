@@ -3620,3 +3620,77 @@ model FixedAssetDisposal {
   @@index([dated])
   @@map("fixed_asset_disposals")
 }
+
+// ── Point of Sale (prisma/sql/2026-11-22_pos.sql, lib/pos/*) ────────────────
+// A cashier's shift: opened with a float, closed with the cash counted. The Z
+// report (lib/pos/shift.js) is worked out from the receipts of the shift and
+// frozen into `summary` when it is closed.
+model PosShift {
+  id            Int       @id @default(autoincrement())
+  user_id       String
+  godown        Int?
+  opened_at     DateTime  @default(now())
+  opening_float Float     @default(0)
+  closed_at     DateTime?
+  closed_by     String?
+  expected_cash Float?
+  counted_cash  Float?
+  difference    Float?
+  notes         String?   @db.VarChar(500)
+  status        String    @default("OPEN") @db.VarChar(10) // OPEN | CLOSED
+  summary       Json?
+
+  @@index([user_id, status])
+  @@index([opened_at])
+  @@map("pos_shifts")
+}
+
+// One row per POS receipt (sale = tran_code 5, return = tran_code 12): the
+// figures the receipt prints. The books are the voucher itself.
+model PosReceipt {
+  tran_id        Int      @id
+  kind           String   @db.VarChar(10) // SALE | RETURN
+  shift_id       Int?
+  ref_tran_id    Int? // RETURN: the sale it refunds
+  customer_name  String?  @db.VarChar(150)
+  customer_phone String?  @db.VarChar(40)
+  subtotal       Float    @default(0)
+  discount       Float    @default(0)
+  tax            Float    @default(0)
+  rounding       Float    @default(0)
+  total          Float    @default(0)
+  tendered       Float    @default(0)
+  change_due     Float    @default(0)
+  note           String?  @db.VarChar(500)
+  client_ref     String?  @unique @db.VarChar(64) // idempotency key from the till (a retried save is not posted twice)
+  created_at     DateTime @default(now())
+
+  @@index([shift_id])
+  @@index([ref_tran_id])
+  @@map("pos_receipts")
+}
+
+// How a receipt was paid (or refunded): CASH | CARD | CREDIT.
+model PosPayment {
+  id        Int     @id @default(autoincrement())
+  tran_id   Int
+  method    String  @db.VarChar(10)
+  acno      Int?
+  amount    Float
+  reference String? @db.VarChar(80)
+
+  @@index([tran_id])
+  @@map("pos_payments")
+}
+
+// A bill put on hold at the till, recalled later (any till of the same cashier).
+model PosHeldBill {
+  id         Int      @id @default(autoincrement())
+  user_id    String
+  label      String?  @db.VarChar(120)
+  data       Json
+  created_at DateTime @default(now())
+
+  @@index([user_id])
+  @@map("pos_held_bills")
+}

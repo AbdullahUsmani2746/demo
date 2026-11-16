@@ -103,15 +103,16 @@ export default function PermissionsPage() {
   };
   return (
     <div className="min-h-full bg-muted/40">
-      <div className="mx-auto max-w-[1400px] px-3 py-5 sm:px-6">
+      <div className="mx-auto max-w-[1600px] px-3 py-5 sm:px-6">
         {/* ── page header ─────────────────────────────────────────── */}
         <header className="flex items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#800000] to-[#5c0000] text-white shadow-md shadow-red-900/20">
             <ShieldCheck className="h-5 w-5" />
           </span>
           <div className="min-w-0">
-            <div className="text-[12.5px] text-muted-foreground">Administration</div>
+            <div className="text-[12.5px] text-muted-foreground">Admin</div>
             <h1 className="text-2xl font-bold tracking-tight">Permissions</h1>
+            <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">Who may do what — rights per role and person, approvals, menu access and data scopes.</p>
           </div>
         </header>
 

@@ -14,7 +14,7 @@ import { useRoles } from "@/hooks/useRoles"
 
 const WORKSPACES = [
   {
-    href: "/pos/dashboard",
+    href: "/pos",
     area: "pos",
     icon: Store,
     title: "Point of Sale",
@@ -22,7 +22,7 @@ const WORKSPACES = [
     cta: "Open POS",
   },
   {
-    href: "/accounting/dashboard",
+    href: "/accounting", // dashboard or the Applications launcher (app/(pages)/accounting/page.js)
     area: null,
     icon: Calculator,
     title: "Accounting",

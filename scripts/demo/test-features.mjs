@@ -1,5 +1,5 @@
 // scripts/demo/test-features.mjs — proves every Settings → Features switch both ways through the API.
-//   node --env-file=.env scripts/demo/test-features.mjs     (app running on :3000, demo database)
+//   node --env-file=.env scripts/demo/test-features.mjs [--base http://localhost:3000]   (app running, demo database; or DEMO_BASE_URL)
 // Saves each feature on / off, checks the server behaves accordingly, and resets them to the defaults.
 if (!(process.env.DEMO_DATABASE === "1" || process.env.DATABASE_URL?.includes("bizlogist_demo"))) { console.error("Refusing: not the demo database."); process.exit(1); }
 import { PrismaClient } from "@prisma/client";
@@ -12,7 +12,7 @@ import { runPlanLab } from "./features/planLab.mjs";
 import { runAccountingPort } from "./features/accounting.mjs";
 import { runCostingPort } from "./features/costing.mjs";
 const prisma = new PrismaClient();
-const BASE = "http://localhost:3000";
+const BASE = process.argv.includes("--base") ? process.argv[process.argv.indexOf("--base") + 1] : (process.env.DEMO_BASE_URL || "http://localhost:3000");
 
 async function login(u) {
   const jar = new Map();
@@ -34,6 +34,9 @@ const admin = await login("admin");
 const viewer = await login("sales");
 // every server route reads Settings → Features through its own 10 s cache
 const set = async (values) => { const r = await admin("PUT", "/api/settings/features", { values }); await new Promise((ok) => setTimeout(ok, 11000)); return r; };
+// The switches the company had before the run — put back at the end (the demo
+// database runs with its own set, scripts/demo/demoFeatures.mjs).
+const featuresBefore = (await admin("GET", "/api/settings/features")).body?.values || null;
 const vr = async (tc) => (await admin("GET", `/api/voucher/next-vr-no?tran_code=${tc}`)).body.nextVrNo;
 
 try {
@@ -270,6 +273,7 @@ try {
   }
 } finally {
   await admin("PUT", "/api/settings/features", { reset: true });
+  if (featuresBefore) await admin("PUT", "/api/settings/features", { values: featuresBefore });
   console.log(results.join("\n"));
   if (results.some((r) => r.startsWith("FAIL"))) process.exitCode = 1;
   await prisma.$disconnect();

@@ -70,6 +70,7 @@ function crumbFor(pathname) {
   if (!pathname) return null;
   if (pathname.startsWith("/accounting/hr")) return "HR";
   if (pathname.startsWith("/dashboard")) return "Dashboard";
+  if (pathname.startsWith("/admin")) return "Admin";
   if (pathname.startsWith("/accounting")) return "Accounting";
   return null;
 }
@@ -286,14 +287,16 @@ export function EmptyState({ icon: Icon, title, hint, action }) {
   );
 }
 
-export function NoAccess() {
+// title / hint: a screen switched off in Settings → Features says so instead
+// of sending the person to ask for rights they already have.
+export function NoAccess({ title = "You do not have access to this HR screen.", hint = "Ask an administrator for the HR rights on Admin → Permissions." } = {}) {
   return (
-    <div className="min-h-[60vh] bg-muted/40 px-3 pt-16">
+    <div className="px-3 pt-16">
       <div className="mx-auto flex max-w-lg items-start gap-3 rounded-xl border border-[#e6dcc6] bg-[#f5f0e6] px-5 py-4 text-[#5f4b1f] dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
         <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0" />
         <div>
-          <p className="font-semibold">You do not have access to this HR screen.</p>
-          <p className="mt-1 text-sm opacity-90">Ask an administrator for the HR rights on Admin → Permissions.</p>
+          <p className="font-semibold">{title}</p>
+          <p className="mt-1 text-sm opacity-90">{hint}</p>
         </div>
       </div>
     </div>

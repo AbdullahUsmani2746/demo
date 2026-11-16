@@ -35,6 +35,7 @@ import EmployeeDocumentsPanel from "./EmployeeDocumentsPanel";
 import { BLOOD_GROUPS } from "@/validators/employee.validator";
 import { useRoles } from "@/hooks/useRoles";
 import { usePermissions } from "@/hooks/usePermissions";
+import EmployeeLoginPanel from "./EmployeeLoginPanel";
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -147,7 +148,7 @@ const SECTIONS = [
   { value: "job", label: "Job", icon: Briefcase, fields: ["departmentId", "designationId", "workLocationId", "branchId", "employeetypeId", "employeecatId", "managerId", "costCenterId", "hireDate", "dor"] },
   { value: "contact", label: "Contact", icon: Phone, fields: ["phoneNumber", "emailAddress", "cityId", "residentialAddress", "emergencyContactName", "emergencyContactPhone", "nextOfKinName", "nextOfKinRelation", "nextOfKinPhone"] },
   { value: "pay", label: "Pay & Bank", icon: Wallet, fields: ["paymentMethod", "payType", "payFrequency", "rate", "bankId", "bank_bracnhId", "accountName", "accountNumber"] },
-  { value: "login", label: "System Login", icon: ShieldCheck, fields: ["username", "email", "role", "password", "confirmPassword"] },
+  { value: "login", label: "Login & Roles", icon: ShieldCheck, fields: ["username", "email", "role", "password", "confirmPassword"] },
   { value: "documents", label: "Documents", icon: FileText, fields: [] },
 ];
 
@@ -507,7 +508,9 @@ export default function EmployeeFormModal({
 
     // Only send login changes when the user may make them and something
     // actually changed (or a new login is being granted).
-    const applyLogin = canAdministerAccess && rest.grantAccess && (!hasExistingUser || loginTouched);
+    // An existing employee's login is saved on its own (Login & Roles panel,
+    // /api/employees/[id]/login); only a new employee sends one with the record.
+    const applyLogin = !isEdit && canAdministerAccess && rest.grantAccess && (!hasExistingUser || loginTouched);
 
     const payload = {
       ...rest,
@@ -543,6 +546,7 @@ export default function EmployeeFormModal({
     .toUpperCase();
 
   const loginSection = (() => {
+    if (isEdit && (canAdministerAccess || can("users.manage"))) return <EmployeeLoginPanel employee={employee} />;
     if (!canAdministerAccess) {
       return (
         <div className="rounded-xl border bg-muted/40 p-5 text-sm">
@@ -612,7 +616,7 @@ export default function EmployeeFormModal({
         ) : (
           <div className="flex items-start justify-between gap-3 rounded-xl border bg-amber-50 p-4 text-sm dark:bg-amber-500/10">
             <p className="text-amber-900 dark:text-amber-200">
-              A new login will be created when you save. Set a username, role and password.
+              A new login will be created when you save. Set a username, role and password — more roles can be added after saving.
             </p>
             <Button
               type="button"
@@ -983,7 +987,7 @@ export default function EmployeeFormModal({
             </section>
 
             <section hidden={section !== "login"}>
-              <SectionTitle title="System login" description="Lets the employee sign in to the system." />
+              <SectionTitle title="Login & Roles" description={isEdit ? "The employee's login and roles — saved on their own with Save login." : "Lets the employee sign in to the system."} />
               {loginSection}
             </section>
 

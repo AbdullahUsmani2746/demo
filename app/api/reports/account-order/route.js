@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { authorize, authErrorResponse } from "@/lib/auth/route";
+import { setAuditActor } from "@/lib/audit/context";
 import {
   ACCOUNT_ORDER_MAX,
   ACCOUNT_ORDER_REPORTS,
@@ -61,6 +62,7 @@ export async function PUT(req) {
   const report = body?.report;
   const { res, key, session } = await access(report);
   if (res) return res;
+  setAuditActor(session); // here, in the function that writes (lib/audit/context.js)
 
   const accounts = cleanAccountList(body?.accounts);
   if (!accounts) {
@@ -80,8 +82,9 @@ export async function PUT(req) {
 
 export async function DELETE(req) {
   const report = new URL(req.url).searchParams.get("report");
-  const { res, key } = await access(report);
+  const { res, key, session } = await access(report);
   if (res) return res;
+  setAuditActor(session);
   // deleteMany: no error when nothing was saved
   await prisma.settings.deleteMany({ where: { key } });
   return NextResponse.json({ report, accounts: [], updatedAt: null, message: "Default order restored" });

@@ -18,7 +18,7 @@ import {
     validationErrorBody,
 } from "@/lib/employees";
 import { guard } from "@/lib/auth/route";
-import { assignableLevels, checkRoleChange, roleAssignErrorResponse } from "@/lib/auth/roleAssign";
+import { assignableLevels, checkRoleChange, roleAssignErrorResponse, saveExtraRoles } from "@/lib/auth/roleAssign";
 
 export async function GET(req) {
     try {
@@ -134,6 +134,7 @@ export const POST = guard("employee.manage", async (req) => {
 
         let loginEmail = null;
         let requestedUsername = null;
+        let extraRoles = [];
         if (access.grantAccess) {
             if (!(await canAdministerEmployeeAccess(session))) {
                 return NextResponse.json(
@@ -148,8 +149,8 @@ export const POST = guard("employee.manage", async (req) => {
                 );
             }
             try {
-                ({ primary: access.role } = await checkRoleChange({
-                    session, primary: access.role, active: access.isActive !== false, limitLevels: await assignableLevels(session),
+                ({ primary: access.role, extra: extraRoles } = await checkRoleChange({
+                    session, primary: access.role, extra: access.roles || [], active: access.isActive !== false, limitLevels: await assignableLevels(session),
                 }));
             } catch (e) {
                 const r = roleAssignErrorResponse(e);
@@ -188,7 +189,7 @@ export const POST = guard("employee.manage", async (req) => {
                 // Convention: login id = employee id (as text). Fall back to a
                 // generated cuid if some unrelated user already holds that id.
                 const idTaken = await tx.user.findUnique({ where: { id: String(created.id) }, select: { id: true } });
-                await tx.user.create({
+                const login = await tx.user.create({
                     data: {
                         ...(idTaken ? {} : { id: String(created.id) }),
                         name: `${created.firstName} ${created.surname}`,
@@ -200,7 +201,9 @@ export const POST = guard("employee.manage", async (req) => {
                         departmentId: created.departmentId,
                         employeeId: created.id,
                     },
+                    select: { id: true },
                 });
+                await saveExtraRoles(login.id, extraRoles, session.user.id, tx);
             }
 
             return created;

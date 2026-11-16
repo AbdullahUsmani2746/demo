@@ -1,47 +1,24 @@
-import prisma from '@/lib/prisma';
-import { syncOrderToWooCommerce } from '@/services/wooCommerceSync';
-import { NextResponse } from 'next/server';
+// app/api/pos/orders/[id]/route.js — one POS receipt (sale or return), for the
+// receipt print, the receipts list and refunds. Posted receipts are never
+// edited here (they used to be: a PUT overwrote `rmk` of ANY voucher id, with
+// no period lock). A mistake is corrected with a POS return.
+import { NextResponse } from "next/server";
 import { guard } from "@/lib/auth/route";
+import { loadReceipt, posRights } from "@/lib/pos/posting";
+import { posErrorResponse, hasPosAccess } from "@/lib/pos/http";
 
-export async function GET(request, { params }) {
+export const GET = guard(null, async (request, { params, session }) => {
   try {
-    const id = await params.id;
-    
-    const order = await prisma.transactionsMaster.findUnique({
-      where: { tran_id: parseInt(id) },
-      include: {
-        transactions: {
-          include: {
-            itemDetails: true,
-          },
-        },
-      },
-    });
-
-    return order
-      ? NextResponse.json(order)
-      : NextResponse.json({ error: 'Order not found' }, { status: 404 });
+    const { id } = await params;
+    const rights = await posRights(session);
+    if (!hasPosAccess(rights)) return NextResponse.json({ error: "No point of sale access." }, { status: 403 });
+    const receipt = await loadReceipt(Number(id));
+    if (!receipt) return NextResponse.json({ error: "Receipt not found." }, { status: 404 });
+    if (!rights.allShifts && receipt.user_id !== String(session.user.id)) {
+      return NextResponse.json({ error: "This receipt was rung up at another till (pos.allShifts)." }, { status: 403 });
+    }
+    return NextResponse.json(receipt);
   } catch (error) {
-    console.error('GET order error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
-  }
-}
-
-export const PUT = guard("pos.manage", async (request, { params }) => {
-  try {
-    const { status } = await request.json();
-
-    const order = await prisma.transactionsMaster.update({
-      where: { tran_id: parseInt(params.id) },
-      data: { rmk: status, sync_status: 'pending' },
-      include: { transactions: true },
-    });
-
-    // await syncOrderToWooCommerce(order);
-
-    return NextResponse.json(order);
-  } catch (error) {
-    console.error('PUT order error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return posErrorResponse(error, "POS receipt");
   }
 });

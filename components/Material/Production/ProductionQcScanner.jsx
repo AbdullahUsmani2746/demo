@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import useScanDetection from "use-scan-detection";
+import useScanDetection from "@/hooks/useBarcodeScan";
 import { ScanLine, FlaskConical, ArrowRight, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";

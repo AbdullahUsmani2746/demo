@@ -1,217 +1,95 @@
+// /api/forms/orderqualitycontrol — receipts against purchase orders waiting for /
+// past QC (one row per QualityMaster with order_no, made on QA Entry).
+//   ?status=DRAFT|APPROVED|REJECTED  ?search= (order no / batch / item / vendor / barcode)
+//   ?page=&pageSize=   counts per status always come back for the tabs.
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { authorize, authErrorResponse } from "@/lib/auth/route";
+import { isoDay } from "@/lib/quality/qc";
 
-function mapEnumToStatus(status) {
-  if (!status) return null;
-  const statusMap = {
-    DRAFT: "draft",
-    APPROVED: "approve",
-    REJECTED: "reject",
-  };
-  return statusMap[status] || status.toLowerCase();
+function searchWhere(search) {
+  if (!search) return {};
+  const n = Number(search);
+  const or = [
+    { item: { item: { contains: search, mode: "insensitive" } } },
+    { item: { code: { contains: search, mode: "insensitive" } } },
+    { qa_barcode: { contains: search, mode: "insensitive" } },
+    { qc_barcode: { contains: search, mode: "insensitive" } },
+    { orderMaster: { acno: { acname: { contains: search, mode: "insensitive" } } } },
+  ];
+  if (Number.isInteger(n) && n > 0 && n < 2147483647) or.push({ order_no: n }, { batch_no: n }, { grn_no: n });
+  return { OR: or };
 }
 
 export async function GET(req) {
   try {
-    const { searchParams } = new URL(req.url);
+    await authorize();
+    const sp = new URL(req.url).searchParams;
+    const page = Math.max(1, parseInt(sp.get("page") || "1", 10) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(sp.get("pageSize") || "25", 10) || 25));
+    const search = (sp.get("search") || "").trim();
+    const status = (sp.get("status") || "").toUpperCase();
+    const base = { order_no: { not: null }, ...searchWhere(search) };
 
-    const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
-    const pageSize = Math.min(
-      100,
-      Math.max(1, parseInt(searchParams.get("pageSize") || "20"))
-    );
-    const search = (searchParams.get("search") || "").trim();
-    const includeGrn = searchParams.get("includeGrn") === "true";
-    const includeBatch = searchParams.get("includeBatch") === "true";
+    const grouped = await prisma.qualityMaster.groupBy({ by: ["status"], where: base, _count: { _all: true } });
+    const counts = { DRAFT: 0, APPROVED: 0, REJECTED: 0 };
+    for (const g of grouped) counts[g.status] = (counts[g.status] || 0) + g._count._all;
+    counts.ALL = grouped.reduce((n, g) => n + g._count._all, 0);
 
-    // Build WHERE clause for quality masters
-    const whereClause = {
-      // Only get quality masters with order_no (purchase orders)
-      order_no: { not: null },
-      // Filter by search term if provided
-      ...(search && {
-        OR: [
-          { order_no: { equals: parseInt(search) || 0 } },
-          { item: { item: { contains: search, mode: 'insensitive' } } },
-          { batch_no: { equals: parseInt(search) || 0 } },
-          { qa_barcode: { contains: search, mode: 'insensitive' } },
-          { qc_barcode: { contains: search, mode: 'insensitive' } },
-          { orderMaster: { 
-            acno: { acname: { contains: search, mode: 'insensitive' } } 
-          } }
-        ]
-      })
-    };
-
-    // Get quality master records (items entered by store person)
-    const qualityMasters = await prisma.qualityMaster.findMany({
-      where: whereClause,
-      include: {
-        item: {
-          select: { item: true, itcd: true }
+    const where = { ...base, ...(["DRAFT", "APPROVED", "REJECTED", "HOLD", "REWORK"].includes(status) ? { status } : {}) };
+    const [total, rows] = await Promise.all([
+      prisma.qualityMaster.count({ where }),
+      prisma.qualityMaster.findMany({
+        where,
+        orderBy: [{ id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: {
+          item: { select: { item: true, code: true } },
+          orderMaster: { select: { dated: true, acno: { select: { acname: true } } } },
+          details: { orderBy: [{ attempt_no: "asc" }, { id: "asc" }], select: { attempt_no: true, parameter_name: true, reject_reason: true, attempt_date: true } },
         },
-        orderMaster: {
-          include: {
-            acno: {
-              select: { acname: true }
-            }
-          }
-        },
-        details: {
-          orderBy: { attempt_no: 'desc' },
-          take: 1
-        }
-      },
-      orderBy: { order_no: 'desc' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    });
+      }),
+    ]);
+    const lines = rows.length
+      ? await prisma.orderDetail.findMany({
+          where: { OR: rows.map((r) => ({ order_no: r.order_no, itcd: r.itcd })) },
+          select: { order_no: true, itcd: true, qty: true, unit: true },
+        })
+      : [];
+    const lineOf = new Map(lines.map((l) => [`${l.order_no}-${l.itcd}`, l]));
 
-    // Get total count for pagination
-    const totalCount = await prisma.qualityMaster.count({
-      where: whereClause
-    });
-
-    // Group items by order_no for display
-    const ordersMap = new Map();
-
-    qualityMasters.forEach(qm => {
-      if (!qm.order_no) return; // Skip if no order_no
-      
-      if (!ordersMap.has(qm.order_no)) {
-        ordersMap.set(qm.order_no, {
-          order_no: qm.order_no,
-          order_name: qm.orderMaster?.acno?.acname || `Order ${qm.order_no}`,
-          items: [],
-          total_items: 0,
-          order_status: qm.orderMaster?.status || 1
-        });
-      }
-
-      const order = ordersMap.get(qm.order_no);
-      const itemStatus = mapEnumToStatus(qm.status);
-      const latestDetail = qm.details?.[0];
-
-      order.items.push({
-        id: qm.id,
-        itcd: qm.itcd,
-        item_name: qm.item?.item || "-",
-        qty: qm.batch_size || 0,
-        unit: "", // You might need to get unit from orderDetail
-        status: itemStatus,
-        qa_barcode: qm.qa_barcode,
-        qc_barcode: qm.qc_barcode,
-        batch_no: qm.batch_no,
-        mfg_date: qm.mfg_date,
-        expiry_date: qm.expiry_date,
-        grn_status: qm.grn_status || "PENDING",
-        grn_no: null,
-        has_parameters: false, // You can check if item has parameters
-        reject_reason: latestDetail?.reject_reason || null
-      });
-
-      order.total_items = order.items.length;
-    });
-
-    const orders = Array.from(ordersMap.values());
-
-    // Get GRN information if requested
-    const grnInfo = {};
-    if (includeGrn) {
-      const orderIds = orders.map(o => o.order_no).filter(id => id !== null);
-      
-      if (orderIds.length > 0) {
-        const grns = await prisma.transactionsMaster.findMany({
-          where: {
-            po_no: { in: orderIds },
-            tran_code: 4, // GRN transaction code
-          },
-          include: {
-            transactions: {
-              where: { itcd: { not: null } },
-              select: { itcd: true }
-            }
-          }
-        });
-        
-        for (const grn of grns) {
-          if (grn.po_no && grn.transactions.length > 0) {
-            for (const trans of grn.transactions) {
-              if (trans.itcd) {
-                const key = `${grn.po_no}-${trans.itcd}`;
-                grnInfo[key] = grn.vr_no || grn.grn_no;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Get batch information if requested (already included in qualityMaster)
-    const batchInfo = {};
-    if (includeBatch) {
-      qualityMasters.forEach(qm => {
-        if (!qm.order_no) return;
-        const key = `${qm.order_no}-${qm.itcd}-${qm.id}`;
-        batchInfo[key] = {
-          batch_no: qm.batch_no,
-          mfg_date: qm.mfg_date,
-          expiry_date: qm.expiry_date
-        };
-      });
-    }
-
-    // Add GRN numbers to items
-    orders.forEach(order => {
-      let totalApproved = 0;
-      let totalRejected = 0;
-      let totalDraft = 0;
-      
-      order.items.forEach(item => {
-        const key = `${order.order_no}-${item.itcd}-${item.id}`;
-        item.grn_no = grnInfo[key] || null;
-        item.grn_status = item.grn_no ? "CREATED" : item.grn_status;
-        
-        // Count statuses
-        if (item.status === 'approve' || item.status === 'approved') totalApproved++;
-        else if (item.status === 'reject' || item.status === 'rejected') totalRejected++;
-        else if (item.status === 'draft') totalDraft++;
-      });
-      
-      // Add summary stats to order
-      order.summary = {
-        total_items: order.total_items,
-        approved: totalApproved,
-        rejected: totalRejected,
-        draft: totalDraft,
+    const data = rows.map((r) => {
+      const line = lineOf.get(`${r.order_no}-${r.itcd}`);
+      const decision = r.details.find((d) => d.attempt_no === 0 && d.parameter_name === "qa_decision");
+      const received = r.details.find((d) => d.parameter_name === "store_receiving_entry");
+      return {
+        id: r.id,
+        order_no: r.order_no,
+        order_date: isoDay(r.orderMaster?.dated),
+        vendor_name: r.orderMaster?.acno?.acname || "",
+        itcd: r.itcd,
+        item_code: r.item?.code || "",
+        item_name: r.item?.item || "",
+        received_qty: r.batch_size ?? 0,
+        ordered_qty: line?.qty ?? 0,
+        unit: line?.unit || "",
+        batch_no: r.batch_no ?? null,
+        status: r.status,
+        reason: decision?.reject_reason || "",
+        received_on: isoDay(received?.attempt_date),
+        grn_status: r.grn_status || "PENDING",
+        grn_no: r.grn_no ?? null,
+        qa_barcode: r.qa_barcode || "",
+        approved_by: r.approved_by || "",
       };
     });
 
-    // Calculate overall stats
-    const allItems = orders.flatMap(order => order.items);
-    const stats = {
-      total: allItems.length,
-      pending: allItems.filter(item => item.status === 'draft').length,
-      approved: allItems.filter(item => item.status === 'approve' || item.status === 'approved').length,
-      rejected: allItems.filter(item => item.status === 'reject' || item.status === 'rejected').length,
-      grnCreated: Object.keys(grnInfo).length
-    };
-
-    return NextResponse.json({
-      page,
-      pageSize,
-      total: totalCount,
-      totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
-      orders,
-      grnInfo,
-      batchInfo: includeBatch ? batchInfo : {},
-      stats
-    });
+    return NextResponse.json({ page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)), counts, data });
   } catch (err) {
-    console.error("Error fetching QC data:", err);
-    return NextResponse.json(
-      { error: "Failed to fetch data", details: err.message },
-      { status: 500 }
-    );
+    const res = authErrorResponse(err);
+    if (res) return res;
+    console.error("Order QC list:", err);
+    return NextResponse.json({ error: "Failed to fetch data", details: err.message }, { status: 500 });
   }
 }

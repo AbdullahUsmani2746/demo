@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import axios from "axios";
-import useScanDetection from "use-scan-detection";
+import useScanDetection from "@/hooks/useBarcodeScan";
 import {
   FACTORY_MODULES,
   getWorkflowForModule,

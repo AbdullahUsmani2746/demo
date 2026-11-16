@@ -96,7 +96,8 @@ const CardHead = ({ children, right }) => (
   </div>
 );
 
-export default function NotificationSettings() {
+// hideTitle: the page around it already shows the title (Admin → Notifications).
+export default function NotificationSettings({ hideTitle = false } = {}) {
   useRoles(); // role names
   const queryClient = useQueryClient();
   const [view, setView] = useState("overview");
@@ -238,7 +239,7 @@ export default function NotificationSettings() {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-3">
+        <div className={hideTitle ? "hidden" : "flex min-w-0 items-start gap-3"}>
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#800000] to-[#5c0000] text-white shadow-md shadow-red-900/20">
             <Bell className="h-5 w-5" />
           </div>

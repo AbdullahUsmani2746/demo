@@ -54,6 +54,10 @@ import KeyboardHint, { KeyCombo } from "@/components/ui/KeyboardHint";
 import { generateProcessOrderPDF } from "@/components/Template/ProcessOrder";
 import axios from "axios";
 import { useCompany } from "@/context/CompanyContext";
+import { useFeatures } from "@/hooks/useFeatures";
+import { useProductionSetup } from "@/hooks/useProductionSetup";
+import { isFinishedCategory } from "@/lib/production/setupConfig";
+import { statusLabel } from "@/lib/quality/qc";
 
 // Constants
 const PRODUCTION_TYPES = {
@@ -70,6 +74,9 @@ const MODAL_MODES = {
 
 const ProductionTab = () => {
   const { company } = useCompany();
+  // QC gate on Send to Production (Settings → Features "production.qcBeforeSend"; the route enforces it)
+  const features = useFeatures();
+  const { setup: productionSetup } = useProductionSetup();
   // State Management
   const [showModal, setShowModal] = useState(false);
   const [modalMode, setModalMode] = useState(MODAL_MODES.CREATE);
@@ -400,6 +407,18 @@ const ProductionTab = () => {
   );
 
   const getSendButtonStatus = (plan) => {
+    const qcStatus = plan.qualityMaster?.status || null;
+    const qcBlocks =
+      ["REJECTED", "HOLD", "REWORK"].includes(qcStatus) ||
+      (features.on("production.qcBeforeSend") && qcStatus !== "APPROVED" && isFinishedCategory(productionSetup, plan.item?.ic_id));
+    if ((plan.status === "Completed" || plan.status === "COMPLETED") && qcBlocks) {
+      return {
+        enabled: false,
+        tooltip: `Waiting for QC (${qcStatus ? statusLabel(qcStatus) : "not started"})`,
+        icon: AlertTriangle,
+        color: "text-muted-foreground cursor-not-allowed",
+      };
+    }
     if (plan.status === "Scheduled") {
       return {
         enabled: false,

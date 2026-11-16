@@ -1,10 +1,12 @@
-import React from 'react'
-import POSReturn from '@/components/POS/PosReturn'
+import { Suspense } from "react";
+import RefundScreen from "@/components/POS/RefundScreen";
 
-const page = () => {
+export const metadata = { title: "Refund · Point of Sale" };
+
+export default function RefundPage() {
   return (
-    <POSReturn/>
-  )
+    <Suspense fallback={null}>
+      <RefundScreen />
+    </Suspense>
+  );
 }
-
-export default page

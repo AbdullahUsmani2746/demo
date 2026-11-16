@@ -70,7 +70,8 @@ function LeavingPage() {
   const { data, isLoading } = useQuery({ queryKey: ["hr-leavings", status], queryFn: () => api(`/api/hr/leaving?status=${status}`), enabled: on && Boolean(meta.data) });
   if (meta.isLoading || features.isLoading) return <PageSkeleton />;
   const r = meta.data?.rights ?? {};
-  if (!on || !(r.leavingView || r.leavingApply)) return <NoAccess />;
+  if (!on) return <NoAccess title="Leaving & settlement is switched off." hint="Turn on “Leaving process & final settlement” in Settings → Features to use it." />;
+  if (!(r.leavingView || r.leavingApply)) return <NoAccess />;
   const openId = Number(sp.get("separation")) || null;
   const setParam = (k, v) => {
     const p = new URLSearchParams(sp);

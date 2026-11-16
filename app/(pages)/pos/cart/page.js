@@ -1,13 +1,7 @@
-import Cart from '@/components/POS/Cart';
-import { motion } from 'framer-motion';
+import PosTerminal from "@/components/POS/terminal/PosTerminal";
 
-import React from 'react'
+export const metadata = { title: "Sell · Point of Sale" };
 
-  const CartPage = () => {
-  return (
-    <div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4">
-      <Cart />
-    </div>
-  );
+export default function SellPage() {
+  return <PosTerminal />;
 }
-export default CartPage

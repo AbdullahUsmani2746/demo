@@ -107,9 +107,11 @@ export async function GET(request) {
     }
 
     // Find employee using email
-    const employee = await prisma.employee.findUnique({
-      where: { emailAddress: email },
-    });
+    // The login's employee (User.employeeId — a login email may differ from
+    // the employee's), else the employee with that email (older logins).
+    const employee = user.employeeId
+      ? { id: user.employeeId }
+      : await prisma.employee.findUnique({ where: { emailAddress: email } });
 
     if (!employee) {
       // User is not Admin and has no Employee profile linked, so they cannot access restricted menus

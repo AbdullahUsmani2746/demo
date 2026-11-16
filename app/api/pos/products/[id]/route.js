@@ -2,30 +2,20 @@ import prisma from '@/lib/prisma';
 import { syncProductToWooCommerce } from '@/services/wooCommerceSync';
 import { NextResponse } from 'next/server';
 import { guard } from "@/lib/auth/route";
+import { getGodownStock } from "@/lib/stock/godownStock";
+import { getPosSettings } from "@/lib/pos/settings";
 
 export async function GET(request, { params }) {
   try {
     const { searchParams } = new URL(request.url);
-    const godown = searchParams.get("godown") || 1;
+    const godown = Number(searchParams.get("godown")) || (await getPosSettings()).godown;
 
     const product = await prisma.item.findUnique({
-      where: { itcd: parseInt(params.id) },
+      where: { itcd: parseInt((await params).id) },
       include: {
         itemCategories: {
           include: {
-            mainCategory: {
-              include: {
-                ProductCategories: {
-                  include: {
-                    ProductGroups: {
-                      include: {
-                        ProductMasterCategories: true
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            mainCategory: true,
           }
         }
       }
@@ -35,32 +25,8 @@ export async function GET(request, { params }) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
 
-    // If godown is provided, calculate stock using raw query
-    if (godown) {
-      try {
-        const stockResult = await prisma.$queryRaw`
-          SELECT SUM(
-            CASE 
-              WHEN tm.tran_code IN (4, 10,12) AND tm.godown = ${Number(godown)} THEN t.qty  -- Purchase, Sale Return (add to stock)
-              WHEN tm.tran_code IN (6, 9, 5) AND tm.godown = ${Number(godown)} THEN -t.qty  -- Sale, Purchase Return (remove from stock)
-              WHEN tm.tran_code = 11 AND tm.godown = ${Number(godown)} THEN -t.qty  -- Transfer out
-              WHEN tm.tran_code = 11 AND tm.godown2 = ${Number(godown)} THEN t.qty   -- Transfer in
-              ELSE 0
-            END
-          ) as stock
-          FROM "Transactions" t
-          JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
-          WHERE t.itcd = ${product.itcd} 
-          AND (tm.godown = ${Number(godown)} OR tm.godown2 = ${Number(godown)})
-        `;
-        
-        // Add calculated stock to product object
-        product.stock = stockResult[0]?.stock || 0;
-      } catch (stockError) {
-        console.error(`Error calculating stock for item ${product.itcd}:`, stockError);
-        product.stock = 0;
-      }
-    }
+    // Stock in the godown asked for (default: the POS godown) — lib/stock/godownStock.js.
+    product.stock = (await getGodownStock([product.itcd], godown)).get(product.itcd) || 0;
 
     return NextResponse.json(product);
   } catch (error) {
@@ -71,22 +37,19 @@ export async function GET(request, { params }) {
 
 export const DELETE = guard("pos.manage", async (request, { params }) => {
   try {
-    const product = await prisma.item.update({
-      where: { itcd: parseInt(params.id) },
-      data: { sync_status: 'deleted' },
-    });
-
-    // Uncomment if syncing is required
-    // await syncProductToWooCommerce(product);
-
-    await prisma.item.delete({
-      where: { itcd: parseInt(params.id) },
-    });
-
-    return NextResponse.json({ message: 'Product deleted' });
+    const itcd = parseInt((await params).id);
+    // An item already on a voucher is never deleted (its history would lose it):
+    // it is marked discontinued and disappears from the till instead.
+    const used = await prisma.transactions.count({ where: { itcd } });
+    if (used > 0) {
+      await prisma.item.update({ where: { itcd }, data: { discard: true, sync_status: "deleted" } });
+      return NextResponse.json({ message: "Product is on " + used + " voucher line(s) — marked discontinued instead of deleted." });
+    }
+    await prisma.item.delete({ where: { itcd } });
+    return NextResponse.json({ message: "Product deleted" });
   } catch (error) {
-    console.error('DELETE product error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    console.error("DELETE product error:", error);
+    return NextResponse.json({ error: "This product is used elsewhere and cannot be deleted." }, { status: 409 });
   }
 });
 
@@ -157,7 +120,7 @@ export const PUT = guard("pos.manage", async (request, { params }) => {
 
     // Get current product to check if SKU is being changed
     const currentProduct = await prisma.item.findUnique({
-      where: { itcd: parseInt(params.id) }
+      where: { itcd: parseInt((await params).id) }
     });
 
     if (!currentProduct) {
@@ -172,7 +135,7 @@ export const PUT = guard("pos.manage", async (request, { params }) => {
       const existingSku = await prisma.item.findFirst({
         where: { 
           sku: productData.sku.trim(),
-          itcd: { not: parseInt(params.id) } // Exclude current product
+          itcd: { not: parseInt((await params).id) } // Exclude current product
         }
       });
 
@@ -223,7 +186,7 @@ export const PUT = guard("pos.manage", async (request, { params }) => {
 
     // Update the product
     const product = await prisma.item.update({
-      where: { itcd: parseInt(params.id) },
+      where: { itcd: parseInt((await params).id) },
       data: updateData,
       include: { itemCategories: true },
     });

@@ -64,6 +64,13 @@ const reportHref = (report, params = {}) => {
 };
 // The filters a drill step carries over unchanged.
 const pickFilters = (filters, names) => Object.fromEntries(names.map((n) => [n, filters?.[n]]));
+// POS reports (lib/reports/pos.js): period + cashier (a cashier is held to their own till by the server).
+const dmyOf = (v) => (v ? format(new Date(v), "dd-MM-yyyy") : "");
+const POS_DATE_FILTERS = [
+  { name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+  { name: "dateTo", label: "To Date", type: "date", required: true, default: new Date() },
+];
+const POS_CASHIER_FILTER = { name: "cashier", label: "Cashier", type: "select", nameKey: "name", valueKey: "id", options: "cashiers", apiEndpoint: "/api/pos/cashiers", clearable: true };
 
 // One layout for every summary type of a report: fields the columns of the
 // chosen type do not have are dropped (groups left empty go too), so the
@@ -619,6 +626,12 @@ const LC_STAGE_COMMON_FILTERS = [
       { value: "CONT", label: "CONT" },
     ],
   },
+];
+
+// Production QC rows (qc, qcParameters): open the QC sheet of the process order, or the order itself.
+const QC_SHEET_DRILL = [
+  { label: "Open QC sheet", when: (row) => !!row.proc_ord_no, href: (row) => `/accounting/forms/qualitycontrol/${row.proc_ord_no}` },
+  { label: "Open process order", when: (row) => !!row.proc_ord_no, href: (row) => `/accounting/material?tab=production&search=${row.proc_ord_no}` },
 ];
 
 export const REPORT_CONFIG = {
@@ -5606,7 +5619,7 @@ export const REPORT_CONFIG = {
         label: "Batch No",
         type: "select",
         options: "batches",
-        apiEndpoint: "/api/quality/batches",
+        apiEndpoint: "/api/forms/qualitycontrol?batches=1",
         valueKey: "batch_no",
         nameKey: "batch_no",
         clearable: true,
@@ -7242,7 +7255,7 @@ export const REPORT_CONFIG = {
         label: "Batch No",
         type: "select",
         options: "batches",
-        apiEndpoint: "/api/forms/qualitycontrol",
+        apiEndpoint: "/api/forms/qualitycontrol?batches=1",
         valueKey: "batch_no",
         nameKey: "batch_no",
         clearable: true,
@@ -7330,123 +7343,270 @@ export const REPORT_CONFIG = {
       csv: false,
     },
   },
+  // ── Point of sale (lib/reports/pos.js) — a cashier sees only their own till ──
   posTransactions: {
     showSummary: true,
-    title: "POS Transactions Report",
-    description: "Detailed report of all Point of Sale transactions",
+    title: "POS Receipts",
+    description: "Every point-of-sale receipt — sales and refunds — with how it was paid. Opens the voucher.",
     apiEndpoint: "/api/reports/posTransactions",
-    filters: [
-      { name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), new Date().getMonth(), 1) },
+    filters: [...POS_DATE_FILTERS, POS_CASHIER_FILTER,
       {
-        name: "dateTo",
-        label: "To Date",
-        type: "date",
-        required: true,
-        default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
+        name: "kind", label: "Receipts", type: "select", default: "all",
+        options: [{ value: "all", label: "Sales and returns" }, { value: "sale", label: "Sales only" }, { value: "return", label: "Returns only" }],
       },
       {
-        name: "customer",
-        label: "Customer",
-        type: "select",
-        nameKeys: ["acno", "acname"],
-        separator: " - ",
-        valueKey: "acno",
-        options: "customers",
-        apiEndpoint: `/api/accounts/acno?${CUSTOMER_GROUP_PARAM}`,
-        clearable: true,
+        name: "paymentMode", label: "Payment", type: "select", default: "all",
+        options: [{ value: "all", label: "All" }, { value: "cash", label: "Cash" }, { value: "card", label: "Card / Bank" }, { value: "credit", label: "Credit (account)" }],
       },
       {
-        name: "paymentMode",
-        label: "Payment Mode",
-        type: "select",
-        options: [
-          { value: "all", label: "All" },
-          { value: "cash", label: "Cash" },
-          { value: "card", label: "Card" },
-          { value: "upi", label: "UPI" },
-          { value: "credit", label: "Credit" },
-        ],
-        default: "all",
+        name: "customer", label: "Customer", type: "select", nameKeys: ["acno", "acname"], separator: " - ", valueKey: "acno",
+        options: "customers", apiEndpoint: `/api/accounts/acno?${CUSTOMER_GROUP_PARAM}`, clearable: true,
+      },
+      {
+        name: "item", label: "Item", type: "select", nameKeys: ["code", "item"], separator: " - ", valueKey: "itcd",
+        options: "items", apiEndpoint: "/api/setup/items", clearable: true,
       },
     ],
     columns: [
-      { field: "dated", headerName: "Date", width: 20, type: "date" },
-      { field: "vr_no", headerName: "Vr #", width: 20 },
-      { field: "invoice_no", headerName: "Invoice No", width: 35 },
-      {
-        field: "customer_name",
-        headerName: "Customer",
-        width: 40,
-        valueGetter: (params) => params.row.acno?.acname || "Walk-in Customer",
-      },
-      { field: "payment_mode", headerName: "Payment Mode", width: 40 },
-      {
-        field: "total_qty",
-        headerName: "Total Qty",
-        width: 20,
-        type: "number",
-      },
-      {
-        field: "total_amount",
-        headerName: "Total Amount",
-        width: 40,
-        type: "currency",
-      },
-      {
-        field: "discount",
-        headerName: "Discount",
-        width: 20,
-        type: "currency",
-      },
-      {
-        field: "net_amount",
-        headerName: "Net Amount",
-        width: 40,
-        type: "currency",
-      },
+      { field: "dated", headerName: "Date", width: 18, type: "date" },
+      { field: "time", headerName: "Time", width: 10 },
+      { field: "invoice_no", headerName: "Receipt", width: 18 },
+      { field: "kind", headerName: "Type", width: 12 },
+      { field: "customer_name", headerName: "Customer", width: 34 },
+      { field: "payment_mode", headerName: "Paid by", width: 24 },
+      { field: "qty", headerName: "Qty", width: 14, type: "number", showTotal: true },
+      { field: "gross", headerName: "Gross", width: 20, type: "currency", showTotal: true },
+      { field: "discount", headerName: "Discount", width: 18, type: "currency", showTotal: true },
+      { field: "tax", headerName: "Tax", width: 16, type: "currency", showTotal: true },
+      { field: "rounding", headerName: "Round off", width: 14, type: "currency", showTotal: true },
+      { field: "total", headerName: "Total", width: 20, type: "currency" },
+      { field: "total_signed", headerName: "Net (returns −)", width: 20, type: "currency", showTotal: true },
+      { field: "cash", headerName: "Cash", width: 18, type: "currency", showTotal: true },
+      { field: "card", headerName: "Card", width: 18, type: "currency", showTotal: true },
+      { field: "credit", headerName: "Credit", width: 18, type: "currency", showTotal: true },
+      { field: "tendered", headerName: "Tendered", width: 18, type: "currency" },
+      { field: "change_due", headerName: "Change", width: 16, type: "currency" },
+      { field: "ref_invoice_no", headerName: "Refunds receipt", width: 18 },
+      { field: "reason", headerName: "Return reason", width: 30 },
     ],
-    detailColumns: [
+    layout: {
+      pinned: ["dated", "invoice_no"],
+      groups: [
+        { id: "money", label: "Bill", fields: ["gross", "discount", "tax", "rounding", "total", "total_signed"], foldTo: "total_signed" },
+        { id: "paid", label: "Paid", fields: ["cash", "card", "credit", "tendered", "change_due"], foldTo: "cash" },
+      ],
+      views: [
+        { id: "summary", label: "Summary", fields: ["dated", "invoice_no", "kind", "customer_name", "payment_mode", "qty", "total_signed", "entered_by"] },
+        { id: "all", label: "Everything" },
+      ],
+      defaultView: "summary",
+      card: { title: "invoice_no", subtitle: "customer_name", figures: ["total_signed", "payment_mode", "qty", "dated"] },
+    },
+    summaryFields: [
+      { field: "receipts", label: "Sales", type: "number" },
+      { field: "returns", label: "Returns", type: "number" },
+      { field: "sales_total", label: "Sales total", type: "currency" },
+      { field: "returns_total", label: "Refunded", type: "currency" },
+      { field: "net_total", label: "Net sales", type: "currency" },
+      { field: "discount", label: "Discounts", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
+  },
+  posDailySales: {
+    showSummary: true,
+    title: "POS Daily Sales",
+    description: "Point-of-sale takings per day: sales, refunds, net and how they were paid.",
+    apiEndpoint: "/api/reports/posDailySales",
+    filters: [...POS_DATE_FILTERS, POS_CASHIER_FILTER],
+    columns: [
+      { field: "dated", headerName: "Date", width: 18, type: "date" },
+      { field: "receipts", headerName: "Sales", width: 12, type: "number", showTotal: true },
+      { field: "returns", headerName: "Returns", width: 12, type: "number", showTotal: true },
+      { field: "qty", headerName: "Net qty", width: 14, type: "number", showTotal: true },
+      { field: "gross_sales", headerName: "Gross sales", width: 20, type: "currency", showTotal: true },
+      { field: "discount", headerName: "Discounts", width: 18, type: "currency", showTotal: true },
+      { field: "tax", headerName: "Tax", width: 16, type: "currency", showTotal: true },
+      { field: "sales_total", headerName: "Sales total", width: 20, type: "currency", showTotal: true },
+      { field: "returns_total", headerName: "Refunded", width: 18, type: "currency", showTotal: true },
+      { field: "net_sales", headerName: "Net sales", width: 20, type: "currency", showTotal: true },
+      { field: "average_bill", headerName: "Average bill", width: 18, type: "currency" },
+      { field: "cash", headerName: "Cash", width: 18, type: "currency", showTotal: true },
+      { field: "card", headerName: "Card", width: 18, type: "currency", showTotal: true },
+      { field: "credit", headerName: "Credit", width: 18, type: "currency", showTotal: true },
+    ],
+    layout: {
+      pinned: ["dated"],
+      groups: [
+        { id: "sales", label: "Sales", fields: ["gross_sales", "discount", "tax", "sales_total", "returns_total", "net_sales", "average_bill"], foldTo: "net_sales" },
+        { id: "paid", label: "Net by payment", fields: ["cash", "card", "credit"], foldTo: "cash" },
+      ],
+      card: { title: "dated", figures: ["net_sales", "receipts", "returns", "cash"] },
+    },
+    drill: [
       {
-        field: "item",
-        headerName: "Item",
-        width: 200,
-        valueGetter: (params) => params.row.itemDetails?.item || "",
-      },
-      { field: "qty", headerName: "Qty", width: 100, type: "number" },
-      { field: "rate", headerName: "Rate", width: 100, type: "currency" },
-      {
-        field: "gross_amount",
-        headerName: "Amount",
-        width: 150,
-        type: "currency",
-      },
-      {
-        field: "discount",
-        headerName: "Line Discount",
-        width: 150,
-        type: "currency",
+        label: "Open the day's receipts",
+        href: (row, filters) => reportHref("posTransactions", { dateFrom: dmyOf(row.dated), dateTo: dmyOf(row.dated), cashier: filters.cashier }),
       },
     ],
     summaryFields: [
+      { field: "receipts", label: "Sales", type: "number" },
+      { field: "sales_total", label: "Sales total", type: "currency" },
+      { field: "returns_total", label: "Refunded", type: "currency" },
+      { field: "net_sales", label: "Net sales", type: "currency" },
+      { field: "cash", label: "Cash", type: "currency" },
+      { field: "card", label: "Card", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
+  },
+  posSalesByItem: {
+    showSummary: true,
+    title: "POS Sales by Item",
+    description: "What sold at the till: quantity and value sold, returned and net, per item.",
+    apiEndpoint: "/api/reports/posSalesByItem",
+    filters: [...POS_DATE_FILTERS, POS_CASHIER_FILTER,
+      { name: "category", label: "Category", nameKey: "ic_name", type: "select", options: "itemCategories", apiEndpoint: "/api/setup/item_categories", clearable: true },
+    ],
+    columns: [
+      { field: "item_code", headerName: "Code", width: 14 },
+      { field: "item_name", headerName: "Item", width: 40 },
+      { field: "category", headerName: "Category", width: 22 },
+      { field: "receipts", headerName: "Receipts", width: 12, type: "number", showTotal: true },
+      { field: "qty_sold", headerName: "Sold", width: 14, type: "number", showTotal: true },
+      { field: "qty_returned", headerName: "Returned", width: 14, type: "number", showTotal: true },
+      { field: "net_qty", headerName: "Net qty", width: 14, type: "number", showTotal: true },
+      { field: "average_rate", headerName: "Avg rate", width: 16, type: "currency" },
+      { field: "gross_sales", headerName: "Gross", width: 18, type: "currency", showTotal: true },
+      { field: "discount", headerName: "Discount", width: 16, type: "currency", showTotal: true },
+      { field: "sales_value", headerName: "Sales", width: 18, type: "currency", showTotal: true },
+      { field: "returns_value", headerName: "Returns", width: 18, type: "currency", showTotal: true },
+      { field: "net_value", headerName: "Net value", width: 18, type: "currency", showTotal: true },
+      { field: "tax", headerName: "Tax", width: 14, type: "currency", showTotal: true },
+    ],
+    layout: {
+      pinned: ["item_code", "item_name"],
+      groups: [
+        { id: "qty", label: "Quantity", fields: ["qty_sold", "qty_returned", "net_qty"], foldTo: "net_qty" },
+        { id: "value", label: "Value", fields: ["average_rate", "gross_sales", "discount", "sales_value", "returns_value", "net_value", "tax"], foldTo: "net_value" },
+      ],
+      card: { title: "item_name", subtitle: "item_code", figures: ["net_qty", "net_value", "qty_returned", "receipts"] },
+    },
+    drill: [
       {
-        field: "total_transactions",
-        label: "Total Transactions",
-        type: "number",
+        label: "Open the receipts with this item",
+        when: (row) => !!row.itcd,
+        href: (row, filters) => reportHref("posTransactions", { dateFrom: filters.dateFrom, dateTo: filters.dateTo, cashier: filters.cashier, item: row.itcd }),
       },
-      { field: "total_qty", label: "Total Quantity", type: "number" },
-      { field: "total_amount", label: "Total Amount", type: "currency" },
-      { field: "total_discount", label: "Total Discount", type: "currency" },
       {
-        field: "total_net_amount",
-        label: "Total Net Amount",
-        type: "currency",
+        label: "Open stock ledger",
+        when: (row) => !!row.itcd,
+        href: (row, filters) => stockLedgerHref({ item: row.itcd, dateFrom: filters.dateFrom, dateTo: filters.dateTo }),
       },
     ],
-    exportOptions: {
-      pdf: true,
-      excel: true,
-      csv: false,
-    },
+    summaryFields: [
+      { field: "items", label: "Items", type: "number" },
+      { field: "net_qty", label: "Net qty", type: "number" },
+      { field: "sales_value", label: "Sales", type: "currency" },
+      { field: "returns_value", label: "Returns", type: "currency" },
+      { field: "net_value", label: "Net value", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
+  },
+  posSalesByPayment: {
+    showSummary: true,
+    title: "POS Sales by Payment",
+    description: "Cash, card / bank and credit taken at the till, less refunds.",
+    apiEndpoint: "/api/reports/posSalesByPayment",
+    filters: [...POS_DATE_FILTERS, POS_CASHIER_FILTER],
+    columns: [
+      { field: "payment_mode", headerName: "Payment", width: 30 },
+      { field: "receipts", headerName: "Sales", width: 12, type: "number", showTotal: true },
+      { field: "returns", headerName: "Refunds", width: 12, type: "number", showTotal: true },
+      { field: "taken", headerName: "Taken", width: 20, type: "currency", showTotal: true },
+      { field: "refunded", headerName: "Refunded", width: 20, type: "currency", showTotal: true },
+      { field: "net", headerName: "Net", width: 20, type: "currency", showTotal: true },
+      { field: "share", headerName: "Share %", width: 14, type: "percent" },
+    ],
+    layout: { pinned: ["payment_mode"], card: { title: "payment_mode", figures: ["net", "taken", "refunded", "share"] } },
+    drill: [
+      {
+        label: "Open these receipts",
+        when: (row) => ["CASH", "CARD", "CREDIT"].includes(row.method),
+        href: (row, filters) => reportHref("posTransactions", { dateFrom: filters.dateFrom, dateTo: filters.dateTo, cashier: filters.cashier, paymentMode: String(row.method).toLowerCase() }),
+      },
+    ],
+    summaryFields: [
+      { field: "taken", label: "Taken", type: "currency" },
+      { field: "refunded", label: "Refunded", type: "currency" },
+      { field: "net", label: "Net", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
+  },
+  posSalesByCashier: {
+    showSummary: true,
+    title: "POS Sales by Cashier",
+    description: "Receipts, refunds, discounts and net sales per cashier.",
+    apiEndpoint: "/api/reports/posSalesByCashier",
+    filters: [...POS_DATE_FILTERS],
+    columns: [
+      { field: "cashier_name", headerName: "Cashier", width: 30 },
+      { field: "receipts", headerName: "Sales", width: 12, type: "number", showTotal: true },
+      { field: "returns", headerName: "Returns", width: 12, type: "number", showTotal: true },
+      { field: "qty", headerName: "Net qty", width: 14, type: "number", showTotal: true },
+      { field: "discount", headerName: "Discounts", width: 18, type: "currency", showTotal: true },
+      { field: "sales_total", headerName: "Sales total", width: 20, type: "currency", showTotal: true },
+      { field: "returns_total", headerName: "Refunded", width: 18, type: "currency", showTotal: true },
+      { field: "net_sales", headerName: "Net sales", width: 20, type: "currency", showTotal: true },
+      { field: "average_bill", headerName: "Average bill", width: 18, type: "currency" },
+      { field: "cash", headerName: "Net cash", width: 18, type: "currency", showTotal: true },
+    ],
+    layout: { pinned: ["cashier_name"], card: { title: "cashier_name", figures: ["net_sales", "receipts", "returns", "average_bill"] } },
+    drill: [
+      {
+        label: "Open this cashier's receipts",
+        when: (row) => !!row.cashier,
+        href: (row, filters) => reportHref("posTransactions", { dateFrom: filters.dateFrom, dateTo: filters.dateTo, cashier: row.cashier }),
+      },
+    ],
+    summaryFields: [
+      { field: "cashiers", label: "Cashiers", type: "number" },
+      { field: "receipts", label: "Sales", type: "number" },
+      { field: "net_sales", label: "Net sales", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
+  },
+  posReturns: {
+    showSummary: true,
+    title: "POS Returns",
+    description: "Every refund given at the till, the receipt it refunds and why. Opens the voucher.",
+    apiEndpoint: "/api/reports/posReturns",
+    filters: [...POS_DATE_FILTERS, POS_CASHIER_FILTER],
+    columns: [
+      { field: "dated", headerName: "Date", width: 18, type: "date" },
+      { field: "time", headerName: "Time", width: 10 },
+      { field: "invoice_no", headerName: "Return", width: 16 },
+      { field: "ref_invoice_no", headerName: "Refunds receipt", width: 18 },
+      { field: "customer_name", headerName: "Customer", width: 30 },
+      { field: "reason", headerName: "Reason", width: 34 },
+      { field: "refund_mode", headerName: "Refunded by", width: 22 },
+      { field: "qty", headerName: "Qty", width: 12, type: "number", showTotal: true },
+      { field: "net", headerName: "Goods", width: 18, type: "currency", showTotal: true },
+      { field: "tax", headerName: "Tax", width: 14, type: "currency", showTotal: true },
+      { field: "total", headerName: "Refunded", width: 18, type: "currency", showTotal: true },
+    ],
+    layout: { pinned: ["dated", "invoice_no"], card: { title: "invoice_no", subtitle: "reason", figures: ["total", "ref_invoice_no", "qty", "refund_mode"] } },
+    drill: [
+      {
+        label: "Open the sale it refunds",
+        when: (row) => !!row.ref_tran_id,
+        href: (row) => voucherHref({ tran_id: row.ref_tran_id, tran_code: 5 }),
+      },
+    ],
+    summaryFields: [
+      { field: "returns", label: "Returns", type: "number" },
+      { field: "qty", label: "Qty", type: "number" },
+      { field: "total", label: "Refunded", type: "currency" },
+    ],
+    exportOptions: { pdf: true, excel: true, csv: false },
   },
   accountLedger: {
     // Multi-account runs read as one block per account: a header row names the
@@ -10832,6 +10992,7 @@ export const REPORT_CONFIG = {
           { value: "APPROVED", label: "Approved" },
           { value: "REJECTED", label: "Rejected" },
           { value: "REWORK", label: "Rework" },
+          { value: "HOLD", label: "On hold" },
         ],
         default: { value: "", label: "All" },
         clearable: true,
@@ -10841,7 +11002,7 @@ export const REPORT_CONFIG = {
         label: "Batch No",
         type: "select",
         options: "batches",
-        apiEndpoint: "/api/forms/qualitycontrol",
+        apiEndpoint: "/api/forms/qualitycontrol?batches=1",
         valueKey: "batch_no",
         nameKey: "batch_no",
         clearable: true,
@@ -10893,15 +11054,19 @@ export const REPORT_CONFIG = {
           field: "batch_no",
           headerName: "BATCH_NO",
           width: 50,
-          type: "integer",
-          valueGetter: (params) => params.row.batch_no || "",
+          type: "string", // an identifier — never grouped like an amount
+          valueGetter: (params) => (params.row.batch_no ? String(params.row.batch_no) : ""),
         },
 
       ];
 
-      // Parameter columns will be added dynamically by the API
-      // REJECT_REASON and STATUS columns will be added at the end
-      return baseColumns;
+      // Status and reason are columns of every row (the API's own statusColumn
+      // never reached the table — the viewer builds columns from this config).
+      return [
+        ...baseColumns,
+        { field: "display_status", headerName: "STATUS", width: 60 },
+        { field: "reject_reason", headerName: "REASON", width: 150 },
+      ];
     },
     // Dynamic parameter columns are handled in the API response
     dynamicColumns: true,
@@ -10958,6 +11123,7 @@ export const REPORT_CONFIG = {
       pinned: ["proc_ord_no", "item_name"],
       card: { title: "item_name", subtitle: (r) => [r.batch_no && `Batch ${r.batch_no}`, r.proc_ord_no && `PO ${r.proc_ord_no}`].filter(Boolean).join(" · ") },
     },
+    drill: QC_SHEET_DRILL,
     exportOptions: {
       pdf: true,
       excel: true,
@@ -11043,11 +11209,19 @@ export const REPORT_CONFIG = {
           headerName: "PRODUCT",
           width: 150,
         },
+        { field: "vendor_name", headerName: "VENDOR", width: 120 },
+        { field: "batch_size", headerName: "RECEIVED", width: 50, type: "float" },
+        { field: "batch_no", headerName: "BATCH_NO", width: 50, type: "string" },
+        { field: "grn_no", headerName: "GRN", width: 40, type: "string" },
       ];
 
-      // Parameter columns will be added dynamically by the API
-      // REJECT_REASON and STATUS columns will be added at the end
-      return baseColumns;
+      // Status and reason are columns of every row (the API's own statusColumn
+      // never reached the table — the viewer builds columns from this config).
+      return [
+        ...baseColumns,
+        { field: "display_status", headerName: "STATUS", width: 60 },
+        { field: "reject_reason", headerName: "REASON", width: 150 },
+      ];
     },
     // Dynamic parameter columns are handled in the API response
     dynamicColumns: true,
@@ -11101,8 +11275,16 @@ export const REPORT_CONFIG = {
     // the Record Details sheet.
     layout: {
       pinned: ["order_no", "item_name"],
-      card: { title: "item_name", subtitle: (r) => [r.order_no && `SO ${r.order_no}`, r.itcd].filter(Boolean).join(" · ") },
+      card: { title: "item_name", subtitle: (r) => [r.order_no && `PO ${r.order_no}`, r.itcd].filter(Boolean).join(" · ") },
     },
+    // A receipt row opens its QC sheet (Order QC); the order itself through tran_code 400.
+    drill: [
+      {
+        label: "Open receipt QC",
+        when: (row) => Number.isInteger(Number(row.id)) && !!row.order_no,
+        href: (row) => `/accounting/forms/orderqualitycontrol/${row.order_no}?qc=${row.id}`,
+      },
+    ],
     exportOptions: {
       pdf: true,
       excel: true,
@@ -11163,7 +11345,7 @@ export const REPORT_CONFIG = {
         label: "Batch No",
         type: "select",
         options: "batches",
-        apiEndpoint: "/api/forms/qualitycontrol",
+        apiEndpoint: "/api/forms/qualitycontrol?batches=1",
         valueKey: "batch_no",
         nameKey: "batch_no",
         clearable: true,
@@ -11273,6 +11455,13 @@ export const REPORT_CONFIG = {
       { field: "draft_count", label: "Draft", type: "number" },
       { field: "rework_count", label: "Rework", type: "number" },
     ],
+
+    // Wide engine (rule 15): one row per batch, parameters as columns.
+    layout: {
+      pinned: ["proc_ord_no", "item_name"],
+      card: { title: "item_name", subtitle: (r) => [r.batch_no && `Batch ${r.batch_no}`, r.proc_ord_no && `PO ${r.proc_ord_no}`].filter(Boolean).join(" · ") },
+    },
+    drill: QC_SHEET_DRILL,
 
     exportOptions: {
       pdf: true,
@@ -14082,7 +14271,7 @@ export const REPORT_CONFIG = {
         label: "Batch No",
         type: "select",
         options: "batches",
-        apiEndpoint: "/api/forms/qualitycontrol",
+        apiEndpoint: "/api/forms/qualitycontrol?batches=1",
         valueKey: "batch_no",
         nameKey: "batch_no",
         clearable: true,
@@ -15657,6 +15846,7 @@ export const ENTERED_BY_REPORTS = {
   materialTransfer: "TransactionsMaster",
   stockLedger: "TransactionsMaster",
   posTransactions: "TransactionsMaster",
+  posReturns: "TransactionsMaster",
   batchLedger: "TransactionsMaster",
   purchaseOrder: "OrderMaster",
   saleOrder: "OrderMaster",
@@ -15718,7 +15908,7 @@ function getReportCategory(reportType) {
   const categories = {
     stock: ["stock", "stockActivity", "stockActivityView", "stockLedger", "stockMetrics", "tradingMargin"],
     production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "pendingReport"],
-    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "customerAging", "salesPerformanceWeekly", "sales_matrix_monthwise", "sales_matrix_monthwise_margin", "dispatchWithoutRates"],
+    sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "posDailySales", "posSalesByItem", "posSalesByPayment", "posSalesByCashier", "posReturns", "customerAging", "salesPerformanceWeekly", "sales_matrix_monthwise", "sales_matrix_monthwise_margin", "dispatchWithoutRates"],
     purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn","exbondReport", "vendorAging"],
     financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "accountsActivity", "payment", "receipt", "journal"],
     service: ["serviceOrder", "serviceEntry", "serviceInvoice"],

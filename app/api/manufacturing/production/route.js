@@ -86,6 +86,7 @@ export async function GET(request) {
         productionPlanDetail: { include: { item: true, issueLine: true }, orderBy: [{ sno: 'asc' }, { id: 'asc' }] },
         outputs: { orderBy: { line_no: 'asc' } },
         changeLogs: { orderBy: { changed_at: 'desc' }, take: 20 },
+        qualityMaster: { select: { status: true, batch_no: true } }, // QC gate on Send to Production
       },
     });
 

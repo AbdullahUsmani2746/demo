@@ -6,21 +6,9 @@ import { guard } from "@/lib/auth/route";
 export async function GET(request, { params }) {
   try {
     const category = await prisma.itemCategory.findUnique({
-      where: { id: parseInt(params.id) },
+      where: { id: parseInt((await params).id) },
       include: {
-        mainCategory: {
-          include: {
-            ProductCategories: {
-              include: {
-                ProductGroups: {
-                  include: {
-                    ProductMasterCategories: true,
-                  },
-                },
-              },
-            },
-          },
-        },
+        mainCategory: true,
       },
     });
 
@@ -38,22 +26,10 @@ export const PUT = guard("pos.manage", async (request, { params }) => {
     const data = await request.json();
 
     const category = await prisma.itemCategory.update({
-      where: { id: parseInt(params.id) },
+      where: { id: parseInt((await params).id) },
       data: { ...data, sync_status: 'pending' },
       include: {
-        mainCategory: {
-          include: {
-            ProductCategories: {
-              include: {
-                ProductGroups: {
-                  include: {
-                    ProductMasterCategories: true,
-                  },
-                },
-              },
-            },
-          },
-        },
+        mainCategory: true,
       },
     });
 
@@ -91,14 +67,14 @@ export const PUT = guard("pos.manage", async (request, { params }) => {
 export const DELETE = guard("pos.manage", async (request, { params }) => {
   try {
     const category = await prisma.itemCategory.update({
-      where: { id: parseInt(params.id) },
+      where: { id: parseInt((await params).id) },
       data: { sync_status: 'deleted' },
     });
 
     // await syncCategoryToWooCommerce(category);
 
     await prisma.itemCategory.delete({
-      where: { id: parseInt(params.id) },
+      where: { id: parseInt((await params).id) },
     });
 
     return NextResponse.json({ message: 'Category deleted' });

@@ -1,556 +1,292 @@
 "use client";
-import { roleLabel } from "@/lib/auth/roleNames";
+
+// Admin → POS shifts (/admin/shift): cashier shifts used by the Point of Sale;
+// a login's shift is set on Logins & Roles. Rights: users.manage (the API checks).
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Clock, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Users } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useRoles } from "@/hooks/useRoles";
-import React, { useState, useEffect } from "react";
-import { Plus, Edit, 
-  //Trash2,
-   X, Clock, Search } from "lucide-react";
-import axios from "axios";
+import { api, CHIP, EmptyState, HR_MAIN, HR_PAGE, ListSkeleton, PageHeader, Panel, TH, TH_ROW } from "@/components/HR/shared";
+import { RoleChips } from "@/components/Admin/loginParts";
+import { cn } from "@/lib/utils";
 
-const ShiftPage = () => {
-  useRoles(); // role names
-  const [shifts, setShifts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
-  const [modalType, setModalType] = useState("create");
-  const [selectedShift, setSelectedShift] = useState(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [showUsersModal, setShowUsersModal] = useState(false);
-  const [shiftUsers, setShiftUsers] = useState([]);
-  const [page, setPage] = useState(1);
-  const [limit] = useState(10);
-  const [total, setTotal] = useState(0);
+function hhmm(t) {
+  if (!t) return "";
+  const [h, m] = String(t).split(":");
+  const n = parseInt(h, 10);
+  if (Number.isNaN(n)) return t;
+  return `${n % 12 || 12}:${String(parseInt(m, 10) || 0).padStart(2, "0")} ${n >= 12 ? "PM" : "AM"}`;
+}
 
-  const [formData, setFormData] = useState({
-    name: "",
-    startTime: "",
-    endTime: "",
-  });
-  const [error, setError] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
+export default function ShiftPage() {
+  const qc = useQueryClient();
+  const { roleName } = useRoles();
+  const [search, setSearch] = useState("");
+  const searchRef = useRef(null);
+  const { data, isLoading, error, refetch, isFetching } = useQuery({ queryKey: ["shifts-all"], queryFn: () => api("/api/shifts?limit=1000"), retry: false });
+  const shifts = useMemo(() => data?.shifts || [], [data]);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return q ? shifts.filter((s) => s.name.toLowerCase().includes(q)) : shifts;
+  }, [shifts, search]);
+
+  const [editing, setEditing] = useState(null); // null | "new" | shift
+  const [form, setForm] = useState({ name: "", startTime: "08:00", endTime: "17:00" });
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const [peopleOf, setPeopleOf] = useState(null);
+
+  const openNew = () => {
+    setForm({ name: "", startTime: "08:00", endTime: "17:00" });
+    setEditing("new");
+  };
 
   useEffect(() => {
-    const delayDebounce = setTimeout(() => {
-      fetchShifts();
-    }, 500);
-
-    return () => clearTimeout(delayDebounce);
-  }, [searchTerm, page]);
-
-  useEffect(() => {
-    fetchShifts();
+    const onKey = (e) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.altKey && (e.key === "n" || e.key === "N")) {
+        e.preventDefault();
+        openNew();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const fetchShifts = async () => {
+  const refresh = () => qc.invalidateQueries({ queryKey: ["shifts-all"] });
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!form.name.trim()) return toast.error("Give the shift a name");
+    if (!form.startTime || !form.endTime) return toast.error("Start and end times are required");
+    if (form.startTime >= form.endTime) return toast.error("End time must be after start time");
+    setSaving(true);
     try {
-      setLoading(true);
-      setError(null);
-
-      const response = await axios.get("/api/shifts", {
-        params: { search: searchTerm, page, limit },
-      });
-
-      const formatted = response.data.shifts.map((shift) => ({
-        ...shift,
-        startTime: formatTime(shift.startTime),
-        endTime: formatTime(shift.endTime),
-      }));
-
-      setShifts(formatted);
-      setTotal(response.data.total);
-    } catch (error) {
-      console.error("Error fetching shifts:", error);
-      setError(error.message || "An error occurred");
+      const body = { name: form.name.trim(), startTime: form.startTime, endTime: form.endTime };
+      if (editing === "new") await api("/api/shifts", { method: "POST", body });
+      else await api(`/api/shifts/${editing.id}`, { method: "PUT", body });
+      toast.success(editing === "new" ? `Shift ${body.name} added` : `Shift ${body.name} saved`);
+      setEditing(null);
+      refresh();
+    } catch (err) {
+      toast.error(err.message, { duration: 6000 });
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  const formatTo12Hour = (timeString) => {
-    if (timeString.includes("AM") || timeString.includes("PM")) {
-      return timeString;
-    }
-
-    if (timeString.includes(":")) {
-      const [hours, minutes] = timeString.split(":");
-      const hourInt = parseInt(hours, 10);
-
-      const period = hourInt >= 12 ? "PM" : "AM";
-      const twelveHour = hourInt % 12 || 12;
-
-      return `${twelveHour}:${minutes} ${period}`;
-    }
-
-    if (timeString.includes("T")) {
-      return new Date(timeString).toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
-    }
-
-    return timeString;
-  };
-
-   const openUsersModal = (users) => {
-    setShiftUsers(users);
-    setShowUsersModal(true);
-  };
-
-  const handleSubmit = async () => {
+  const remove = async () => {
+    setSaving(true);
     try {
-      setSubmitting(true);
-      setError(null);
-
-      // Simple validation
-      if (!formData.startTime || !formData.endTime) {
-        throw new Error("Start and end times are required");
-      }
-
-      if (formData.startTime >= formData.endTime) {
-        throw new Error("End time must be after start time");
-      }
-
-      if (modalType === "create") {
-        const response = await axios.post("/api/shifts", formData);
-        setShifts([response.data, ...shifts]);
-      } else {
-        const response = await axios.put(
-          `/api/shifts/${selectedShift.id}`,
-          formData
-        );
-        setShifts(
-          shifts.map((shift) =>
-            shift.id === selectedShift.id ? response.data : shift
-          )
-        );
-      }
-
-      closeModal();
-    } catch (error) {
-      console.error("Error saving shift:", error);
-      setError(
-        error.response?.data?.error || error.message || "Something went wrong"
-      );
+      await api(`/api/shifts/${deleting.id}`, { method: "DELETE" });
+      toast.success(`Shift ${deleting.name} deleted`);
+      setDeleting(null);
+      refresh();
+    } catch (err) {
+      toast.error(err.message, { duration: 6000 });
     } finally {
-      setSubmitting(false);
+      setSaving(false);
     }
   };
 
-  const handleDelete = async (shiftId) => {
-    if (window.confirm("Are you sure you want to delete this shift?")) {
-      try {
-        await axios.delete(`/api/shifts/${shiftId}`);
-        setShifts(shifts.filter((shift) => shift.id !== shiftId));
-      } catch (error) {
-        console.error("Error deleting shift:", error);
-        setError(
-          error.response?.data?.error ||
-            error.message ||
-            "Failed to delete shift"
-        );
-      }
-    }
-  };
-
-  const openModal = (type, shift = null) => {
-    setModalType(type);
-    setSelectedShift(shift);
-
-    if (shift) {
-      setFormData({
-        name: shift.name,
-        startTime: shift.startTime,
-        endTime: shift.endTime,
-      });
-    } else {
-      setFormData({
-        name: "",
-        startTime: "08:00",
-        endTime: "17:00",
-      });
-    }
-
-    setShowModal(true);
-  };
-
-  const closeModal = () => {
-    setShowModal(false);
-    setSelectedShift(null);
-    setFormData({
-      name: "",
-      startTime: "",
-      endTime: "",
-    });
-    setError(null);
-  };
-
-  const formatTime = (timeString) => {
-    if (typeof timeString === "string" && timeString.includes(":")) {
-      return timeString;
-    }
-
-    try {
-      return new Date(timeString).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      });
-    } catch {
-      return timeString;
-    }
-  };
-
-  const filteredShifts = shifts.filter((shift) =>
-    shift.name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  // if (loading) {
-  //   return (
-  //     <div className="min-h-screen bg-background flex items-center justify-center p-4">
-  //       <div className="text-center">
-  //         <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary mx-auto mb-3"></div>
-  //         <p className="text-muted-foreground text-sm md:text-base">
-  //           Loading shifts...
-  //         </p>
-  //       </div>
-  //     </div>
-  //   );
-  // }
-
-  if (error && shifts.length === 0) {
+  if (error?.status === 401 || error?.status === 403) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-4">
-        <div className="text-center max-w-xs md:max-w-md">
-          <div className="bg-destructive/10 p-3 md:p-4 rounded-lg mb-4">
-            <p className="text-destructive text-sm md:text-base">
-              Error: {error}
-            </p>
+      <div className={HR_PAGE}>
+        <PageHeader icon={Clock} title="POS shifts" />
+        <main className={HR_MAIN}>
+          <div className="mt-4 rounded-xl border border-[#e6dcc6] bg-[#f5f0e6] px-5 py-4 text-[#5f4b1f] dark:bg-amber-950/30 dark:text-amber-200">
+            <p className="font-semibold">You do not manage shifts.</p>
+            <p className="mt-1 text-sm opacity-90">Shifts are managed by holders of users.manage.</p>
           </div>
-          <button
-            onClick={fetchShifts}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground px-4 py-2 rounded-lg text-sm md:text-base"
-          >
-            Retry
-          </button>
-        </div>
+        </main>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-background py-2 sm:py-4 md:py-6 lg:py-8">
-      <div className="max-w-7xl mx-auto px-2 sm:px-4 lg:px-8">
-        {error && (
-          <div className="bg-destructive/10 border border-destructive rounded-lg p-2 sm:p-3 mb-3 sm:mb-4 md:mb-6">
-            <div className="flex items-center justify-between">
-              <p className="text-destructive text-xs sm:text-sm md:text-base">
-                {error}
-              </p>
-              <button
-                onClick={() => setError(null)}
-                className="text-destructive hover:text-destructive/80"
-              >
-                <X className="h-3 w-3 sm:h-4 sm:w-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="bg-card rounded-lg shadow-sm border border-border mb-3 sm:mb-4 md:mb-6 lg:mb-8">
-          <div className="px-3 py-2 sm:px-4 sm:py-3 md:px-6 md:py-4 border-b border-border">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div className="flex items-center space-x-2 sm:space-x-3">
-                <div className="bg-primary/10 p-1 sm:p-2 rounded-lg">
-                  <Clock className="h-4 w-4 sm:h-5 sm:w-5 md:h-6 md:w-6 text-primary" />
-                </div>
-                <div>
-                  <h1 className="text-base sm:text-lg md:text-xl lg:text-2xl font-bold text-foreground">
-                    Shift Management
-                  </h1>
-                  <p className="text-xs sm:text-sm text-muted-foreground">
-                    Manage shift schedules
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => openModal("create")}
-                className="bg-primary hover:bg-primary/90 text-primary-foreground px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 rounded-lg flex items-center space-x-1 sm:space-x-2 transition-colors text-xs sm:text-sm md:text-base"
-              >
-                <Plus className="h-3 w-3 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" />
-                <span>Add Shift</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="px-3 py-2 sm:px-4 sm:py-3 md:px-6 md:py-4 bg-muted border-b border-border">
-            <div className="relative max-w-xs sm:max-w-sm md:max-w-md">
-              <div className="absolute inset-y-0 left-0 pl-2 sm:pl-3 flex items-center pointer-events-none">
-                <Search className="h-3 w-3 sm:h-4 sm:w-4 text-muted-foreground" />
-              </div>
-              <input
-                type="text"
-                placeholder="Search shifts..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="block w-full pl-7 sm:pl-10 pr-2 sm:pr-3 py-1.5 sm:py-2 border border-input rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent text-xs sm:text-sm md:text-base bg-background"
-              />
-            </div>
-          </div>
-        </div>
-
-        {loading ? (
-          <div className="text-center">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-            <p className="text-muted-foreground">Loading shifts...</p>
-          </div>
-        ) : (
-          <div className="bg-card rounded-lg shadow-sm border border-border overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-border">
-               <thead className="bg-primary">
-    <tr>
-      <th className="px-2 py-1 sm:px-3 sm:py-2 md:px-6 md:py-3 text-center text-xs sm:text-xs font-medium text-primary-foreground uppercase tracking-wider">
-        Shift Name
-      </th>
-      <th className="px-2 py-1 sm:px-3 sm:py-2 md:px-6 md:py-3 text-center text-xs sm:text-xs font-medium text-primary-foreground uppercase tracking-wider">
-        Start Time
-      </th>
-      <th className="px-2 py-1 sm:px-3 sm:py-2 md:px-6 md:py-3 text-center text-xs sm:text-xs font-medium text-primary-foreground uppercase tracking-wider">
-        End Time
-      </th>
-      <th className="px-2 py-1 sm:px-3 sm:py-2 md:px-6 md:py-3 text-center text-xs sm:text-xs font-medium text-primary-foreground uppercase tracking-wider">
-        Users
-      </th>
-      <th className="px-2 py-1 sm:px-3 sm:py-2 md:px-6 md:py-3 text-center text-xs sm:text-xs font-medium text-primary-foreground uppercase tracking-wider">
-        Actions
-      </th>
-    </tr>
-  </thead>
-                <tbody className="bg-card divide-y divide-border">
-                {filteredShifts.map((shift) => (
-    <tr key={shift.id} className="hover:bg-secondary">
-      <td className="px-2 py-2 sm:px-3 sm:py-3 whitespace-nowrap">
-        <div className="text-xs sm:text-sm font-sm text-primary text-center">
-          {shift.name}
-        </div>
-      </td>
-      <td className="px-2 py-2 sm:px-3 sm:py-3 whitespace-nowrap text-center">
-        <div className="text-xs sm:text-sm text-primary">
-          {formatTo12Hour(shift.startTime)}
-        </div>
-      </td>
-      <td className="px-2 py-2 sm:px-3 sm:py-3 whitespace-nowrap text-center">
-        <div className="text-xs sm:text-sm text-primary">
-          {formatTo12Hour(shift.endTime)}
-        </div>
-      </td>
-      <td className="px-2 py-2 sm:px-3 sm:py-3 whitespace-nowrap text-center">
-        <button 
-          onClick={() => openUsersModal(shift.users)}
-          className={`text-xs sm:text-sm px-2 py-1 rounded-full ${
-            shift.users.length > 0 
-              ? "bg-primary/10 text-primary hover:bg-primary/20 cursor-pointer"
-              : "bg-muted text-muted-foreground cursor-default"
-          }`}
-        >
-          {shift.users.length} user{shift.users.length !== 1 ? 's' : ''}
-        </button>
-      </td>
-      <td className="px-2 py-2 sm:px-3 sm:py-3 whitespace-nowrap text-center text-xs sm:text-sm font-medium">
-        <div className="flex justify-center space-x-1 sm:space-x-2">
-          <button
-            onClick={() => openModal("edit", shift)}
-            className="text-primary hover:text-primary/80 p-1 rounded-md hover:bg-primary/10 transition-colors"
-          >
-            <Edit className="h-3 w-3 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" />
-          </button>
-          <button
-            onClick={() => handleDelete(shift.id)}
-            className="text-destructive hover:text-destructive/80 p-1 rounded-md hover:bg-destructive/10 transition-colors"
-          >
-            {/* <Trash2 className="h-3 w-3 sm:h-3.5 sm:w-3.5 md:h-4 md:w-4" /> */}
-          </button>
-        </div>
-      </td>
-    </tr>
-  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {filteredShifts.length === 0 && (
-              <div className="text-center py-6 sm:py-8 md:py-10 lg:py-12">
-                <Clock className="h-8 w-8 sm:h-10 sm:w-10 md:h-12 md:w-12 text-muted-foreground mx-auto mb-2 sm:mb-3 md:mb-4" />
-                <p className="text-muted-foreground text-xs sm:text-sm md:text-base">
-                  No shifts found
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-        <div className="flex items-center justify-between py-4">
-          <span className="text-sm text-muted-foreground">
-            Page {page} of {Math.ceil(total / limit)}
-          </span>
-
-          <div className="flex space-x-2">
-            <button
-              onClick={() => setPage((p) => Math.max(p - 1, 1))}
-              disabled={page === 1}
-              className="px-3 py-1 rounded bg-secondary hover:bg-secondary/80 disabled:opacity-50"
-            >
-              Previous
-            </button>
-
-            <button
-              onClick={() => setPage((p) => p + 1)}
-              disabled={page >= Math.ceil(total / limit)}
-              className="px-3 py-1 rounded bg-secondary hover:bg-secondary/80 disabled:opacity-50"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {showUsersModal && (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
-      <div className="bg-card rounded-lg shadow-sm border border-border w-full max-w-xs sm:max-w-sm md:max-w-md max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between p-3 sm:p-4 md:p-5 lg:p-6 border-b border-border">
-          <h3 className="text-base sm:text-lg font-semibold">
-            Users in Shift
-          </h3>
-          <button
-            onClick={() => setShowUsersModal(false)}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <X className="h-4 w-4 sm:h-5 sm:w-5" />
-          </button>
-        </div>
-
-        <div className="p-3 sm:p-4 md:p-5 lg:p-6">
-          {shiftUsers.length > 0 ? (
-            <div className="space-y-3">
-              {shiftUsers.map((user) => (
-                <div key={user.id} className="flex items-center justify-between p-2 border rounded-lg">
-                  <div>
-                    <p className="font-medium">{user.name}</p>
-                    <p className="text-sm text-muted-foreground">{roleLabel(user.role)}</p>
-                  </div>
-                  <span className={`px-2 py-1 text-xs rounded-full ${
-                    user.isActive ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}>
-                    {user.isActive ? 'Active' : 'Inactive'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-4">
-              <UserX className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
-              <p className="text-muted-foreground">No users assigned to this shift</p>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )}
-
-      {showModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-2 sm:p-4">
-          <div className="bg-primary text-primary-foreground rounded-lg sm:rounded-xl w-full max-w-xs sm:max-w-sm md:max-w-md max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between p-3 sm:p-4 md:p-5 lg:p-6 border-b border-border">
-              <h3 className="text-base sm:text-lg font-semibold text-primary-foreground">
-                {modalType === "create" ? "Add New Shift" : "Edit Shift"}
-              </h3>
-              <button
-                onClick={closeModal}
-                className="text-primary-foreground transition-colors"
-              >
-                <X className="h-4 w-4 sm:h-5 sm:w-5" />
-              </button>
-            </div>
-
-            <div className="p-3 sm:p-4 md:p-5 lg:p-6 space-y-3 sm:space-y-4">
-              {error && (
-                <div className="bg-secondary/10 border border-secondary rounded-lg p-2 sm:p-3">
-                  <p className="text-secondary text-xs sm:text-sm">{error}</p>
-                </div>
-              )}
-              <div>
-                <label className="block text-xs sm:text-sm font-medium text-primary-foreground mb-1 sm:mb-2">
-                  Shift Name
-                </label>
-                <input
-                  type="text"
-                  placeholder="Enter shift name"
-                  value={formData.name}
-                  onChange={(e) =>
-                    setFormData({ ...formData, name: e.target.value })
-                  }
-                  className="w-full px-2 py-1.5 sm:px-3 sm:py-2 border border-input rounded-lg text-foreground focus:ring-2 focus:ring-ring focus:border-transparent text-xs sm:text-sm md:text-base bg-background"
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 md:gap-4">
-                <div>
-                  <label className="block text-xs sm:text-sm font-medium text-primary-foreground   mb-1 sm:mb-2">
-                    Start Time
-                  </label>
-                  <input
-                    type="time"
-                    value={formData.startTime}
-                    onChange={(e) =>
-                      setFormData({ ...formData, startTime: e.target.value })
-                    }
-                    className="w-full px-2 py-1.5 sm:px-3 sm:py-2 border text-foreground border-input rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent text-xs sm:text-sm md:text-base bg-background"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs sm:text-sm font-medium text-primary-foreground mb-1 sm:mb-2">
-                    End Time
-                  </label>
-                  <input
-                    type="time"
-                    value={formData.endTime}
-                    onChange={(e) =>
-                      setFormData({ ...formData, endTime: e.target.value })
-                    }
-                    className="w-full px-2 py-1.5 sm:px-3 sm:py-2 border text-foreground border-input rounded-lg focus:ring-2 focus:ring-ring focus:border-transparent text-xs sm:text-sm md:text-base bg-background"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-2 sm:space-x-3 pt-3 sm:pt-4">
-                <button
-                  onClick={closeModal}
-                  className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-medium text-primary bg-secondary hover:bg-secondary/80 rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSubmit}
-                  disabled={submitting}
-                  className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-medium text-primary bg-secondary hover:bg-secondary/80 disabled:bg-primary/50 disabled:cursor-not-allowed rounded-lg transition-colors flex items-center space-x-1 sm:space-x-2"
-                >
-                  {submitting && (
-                    <div className="animate-spin h-3 w-3 sm:h-4 sm:w-4 border-2 border-primary-foreground border-t-transparent rounded-full"></div>
-                  )}
-                  <span>
-                    {modalType === "create" ? "Create Shift" : "Update Shift"}
-                  </span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+  const Actions = ({ s }) => (
+    <div className="flex items-center justify-end gap-1">
+      <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit ${s.name}`} title="Edit" onClick={() => { setForm({ name: s.name, startTime: s.startTime, endTime: s.endTime }); setEditing(s); }}>
+        <Pencil className="h-4 w-4" />
+      </Button>
+      <Button variant="ghost" size="icon" className="h-8 w-8 text-red-700 hover:text-red-800" aria-label={`Delete ${s.name}`} title="Delete" onClick={() => setDeleting(s)}>
+        <Trash2 className="h-4 w-4" />
+      </Button>
     </div>
   );
-};
+  const People = ({ s }) => (
+    <button
+      type="button"
+      onClick={() => setPeopleOf(s)}
+      disabled={!s.users?.length}
+      className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40", s.users?.length ? CHIP.brand + " hover:bg-primary/20" : CHIP.muted)}
+    >
+      {s.users?.length || 0} login{s.users?.length === 1 ? "" : "s"}
+    </button>
+  );
 
-export default ShiftPage;
+  return (
+    <div className={HR_PAGE}>
+      <PageHeader
+        icon={Clock}
+        title="POS shifts"
+        subtitle="Cashier shifts for the Point of Sale. A login's shift is set on Logins & Roles."
+        badge={data ? shifts.length : null}
+        actions={
+          <Button onClick={openNew} title="Alt+N">
+            <Plus className="mr-1.5 h-4 w-4" /> New shift
+          </Button>
+        }
+      />
+      <main className={HR_MAIN}>
+        <Panel
+          title="Shifts"
+          icon={Clock}
+          actions={
+            <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+              <RefreshCw className={cn("mr-1.5 h-4 w-4", isFetching && "animate-spin")} /> Refresh
+            </Button>
+          }
+        >
+          <div className="flex items-center gap-2 border-b border-border p-3 sm:px-5">
+            <div className="relative w-full sm:w-72">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input ref={searchRef} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search shifts…  ( / )" className="h-9 pl-8" aria-label="Search shifts" />
+            </div>
+          </div>
+          {isLoading ? (
+            <div className="p-4">
+              <ListSkeleton rows={4} />
+            </div>
+          ) : error ? (
+            <EmptyState icon={Clock} title="Could not load shifts" hint={error.message} action={<Button onClick={() => refetch()}>Try again</Button>} />
+          ) : filtered.length === 0 ? (
+            <EmptyState icon={Clock} title={shifts.length ? "No shift matches" : "No shifts yet"} hint={shifts.length ? "Change the search." : "Add the cashier shifts your POS works in."} action={!shifts.length ? <Button onClick={openNew}><Plus className="mr-1.5 h-4 w-4" />New shift</Button> : null} />
+          ) : (
+            <>
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className={TH_ROW}>
+                      <th className={TH}>Shift</th>
+                      <th className={TH}>Starts</th>
+                      <th className={TH}>Ends</th>
+                      <th className={TH}>Logins</th>
+                      <th className={cn(TH, "text-right")}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {filtered.map((s) => (
+                      <tr key={s.id} className="hover:bg-primary/[0.03]">
+                        <td className="px-3 py-2.5 font-semibold">{s.name}</td>
+                        <td className="px-3 py-2.5 tabular-nums">{hhmm(s.startTime)}</td>
+                        <td className="px-3 py-2.5 tabular-nums">{hhmm(s.endTime)}</td>
+                        <td className="px-3 py-2.5"><People s={s} /></td>
+                        <td className="px-2 py-1.5"><Actions s={s} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="divide-y divide-border md:hidden">
+                {filtered.map((s) => (
+                  <li key={s.id} className="flex items-center justify-between gap-2 p-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{s.name}</p>
+                      <p className="text-xs tabular-nums text-muted-foreground">{hhmm(s.startTime)} – {hhmm(s.endTime)}</p>
+                      <div className="mt-1"><People s={s} /></div>
+                    </div>
+                    <Actions s={s} />
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </Panel>
+        <p className="mt-3 px-1 text-xs text-muted-foreground">
+          Give a login its shift on{" "}
+          <Link href="/admin/user" className="font-semibold text-primary hover:underline">Logins & Roles</Link>.
+        </p>
+      </main>
+
+      <Dialog open={!!editing} onOpenChange={(v) => !v && !saving && setEditing(null)}>
+        <DialogContent className="max-w-[calc(100vw-1.5rem)] sm:max-w-md">
+          <form onSubmit={save} className="space-y-4">
+            <DialogHeader>
+              <DialogTitle>{editing === "new" ? "New shift" : `Edit ${editing?.name || ""}`}</DialogTitle>
+              <DialogDescription>Start and end on the same day.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="sh-name" className="mb-1.5 block text-sm font-medium">Name <span className="text-red-600">*</span></label>
+                <Input id="sh-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus placeholder="Morning" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="sh-start" className="mb-1.5 block text-sm font-medium">Starts</label>
+                  <Input id="sh-start" type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} />
+                </div>
+                <div>
+                  <label htmlFor="sh-end" className="mb-1.5 block text-sm font-medium">Ends</label>
+                  <Input id="sh-end" type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} />
+                </div>
+              </div>
+            </div>
+            <DialogFooter className="gap-2">
+              <Button type="button" variant="outline" onClick={() => setEditing(null)} disabled={saving}>Cancel</Button>
+              <Button type="submit" disabled={saving}>
+                {saving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+                {editing === "new" ? "Add shift" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!peopleOf} onOpenChange={(v) => !v && setPeopleOf(null)}>
+        <DialogContent className="max-h-[85vh] max-w-[calc(100vw-1.5rem)] overflow-y-auto sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Users className="h-5 w-5 text-primary" /> {peopleOf?.name}</DialogTitle>
+            <DialogDescription>Logins on this shift.</DialogDescription>
+          </DialogHeader>
+          <ul className="divide-y divide-border rounded-lg border">
+            {(peopleOf?.users || []).map((u) => (
+              <li key={u.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                <span className="min-w-0 truncate font-medium">{u.name || u.id}</span>
+                <span className="flex items-center gap-2">
+                  <RoleChips roles={[u.role]} roleName={roleName} />
+                  {!u.isActive && <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-bold", CHIP.bad)}>Off</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!deleting} onOpenChange={(v) => !v && !saving && setDeleting(null)}>
+        <AlertDialogContent className="max-w-[calc(100vw-1.5rem)] sm:max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete shift {deleting?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleting?.users?.length ? `${deleting.users.length} login(s) are on this shift and will have no shift.` : "No login is on this shift."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); remove(); }} disabled={saving} className="bg-red-700 hover:bg-red-800">Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}

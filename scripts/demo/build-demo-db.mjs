@@ -23,13 +23,27 @@ if (!(process.env.DEMO_DATABASE === "1" || url.includes("bizlogist_demo"))) {
   console.error("Refusing: DATABASE_URL is not the demo database (bizlogist_demo).");
   process.exit(1);
 }
+// psql runs inside the local Docker container, so the database it resets is
+// the one DATABASE_URL names — and it must be on this machine (never a server).
+let DB_NAME;
+try {
+  const u = new URL(url);
+  DB_NAME = decodeURIComponent(u.pathname.replace(/^\//, "")) || "bizlogist_demo";
+  if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(u.hostname)) {
+    console.error(`Refusing: DATABASE_URL host ${u.hostname} is not local — the demo database runs in Docker on this machine.`);
+    process.exit(1);
+  }
+} catch {
+  console.error("Refusing: DATABASE_URL is not a valid postgresql:// URL.");
+  process.exit(1);
+}
 const CONTAINER = process.env.DEMO_DB_CONTAINER || "bizlogist-demo-db";
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
 
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", shell: isWin, ...opts });
 const psql = (sql, { strict = true } = {}) =>
-  execFileSync("docker", ["exec", "-i", CONTAINER, "psql", "-U", "demo", "-d", "bizlogist_demo", "-q", ...(strict ? ["-v", "ON_ERROR_STOP=1"] : [])], {
+  execFileSync("docker", ["exec", "-i", CONTAINER, "psql", "-U", "demo", "-d", DB_NAME, "-q", ...(strict ? ["-v", "ON_ERROR_STOP=1"] : [])], {
     input: sql,
     stdio: ["pipe", "pipe", "pipe"],
   }).toString();
@@ -47,7 +61,7 @@ function tolerant(sql) {
     .replace(/^CREATE TYPE [^;]+;/gm, "-- (type created by db push)");
 }
 
-step("1. reset schema");
+step(`1. reset schema (${DB_NAME})`);
 psql("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
 
 step("2. prisma db push");

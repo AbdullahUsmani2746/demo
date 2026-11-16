@@ -1,181 +1,98 @@
-import prisma from "@/lib/prisma";
-import { syncOrderToWooCommerce } from "@/services/wooCommerceSync";
+// app/api/pos/orders/route.js — POS receipts.
+//   GET  ?search=&from=&to=&kind=SALE|RETURN|ALL&limit=     receipts list (own receipts unless pos.allShifts)
+//   POST { clientRef, lines, billDiscount, customer, payments, note }   ring up a sale (lib/pos/posting.js postSale)
 import { NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
-import { checkPeriodLock } from "@/lib/periodLock";
-import { resolveItemAccounts } from "@/lib/accounts/itemAccounts";
-import { checkStockForSave } from "@/lib/stock/checkStock";
+import { postSale, posRights, loadReceipt, POS_SALE, POS_RETURN } from "@/lib/pos/posting";
+import { posErrorResponse, receiptScope, hasPosAccess } from "@/lib/pos/http";
+import { getAccount } from "@/lib/accounts/accountSettings";
 
-// POS sells out of godown 1.
-const POS_GODOWN = 1;
-
-export async function GET(request) {
+export const GET = guard(null, async (request, { session }) => {
   try {
-    const { searchParams } = new URL(request.url);
+    const rights = await posRights(session);
+    if (!hasPosAccess(rights)) return NextResponse.json({ error: "No point of sale access." }, { status: 403 });
+    const sp = new URL(request.url).searchParams;
+    const search = (sp.get("search") || "").trim();
+    const kind = (sp.get("kind") || "ALL").toUpperCase();
+    const limit = Math.min(Math.max(parseInt(sp.get("limit")) || 50, 1), 500);
 
-    // Get pagination parameters
-    const page = parseInt(searchParams.get("page")) || 1;
-    const limit = parseInt(searchParams.get("limit")) || 10000000;
-    const search = searchParams.get("search") || "";
-    const startDate = searchParams.get("startDate");
-    const endDate = searchParams.get("endDate");
-
-    // Calculate offset for pagination
-    const offset = (page - 1) * limit;
-
-    // Build where clause for filtering
-    const whereClause = {
-      tran_code: 5,
-    };
-
-    // Search filter
+    // POS returns share tran_code 12 with Miscellaneous IN — only receipts made at the till (pos_receipts).
+    const where = { tran_code: kind === "SALE" ? POS_SALE : kind === "RETURN" ? POS_RETURN : { in: [POS_SALE, POS_RETURN] }, ...receiptScope(session, rights) };
+    const and = [];
+    if (kind !== "SALE") {
+      const retIds = await prisma.posReceipt.findMany({ where: { kind: "RETURN" }, select: { tran_id: true } });
+      and.push({ OR: [{ tran_code: POS_SALE }, { tran_id: { in: retIds.map((r) => r.tran_id) } }] });
+    }
+    if (sp.get("from") || sp.get("to")) {
+      const from = sp.get("from") ? new Date(sp.get("from")) : null;
+      const to = sp.get("to") ? new Date(sp.get("to")) : null;
+      if (from) from.setHours(0, 0, 0, 0);
+      if (to) to.setHours(23, 59, 59, 999);
+      where.dated = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    }
     if (search) {
-      whereClause.OR = [
-        { invoice_no: { contains: search, mode: "insensitive" } }
-      ];
-    }
-
-    // Date range filter
-    if (startDate && endDate) {
-      whereClause.dated = {
-        gte: new Date(startDate),
-        lte: new Date(endDate),
-      };
-    }
-
-    // Get total count for pagination info
-    const totalCount = await prisma.transactionsMaster.count({
-      where: whereClause,
-    });
-
-    // Get orders with pagination
-    const orders = await prisma.transactionsMaster.findMany({
-      where: whereClause,
-      include: {
-        transactions: {
-          include: {
-            itemDetails: true,
-          },
-        },
-      },
-      orderBy: {
-        dated: "desc",
-      },
-      skip: offset,
-      take: limit,
-    });
-
-    // Calculate pagination info
-    const totalPages = Math.ceil(totalCount / limit);
-    const hasNext = page < totalPages;
-    const hasPrev = page > 1;
-
-    return NextResponse.json({
-      orders,
-      pagination: {
-        currentPage: page,
-        totalPages,
-        totalCount,
-        limit,
-        hasNext,
-        hasPrev,
-        startItem: offset + 1,
-        endItem: Math.min(offset + limit, totalCount),
-      },
-    });
-  } catch (error) {
-    console.error("GET orders error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
-  }
-}
-
-export const POST = guard("pos.manage", async (request, { session }) => {
-  try {
-    const { cartItems, customer, total } = await request.json();
-
-    const lockError = await checkPeriodLock(new Date(), 5, { action: "create" });
-    if (lockError) {
-      return NextResponse.json({ error: lockError }, { status: 422 });
-    }
-
-    // Stock check policy "pos" (Settings → Stock checking; default No check).
-    // Block → 422 (caught below); warn → `warnings` on the response.
-    const { message: stockShort } = await checkStockForSave({
-      type: "pos",
-      godown: POS_GODOWN,
-      lines: (cartItems || []).map((item) => ({ itcd: item.itcd, qty: item.quantity })),
-    });
-
-    // POS sales account per item: category pos_acno → 'pos_sales' Account
-    // Settings default. Resolved before anything is written (422 when unset).
-    const { lineAcno } = await resolveItemAccounts(cartItems, 5);
-    const itemsWithCategory = cartItems.map((item) => ({
-      ...item,
-      categoryAcno: lineAcno[Number(item.itcd)] ?? null,
-    }));
-
-    const order = await prisma.transactionsMaster.create({
-      data: {
-        dated: new Date(),
-        time: new Date(),
-        tran_code: 5,
-        godown: POS_GODOWN,
-        pycd: customer,
-        user_id: session?.user?.id ?? null, // Entered by — from the session, never the body
-        vr_no: Math.floor(Math.random() * 1000000),
-        invoice_no: `POS-${Date.now()}`,
-        sync_status: "pending",
-        transactions: {
-          create: itemsWithCategory.map((item) => ({
-            itcd: item.itcd,
-            qty: item.quantity,
-            rate: item.price,
-            acno: item.categoryAcno,
-            gross_amount: item.quantity * item.price,
-            camt:item.quantity * item.price,
-            narration1: `POS Sale: ${item.item}`,
-          })),
-        },
-      },
-      include: { transactions: true },
-    });
-
-    for (const item of cartItems) {
-      await prisma.item.update({
-        where: { itcd: item.itcd },
-        data: { stock: { decrement: item.quantity }, sync_status: "pending" },
+      const n = Number(search.replace(/^(POS|RET)-/i, ""));
+      and.push({
+        OR: [
+          { invoice_no: { contains: search, mode: "insensitive" } },
+          ...(Number.isInteger(n) && n > 0 ? [{ vr_no: n }] : []),
+          { acno: { acname: { contains: search, mode: "insensitive" } } },
+        ],
       });
     }
+    if (and.length) where.AND = and;
 
-    const totalAmount = cartItems.reduce((sum, item) => sum + (item.quantity * item.price), 0);
-
-
-    const autoEntry = {
-        tran_id: order.tran_id,
-        sub_tran_id: 3,
-        narration1: "Auto Entry",
-        damt: totalAmount || 0,
-        camt: 0,
-        acno: order.pycd || null,
-      };
-
-      await prisma.transactions.create({ data: autoEntry });
-      
-    // Uncomment this if syncing is needed
-    // await syncOrderToWooCommerce(order);
-
-    return NextResponse.json(stockShort ? { ...order, warnings: [stockShort] } : order);
+    const rows = await prisma.transactionsMaster.findMany({
+      where,
+      orderBy: [{ dated: "desc" }, { tran_id: "desc" }],
+      take: limit,
+      select: { tran_id: true, tran_code: true, vr_no: true, invoice_no: true, dated: true, time: true, user_id: true, tr_amount: true, acno: { select: { acno: true, acname: true } } },
+    });
+    const ids = rows.map((r) => r.tran_id);
+    const [receipts, payments, users, saleTotals] = await Promise.all([
+      prisma.posReceipt.findMany({ where: { tran_id: { in: ids } } }),
+      prisma.posPayment.findMany({ where: { tran_id: { in: ids } } }),
+      prisma.user.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.user_id).filter(Boolean))] } }, select: { id: true, name: true } }),
+      // Old POS sales (before pos_receipts): total from their lines.
+      prisma.transactions.groupBy({ by: ["tran_id"], where: { tran_id: { in: ids }, sub_tran_id: 3 }, _sum: { damt: true, camt: true } }),
+    ]);
+    const rec = new Map(receipts.map((r) => [r.tran_id, r]));
+    // A walk-in bill's party is the POS Cash / Card account — shown as walk-in, not as a customer.
+    const till = new Set((await Promise.all([getAccount("pos_cash"), getAccount("pos_card")])).filter((a) => a != null));
+    const userName = new Map(users.map((u) => [u.id, u.name]));
+    const lineTotal = new Map(saleTotals.map((t) => [t.tran_id, Number(t._sum.damt || 0) || Number(t._sum.camt || 0)]));
+    return NextResponse.json({
+      receipts: rows.map((r) => {
+        const x = rec.get(r.tran_id);
+        return {
+          tran_id: r.tran_id,
+          tran_code: r.tran_code,
+          kind: r.tran_code === POS_SALE ? "SALE" : "RETURN",
+          vr_no: r.vr_no,
+          invoice_no: r.invoice_no,
+          dated: r.time || r.dated,
+          customer: x ? x.customer_name || null : r.acno && !till.has(r.acno.acno) ? r.acno.acname : null,
+          total: x?.total ?? r.tr_amount ?? lineTotal.get(r.tran_id) ?? null,
+          methods: [...new Set(payments.filter((p) => p.tran_id === r.tran_id).map((p) => p.method))],
+          entered_by: r.user_id ? userName.get(r.user_id) || null : "System",
+          ref_tran_id: x?.ref_tran_id ?? null,
+        };
+      }),
+    });
   } catch (error) {
-    console.error("POST order error:", error);
-    if (error?.statusCode === 422) {
-      return NextResponse.json({ error: error.message }, { status: 422 });
-    }
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return posErrorResponse(error, "POS receipts");
+  }
+});
+
+export const POST = guard("pos.sell", async (request, { session }) => {
+  try {
+    const body = await request.json().catch(() => null);
+    if (!body) return NextResponse.json({ error: "Invalid request." }, { status: 400 });
+    const result = await postSale(session, body);
+    const receipt = await loadReceipt(result.tran_id);
+    return NextResponse.json({ ...result, receipt }, { status: result.duplicate ? 200 : 201 });
+  } catch (error) {
+    return posErrorResponse(error, "POS sale");
   }
 });

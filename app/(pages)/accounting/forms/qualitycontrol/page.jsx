@@ -1,1049 +1,267 @@
 "use client";
-
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { useSession } from "next-auth/react";
-import { createPortal } from "react-dom";
-import { AnimatePresence, motion } from "framer-motion";
+// Quality Assurance → Production QC. Every finished-goods process order waiting
+// for QC, and every QC record by status (Pending / On hold / Re-test / Passed /
+// Failed). A row opens the QC sheet of its process order. Data:
+// /api/forms/qualitycontrol (lib/quality/productionQc.js does the writing).
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import {
-  Search,
-  Filter,
-  ChevronLeft,
-  ChevronRight,
-  Pencil,
-  Plus,
-  Package,
-  Eye,
-  CheckCircle2,
-  XCircle,
-  X,
-  Truck,
-  Download,
-  Printer,
-  BarChart3,
-  AlertCircle,
-  Calendar,
-  Tag,
-  Clock,
-  Hash,
-  Building2,
-  Scale,
-  Info,
-} from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
+import { toast } from "sonner";
+import { ChevronLeft, ChevronRight, ClipboardCheck, FlaskConical, Printer, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { toast } from "sonner";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Textarea } from "@/components/ui/textarea";
-import AsyncSelect from "react-select/async";
-import generateQCCertificate from "@/utils/generateQCCertificate";
+import { api, CODE_CHIP, EmptyState, HR_MAIN, HR_PAGE, ListSkeleton, PageHeader, Panel, TH, TH_ROW } from "@/components/HR/shared";
+import { CountTabs, fmtDay, fmtQty, printProductionQc, QcStatusChip } from "@/components/Quality/qcUi";
+import { useFeatures } from "@/hooks/useFeatures";
 import { useCompany } from "@/context/CompanyContext";
-import generateNCRCertificate from "@/utils/generateNCRCertificate";
+import { cn } from "@/lib/utils";
 
-// Status Badge Component
-const StatusBadge = ({ status }) => {
-  const statusConfig = {
-    draft: {
-      bg: "bg-amber-50",
-      text: "text-amber-800",
-      border: "border-amber-200",
-      icon: <Clock className="h-3 w-3" />,
-      label: "Draft",
-    },
-    DRAFT: {
-      bg: "bg-amber-50",
-      text: "text-amber-800",
-      border: "border-amber-200",
-      icon: <Clock className="h-3 w-3" />,
-      label: "Draft",
-    },
-    approve: {
-      bg: "bg-emerald-50",
-      text: "text-emerald-800",
-      border: "border-emerald-200",
-      icon: <CheckCircle2 className="h-3 w-3" />,
-      label: "Approved",
-    },
-    APPROVED: {
-      bg: "bg-emerald-50",
-      text: "text-emerald-800",
-      border: "border-emerald-200",
-      icon: <CheckCircle2 className="h-3 w-3" />,
-      label: "Approved",
-    },
-    reject: {
-      bg: "bg-red-50",
-      text: "text-red-800",
-      border: "border-red-200",
-      icon: <XCircle className="h-3 w-3" />,
-      label: "Rejected",
-    },
-    REJECTED: {
-      bg: "bg-red-50",
-      text: "text-red-800",
-      border: "border-red-200",
-      icon: <XCircle className="h-3 w-3" />,
-      label: "Rejected",
-    },
-    REWORK: {
-      bg: "bg-orange-50",
-      text: "text-orange-800",
-      border: "border-orange-200",
-      icon: <Clock className="h-3 w-3" />,
-      label: "Rework",
-    },
-    HOLD: {
-      bg: "bg-blue-50",
-      text: "text-blue-800",
-      border: "border-blue-200",
-      icon: <Clock className="h-3 w-3" />,
-      label: "Hold",
-    },
-  };
+const TABS = [
+  { key: "AWAITING", label: "Awaiting QC" },
+  { key: "DRAFT", label: "Pending" },
+  { key: "HOLD", label: "On hold" },
+  { key: "REWORK", label: "Re-test" },
+  { key: "APPROVED", label: "Passed" },
+  { key: "REJECTED", label: "Failed" },
+  { key: "ALL", label: "All" },
+];
+const PAGE_SIZE = 25;
 
-  const config = statusConfig[status] || statusConfig.draft;
-
+export default function ProductionQcPage() {
   return (
-    <div
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${config.bg} ${config.text} ${config.border}`}
-    >
-      {config.icon}
-      <span className="text-xs font-medium">{config.label}</span>
-    </div>
+    <Suspense fallback={null}>
+      <ProductionQcList />
+    </Suspense>
   );
-};
+}
 
-// Print Preview Modal Component
-const PrintPreviewModal = ({
-  isOpen,
-  onClose,
-  pdfUrl,
-  title,
-  onDownload,
-}) => {
-  const handlePrint = () => {
-    const printWindow = window.open(pdfUrl);
-    if (printWindow) {
-      printWindow.onload = () => {
-        printWindow.print();
-      };
-    }
-  };
-
-  if (!isOpen) return null;
-
-  return createPortal(
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-        onClick={onClose}
-      >
-        <motion.div
-          initial={{ scale: 0.95, opacity: 0, y: 20 }}
-          animate={{ scale: 1, opacity: 1, y: 0 }}
-          exit={{ scale: 0.95, opacity: 0, y: 20 }}
-          transition={{ type: "spring", duration: 0.5 }}
-          className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* Header */}
-          <div className="bg-primary px-6 py-4 text-white flex justify-between items-center">
-            <div>
-              <h2 className="text-xl font-bold">Print Preview</h2>
-              <p className="text-sm text-primary-foreground opacity-80">{title}</p>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                onClick={handlePrint}
-                className="bg-white text-primary hover:bg-gray-100"
-              >
-                <Printer className="h-4 w-4 mr-2" />
-                Print
-              </Button>
-              <Button
-                onClick={onDownload}
-                variant="outline"
-                className="border-white bg-primary text-white hover:bg-primary"
-              >
-                <Download className="h-4 w-4 mr-2" />
-                Download
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onClose}
-                className="text-white hover:bg-white/20"
-              >
-                <X className="h-5 w-5" />
-              </Button>
-            </div>
-          </div>
-
-          {/* PDF Viewer */}
-          <div className="flex-1 bg-gray-100 p-4 overflow-hidden">
-            <iframe
-              src={`${pdfUrl}#toolbar=0&navpanes=0`}
-              className="w-full h-full rounded-lg shadow-inner bg-white"
-              title="PDF Preview"
-            />
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>,
-    document.body
-  );
-};
-
-// Info Card Component
-const InfoCard = ({ icon: Icon, title, value, className = "" }) => (
-  <div
-    className={`bg-white rounded-lg border border-gray-200 p-4 ${className}`}
-  >
-    <div className="flex items-center gap-3">
-      <div className="p-2 bg-gray-50 rounded-lg">
-        <Icon className="h-4 w-4 text-gray-600" />
-      </div>
-      <div>
-        <p className="text-xs text-gray-500 font-medium">{title}</p>
-        <p className="text-sm font-semibold text-gray-900 mt-0.5">
-          {value || "-"}
-        </p>
-      </div>
-    </div>
-  </div>
-);
-
-export default function QualityControlIndex() {
-  const { company } = useCompany();
-  const { data: session } = useSession();
-  const [loading, setLoading] = useState(true);
-  const [plans, setPlans] = useState([]);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(1);
-  const [search, setSearch] = useState("");
-  const [localSearch, setLocalSearch] = useState("");
-  const [filterStatus, setFilterStatus] = useState("all");
-  const [stats, setStats] = useState({
-    total: 0,
-    draft: 0,
-    approved: 0,
-    rejected: 0,
-    rework: 0,
-  });
-
-  // Print Preview State
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewPdfUrl, setPreviewPdfUrl] = useState("");
-  const [previewTitle, setPreviewTitle] = useState("");
-  const [currentPlan, setCurrentPlan] = useState(null);
+function ProductionQcList() {
   const router = useRouter();
-
-  // modal state
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalInput, setModalInput] = useState("");
-  const [modalSelect, setModalSelect] = useState("");
-  const [allProductionPlanIds, setAllProductionPlanIds] = useState([]);
-  const [isSelectLoading, setIsSelectLoading] = useState(false);
-  const [cachedOptions, setCachedOptions] = useState([]);
-  const [visibleOptions, setVisibleOptions] = useState([]);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const currentChunkRef = useRef(1);
-  const CHUNK_SIZE = 250;
-
-  // sort state
-  const [sortField, setSortField] = useState("batch_no");
-  const [sortOrder, setSortOrder] = useState("desc");
+  const sp = useSearchParams();
+  const { data: session } = useSession();
+  const { company } = useCompany();
+  const features = useFeatures();
+  const [tab, setTab] = useState(sp.get("status") || "AWAITING");
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const searchRef = useRef(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
-      setSearch(localSearch);
+      setQ(search.trim());
       setPage(1);
-    }, 450);
+    }, 300);
     return () => clearTimeout(t);
-  }, [localSearch]);
+  }, [search]);
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      const params = {
-        page: String(page),
-        pageSize: String(pageSize),
-        ...(search ? { search } : {}),
-        sortField,
-        sortOrder,
-      };
-
-      const res = await fetch(
-        `/api/forms/qualitycontrol?${new URLSearchParams(params)}`,
-      );
-      const data = await res.json();
-
-      if (Array.isArray(data.data)) {
-        setPlans(data.data);
-        setAllProductionPlanIds(data.allProductionPlanIds || []);
-        setTotal(Number(data.total) || 0);
-        setTotalPages(Number(data.totalPages) || 1);
-
-        // Calculate stats
-        setStats({
-          total: data.total || 0,
-          draft: data.data.filter((p) => p.status === "DRAFT").length,
-          approved: data.data.filter((p) => p.status === "APPROVED").length,
-          rejected: data.data.filter((p) => p.status === "REJECTED").length,
-          rework: data.data.filter((p) => p.status === "REWORK").length,
-        });
-      } else {
-        setPlans([]);
-        setAllProductionPlanIds([]);
-        setTotal(0);
-        setTotalPages(1);
-        setStats({
-          total: 0,
-          draft: 0,
-          approved: 0,
-          rejected: 0,
-          rework: 0,
-        });
-      }
-    } catch (error) {
-      console.error("Error loading QC records:", error);
-      toast.error("Failed to load data");
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // "/" jumps to the search box.
   useEffect(() => {
-    load();
-  }, [page, pageSize, search, sortField, sortOrder]);
-
-  const filteredPlans = useMemo(() => {
-    if (filterStatus === "all") return plans;
-    return plans.filter((plan) => plan.status === filterStatus);
-  }, [plans, filterStatus]);
-
-  const rangeLabel = useMemo(() => {
-    const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
-    const end = Math.min(total, page * pageSize);
-    return `${start}–${end} of ${total}`;
-  }, [page, pageSize, total]);
-
-  // Transform IDs to options once and cache them
-  useEffect(() => {
-    const options = allProductionPlanIds.map((id) => ({
-      value: id,
-      label: `Process Order ${id}`,
-    }));
-    setCachedOptions(options);
-    setVisibleOptions(options.slice(0, CHUNK_SIZE));
-  }, [allProductionPlanIds]);
-
-  // Load next chunk of options
-  const loadMoreOptions = useCallback(() => {
-    const nextChunk = currentChunkRef.current + 1;
-    const start = (nextChunk - 1) * CHUNK_SIZE;
-    const end = nextChunk * CHUNK_SIZE;
-
-    setIsLoadingMore(true);
-    setTimeout(() => {
-      setVisibleOptions((prev) => [
-        ...prev,
-        ...cachedOptions.slice(start, end),
-      ]);
-      currentChunkRef.current = nextChunk;
-      setIsLoadingMore(false);
-    }, 100);
-  }, [cachedOptions]);
-
-  // Filter options based on input
-  const filterOptions = useCallback(
-    (inputValue) => {
-      if (!inputValue) {
-        return visibleOptions;
+    const onKey = (e) => {
+      if (e.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+        e.preventDefault();
+        searchRef.current?.focus();
       }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-      const searchLower = inputValue.toLowerCase();
-      return cachedOptions
-        .filter((option) => option.label.toLowerCase().includes(searchLower))
-        .slice(0, visibleOptions.length);
-    },
-    [cachedOptions, visibleOptions],
-  );
+  const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE), ...(tab !== "ALL" ? { status: tab } : {}), ...(q ? { search: q } : {}) });
+  const { data, isLoading, isFetching, refetch, error } = useQuery({
+    queryKey: ["production-qc", tab, q, page],
+    queryFn: () => api(`/api/forms/qualitycontrol?${params}`),
+    placeholderData: keepPreviousData,
+  });
+  const rows = data?.data || [];
+  const totalPages = data?.totalPages || 1;
+  const counts = data?.counts || {};
 
-  // AsyncSelect load function
-  const loadOptions = useCallback(
-    (inputValue) => {
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          resolve(filterOptions(inputValue));
-        }, 10);
-      });
-    },
-    [filterOptions],
-  );
-
-  // Helper for toggling sort
-  const handleSort = (field) => {
-    if (sortField === field) {
-      setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
-      setSortOrder("asc");
-    }
+  const changeTab = (k) => {
+    setTab(k);
     setPage(1);
+    router.replace(`?status=${k}`, { scroll: false });
   };
 
-  const handleDownloadPDF = async (plan) => {
-    const toastId = toast.loading("Generating PDF...");
+  const print = async (row) => {
+    const id = toast.loading("Preparing certificate…");
     try {
-      const res = await fetch(`/api/forms/qualitycontrol/${plan.id}`);
-      if (!res.ok) throw new Error("Failed to fetch QC details");
-      const data = await res.json();
-
-      const a1 = data.attempts?.find((a) => a.attempt_no === 1) || { rows: [] };
-      const a2 = data.attempts?.find((a) => a.attempt_no === 2) || { rows: [] };
-      const a1Map = new Map(a1.rows.map((r) => [r.parameter_name, r.quality_realized ?? ""]));
-      const a2Map = new Map(a2.rows.map((r) => [r.parameter_name, r.quality_realized ?? ""]));
-
-      const testResults = (data.parameters || []).map((p) => ({
-        parameter: p.parameter_name,
-        standard: p.quality_standard,
-        result: a2Map.get(p.parameter_name) || a1Map.get(p.parameter_name) || "-",
-      }));
-
-      const rejectReason = a2.reject_reason || a1.reject_reason || "Quality parameters not met";
-
-      if (plan.status === "REJECTED") {
-        await generateNCRCertificate({
-          companyName: company?.name || "Company",
-          logoUrl: company?.logo || "",
-          ncrTitle: "NON CONFIRMITY REQUEST FORM",
-          batchNumber: data.master.batch_no || plan.batch_no,
-          inkCode: (plan.item_code || "") + " " + (plan.item_name || ""),
-          manufacturingDate: data.master.mfg_date,
-          batchSize: data.master.batch_size,
-          departmentName: data.master.department_name || "",
-          testResults: testResults,
-          rejectReason: rejectReason,
-          rootCause: "",
-          correction: "",
-          correctiveAction: "",
-          actionForImplementation: "",
-          preventiveActionRequired: "NO",
-          responsibility: "",
-          targetDate: "",
-          verifiedEffectiveness: "",
-          capaEffective: "No",
-          plantHeadSignature: "",
-          closingDate: "",
-          mode: "print",
-        });
-      } else {
-        await generateQCCertificate({
-          companyName: company?.name || "Company",
-          logoUrl: company?.logo || "",
-          title: "QUALITY ASSURANCE CERTIFICATE",
-          manufacturingDate: data.master.mfg_date,
-          expiryDate: data.master.expiry_date,
-          batchNumber: data.master.batch_no || plan.batch_no,
-          inkCode: (plan.item_code || "") + " " + (plan.item_name || ""),
-          customer: "-",
-          batchSize: data.master.batch_size,
-          status: plan.status,
-          approvedBy: data.master.approved_by || session?.user?.name || "Quality Manager",
-          comments: "",
-          departmentName: data.master.department_name || "",
-          testResults: testResults,
-          mode: "print",
-        });
-      }
-
-      toast.dismiss(toastId);
-    } catch (error) {
-      console.error(error);
-      toast.error("Error generating print", { id: toastId });
+      const sheet = await api(`/api/forms/qualitycontrol/${row.id}`);
+      await printProductionQc(sheet, { company, userName: session?.user?.name });
+      toast.dismiss(id);
+    } catch (e) {
+      toast.error(e.message || "Could not print", { id });
     }
   };
 
-  const handleDownloadFromPreview = () => {
-    if (!previewPdfUrl || !currentPlan) return;
-    const link = document.createElement("a");
-    link.href = previewPdfUrl;
-    const fileName = currentPlan.status === "REJECTED"
-      ? `NCR-Report-${currentPlan.batch_no}.pdf`
-      : `QC-Certificate-${currentPlan.batch_no}.pdf`;
-    link.setAttribute("download", fileName);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  };
+  const openHref = (r) => `/accounting/forms/qualitycontrol/${r.id}`;
 
   return (
-    <div className="min-h-screen bg-secondary p-4 md:p-6">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold text-primary flex items-center gap-2">
-              <Package className="h-7 w-7 text-primary" />
-              Quality Control Dashboard
-            </h1>
-            <p className="text-black mt-1">
-              Manage production quality inspections
+    <div className={HR_PAGE}>
+      <PageHeader
+        icon={FlaskConical}
+        breadcrumb="Quality Assurance"
+        title="Production QC"
+        subtitle="Test each finished-goods process order against its item's quality standards, then pass, re-test, hold or fail the batch."
+        badge={counts.AWAITING ? `${counts.AWAITING} awaiting` : undefined}
+        actions={
+          <Button variant="outline" onClick={() => refetch()} disabled={isFetching} aria-label="Refresh">
+            <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} /> Refresh
+          </Button>
+        }
+      />
+      <main className={cn(HR_MAIN, "space-y-4")}>
+        {features.on("production.qcBeforeSend") && (
+          <div className="flex items-start gap-2.5 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-[13px] text-foreground">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <p>
+              <span className="font-semibold">QC gate is on.</span> A finished-goods process order can be sent to production only after QC has passed it (Settings → Features).
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="flex items-center gap-2"
-              onClick={load}
-            >
-              <Download className="h-4 w-4" />
-              Refresh
-            </Button>
-            <Button
-              onClick={() => setModalOpen(true)}
-              className="bg-primary hover:bg-primary text-white flex items-center gap-2"
-            >
-              <Plus className="h-4 w-4" />
-              New QC Check
-            </Button>
-          </div>
-        </div>
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">
-                    Total Plans
-                  </p>
-                  <p className="text-2xl font-bold text-black mt-2">
-                    {stats.total}
-                  </p>
-                </div>
-                <div className="p-2 bg-blue-50 rounded-lg">
-                  <Package className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">Draft</p>
-                  <p className="text-2xl font-bold text-black mt-2">
-                    {stats.draft}
-                  </p>
-                </div>
-                <div className="p-2 bg-amber-50 rounded-lg">
-                  <Clock className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">Approved</p>
-                  <p className="text-2xl font-bold text-black mt-2">
-                    {stats.approved}
-                  </p>
-                </div>
-                <div className="p-2 bg-emerald-50 rounded-lg">
-                  <CheckCircle2 className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">Rejected</p>
-                  <p className="text-2xl font-bold text-black mt-2">
-                    {stats.rejected}
-                  </p>
-                </div>
-                <div className="p-2 bg-red-50 rounded-lg">
-                  <XCircle className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">Hold</p>
-                  <p className="text-2xl font-bold text-black mt-2">
-                    {stats.rework}
-                  </p>
-                </div>
-                <div className="p-2 bg-blue-50 rounded-lg">
-                  <Clock className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-               {/* Rework Card (second) */}
-          <Card className="bg-primary/20">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-primary font-medium">Rework</p>
-                  <p className="text-2xl font-bold text-black mt-2">{stats.rework}</p>
-                </div>
-                <div className="p-2 bg-blue-50 rounded-lg">
-                  <Clock className="h-5 w-5 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-        </div>
-
-        {/* Search and Filter */}
-        <Card className="mb-6">
-          <CardContent className="p-4">
-            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-              <div className="flex-1 max-w-lg">
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                  <Input
-                    type="text"
-                    placeholder="Search process order, MM details, Ink Code, batch numbers..."
-                    value={localSearch}
-                    onChange={(e) => setLocalSearch(e.target.value)}
-                    className="pl-10"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <Filter className="h-4 w-4 text-gray-500" />
-                  <Select value={filterStatus} onValueChange={setFilterStatus}>
-                    <SelectTrigger className="w-[140px]">
-                      <SelectValue placeholder="Filter by status" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Status</SelectItem>
-                      <SelectItem value="DRAFT">Draft</SelectItem>
-                      <SelectItem value="APPROVED">Approved</SelectItem>
-                      <SelectItem value="REJECTED">Rejected</SelectItem>
-                      <SelectItem value="REWORK">Hold</SelectItem>
-                      <SelectItem value="REWORK">Rework</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-600">Show:</span>
-                  <Select
-                    value={pageSize.toString()}
-                    onValueChange={(value) => {
-                      setPageSize(Number(value));
-                      setPage(1);
-                    }}
-                  >
-                    <SelectTrigger className="w-[80px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {[10, 20, 50, 100].map((n) => (
-                        <SelectItem key={n} value={n.toString()}>
-                          {n}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Production Plans Table */}
-      <Card>
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="py-24 flex justify-center items-center">
-              <div className="flex flex-col items-center gap-4">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-                <p className="text-gray-600 font-medium">Loading records...</p>
-              </div>
-            </div>
-          ) : filteredPlans.length === 0 ? (
-            <div className="py-24 text-center">
-              <Package className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                No records found
-              </h3>
-              <p className="text-gray-600">
-                No quality control records match your criteria.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="bg-primary border-b border-gray-200 border-2 border-primary/50">
-                    <th className="px-6 py-2 text-center text-xs font-semibold text-white uppercase tracking-wider">
-                      Process Order No
-                    </th>
-                    <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      MM Details
-                    </th>
-                    {/* <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      QC Barcode
-                    </th> */}
-                    <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      Batch Info
-                    </th>
-                    <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      Approved By
-                    </th>
-                    <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th className="px-6 py-2 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {filteredPlans.map((plan) => (
-                    <tr
-                      key={plan.id}
-                      className="hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="px-6 py-2 border-2 border-primary/50">
-                        <div>
-                          <div className="flex items-center gap-2 mb-2">
-                            <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100">
-                              #{plan.id}
-                            </Badge>
-                          </div>
-                        </div>
-                      </td>
-                      {/* <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-gray-900 break-all">
-                                  {plan.qc_barcode || "-"}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </td> */}
-                      <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-gray-900">
-                                  {plan.itcd}
-                                </span>
-                              </div>
-                              <p className="text-sm text-gray-600 truncate max-w-xs">
-                                {plan.item_name}
-                              </p>
-                              <p className="text-sm text-gray-600 truncate max-w-xs"> ({plan.item_code})</p>
-
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-gray-900">
-                                  Batch #{plan.batch_no}
-                                </span>
-                              </div>
-                              <p className="text-sm text-gray-600">
-                                Size: {plan.batch_size} KG
-                              </p>
-                              {plan.mfg_date && (
-                                <p className="text-xs text-gray-500 mt-1">
-                                  Mfg:{" "}
-                                  {new Date(plan.mfg_date).toLocaleDateString()}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="space-y-1">
-                          <span className="text-sm font-medium text-gray-900">
-                            {plan.approved_by || "-"}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="flex gap-3">
-                          <StatusBadge status={plan.status} />
-                          <div className="text-xs flex-1 text-black">
-                            {plan.attempt_date
-                              ? `Last attempt: ${new Date(plan.attempt_date).toLocaleDateString()}`
-                              : "No attempts"}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-1 border-2 border-primary/50">
-                        <div className="flex items-center gap-2">
-                          <Button
-                            onClick={() => handleDownloadPDF(plan)}
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-blue-600 hover:text-blue-700 hover:bg-blue-50"
-                            title="Print Preview"
-                          >
-                            <Printer className="h-3 w-3" />
-                          </Button>
-                          <Button
-                            onClick={() =>
-                              window.open(
-                                `/accounting/forms/qualitycontrol/${plan.id}?mode=view`,
-                                "_self",
-                              )
-                            }
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-black hover:text-gray-900 hover:bg-gray-100"
-                            title="View Details"
-                          >
-                            <Eye className="h-3 w-3" />
-                          </Button>
-                          <Button
-                            onClick={() =>
-                              window.open(
-                                `/accounting/forms/qualitycontrol/${plan.id}`,
-                                "_self",
-                              )
-                            }
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-blue-600 hover:text-blue-700 hover:bg-blue-50"
-                            title="Edit"
-                          >
-                            <Pencil className="h-3 w-3" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-
-        {/* Pagination */}
-        {filteredPlans.length > 0 && (
-          <div className="px-6 py-2 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
-            <div className="text-sm fone-medium text-primary">
-              Showing {rangeLabel}
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-
-              <div className="flex items-center gap-1">
-                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                  let pageNum;
-                  if (totalPages <= 5) {
-                    pageNum = i + 1;
-                  } else if (page <= 3) {
-                    pageNum = i + 1;
-                  } else if (page >= totalPages - 2) {
-                    pageNum = totalPages - 4 + i;
-                  } else {
-                    pageNum = page - 2 + i;
-                  }
-
-                  return (
-                    <Button
-                      key={pageNum}
-                      variant={page === pageNum ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setPage(pageNum)}
-                    >
-                      {pageNum}
-                    </Button>
-                  );
-                })}
-              </div>
-
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
         )}
-      </Card>
 
-      {/* New QC Check Modal */}
-      <Dialog open={modalOpen} onOpenChange={setModalOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-primary">
-              <Plus className="h-5 w-5" />
-              New Quality Control Check
-            </DialogTitle>
-            <DialogDescription>
-              Go to a process order to start quality control checks.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Enter Process Order No
-              </label>
-              <Input
-                type="text"
-                value={modalInput}
-                onChange={(e) => setModalInput(e.target.value)}
-                placeholder="e.g. 123"
-                className="w-full"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Or select Process Order No
-              </label>
-              <div className="relative">
-                <AsyncSelect
-                  cacheOptions
-                  defaultOptions={visibleOptions}
-                  value={
-                    modalSelect
-                      ? {
-                        value: modalSelect,
-                        label: `Process Order ${modalSelect}`,
-                      }
-                      : null
-                  }
-                  loadOptions={loadOptions}
-                  onChange={(option) =>
-                    setModalSelect(option ? option.value : "")
-                  }
-                  placeholder="-- Choose process order --"
-                  className="w-full"
-                  onMenuScrollToBottom={() => {
-                    if (
-                      !isLoadingMore &&
-                      visibleOptions.length < cachedOptions.length
-                    ) {
-                      loadMoreOptions();
-                    }
-                  }}
-                  noOptionsMessage={() => "No matching process orders"}
-                  loadingMessage={() => "Loading more options..."}
-                />
-              </div>
-            </div>
-
-            <div className="bg-primary border border-blue-200 rounded-lg p-3">
-              <div className="flex items-start gap-2">
-                <Info className="h-4 w-4 text-white mt-0.5 flex-shrink-0" />
-                <div>
-                  <p className="text-sm font-medium text-white">Note:</p>
-                  <p className="text-xs text-white mt-1">
-                    You will be redirected to the quality control form for the
-                    selected process order.
-                  </p>
-                </div>
-              </div>
-            </div>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <CountTabs tabs={TABS} value={tab} onChange={changeTab} counts={counts} />
+          <div className="relative w-full lg:w-80">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref={searchRef}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Process order, batch, item…  ( / )"
+              className="h-9 pl-9"
+              aria-label="Search"
+            />
           </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setModalInput("");
-                setModalSelect("");
-                setModalOpen(false);
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={() => {
-                const val = (modalSelect || modalInput || "").toString().trim();
-                if (!val) {
-                  toast.error("Please enter or select a process order ID");
-                  return;
-                }
-                setModalOpen(false);
-                router.push(`/accounting/forms/qualitycontrol/${val}`);
-              }}
-              className="bg-primary hover:bg-primary"
-            >
-              Go to QC Form
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
 
-      {/* Print Preview Modal */}
-      <PrintPreviewModal
-        isOpen={isPreviewOpen}
-        onClose={() => setIsPreviewOpen(false)}
-        pdfUrl={previewPdfUrl}
-        title={previewTitle}
-        onDownload={handleDownloadFromPreview}
-      />
+        <Panel
+          title={TABS.find((t) => t.key === tab)?.label}
+          icon={ClipboardCheck}
+          actions={<span className="text-xs text-muted-foreground tabular-nums">{data ? `${data.total} record${data.total === 1 ? "" : "s"}` : ""}</span>}
+        >
+          {isLoading ? (
+            <ListSkeleton rows={6} />
+          ) : error ? (
+            <EmptyState icon={ShieldAlert} title="Could not load QC records" hint={error.message} />
+          ) : rows.length === 0 ? (
+            <EmptyState
+              icon={FlaskConical}
+              title={tab === "AWAITING" ? "No process order is waiting for QC" : "No QC records here"}
+              hint={q ? "Nothing matches the search." : tab === "AWAITING" ? "Finished-goods process orders appear here until their QC is started." : undefined}
+            />
+          ) : (
+            <>
+              {/* Table from md */}
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className={TH_ROW}>
+                      <th className={TH}>Process order</th>
+                      <th className={TH}>Item</th>
+                      <th className={cn(TH, "text-right")}>Batch size</th>
+                      <th className={TH}>Batch no</th>
+                      <th className={TH}>{tab === "AWAITING" ? "Plan date" : "Mfg / Expiry"}</th>
+                      <th className={TH}>Status</th>
+                      <th className={cn(TH, "text-right")}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/70">
+                    {rows.map((r) => (
+                      <tr
+                        key={r.id}
+                        tabIndex={0}
+                        onKeyDown={(e) => e.key === "Enter" && router.push(openHref(r))}
+                        onClick={() => router.push(openHref(r))}
+                        className={cn(
+                          "cursor-pointer transition-colors hover:bg-primary/[0.03] focus:bg-primary/[0.05] focus:outline-none",
+                          r.status === "REJECTED" && "bg-red-50/40 dark:bg-red-950/10",
+                        )}
+                      >
+                        <td className="px-3 py-2.5">
+                          <span className={CODE_CHIP}>#{r.id}</span>
+                          {r.plan_status && <p className="mt-1 text-[11px] text-muted-foreground">{r.plan_status}</p>}
+                        </td>
+                        <td className="max-w-[320px] px-3 py-2.5">
+                          <p className="truncate font-semibold text-foreground">{r.item_name}</p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            <span className="font-mono">{r.item_code}</span>
+                            {r.customer_name && ` · ${r.customer_name}`}
+                          </p>
+                        </td>
+                        <td className="px-3 py-2.5 text-right tabular-nums">{fmtQty(r.batch_size)}</td>
+                        <td className="px-3 py-2.5 font-mono tabular-nums">{r.batch_no || <span className="text-muted-foreground">—</span>}</td>
+                        <td className="whitespace-nowrap px-3 py-2.5 text-xs text-muted-foreground">
+                          {tab === "AWAITING" ? fmtDay(r.plan_date) : [fmtDay(r.mfg_date), fmtDay(r.expiry_date)].filter(Boolean).join(" → ") || "—"}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <QcStatusChip status={r.status} />
+                          {r.reason && <p className="mt-1 max-w-[220px] truncate text-[11px] text-muted-foreground" title={r.reason}>{r.reason}</p>}
+                          {!r.reason && r.attempt_no > 1 && <p className="mt-1 text-[11px] text-muted-foreground">Attempt {r.attempt_no}</p>}
+                        </td>
+                        <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex justify-end gap-1.5">
+                            {(r.status === "APPROVED" || r.status === "REJECTED") && (
+                              <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => print(r)} title={r.status === "REJECTED" ? "Print non-conformity report" : "Print certificate"} aria-label="Print">
+                                <Printer className="h-4 w-4" />
+                              </Button>
+                            )}
+                            <Button asChild size="sm" variant={r.status ? "outline" : "default"} className="h-8">
+                              <Link href={openHref(r)}>{!r.status ? "Start QC" : r.status === "APPROVED" || r.status === "REJECTED" ? "View" : "Test"}</Link>
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Cards under md */}
+              <div className="divide-y divide-border/70 md:hidden">
+                {rows.map((r) => (
+                  <Link key={r.id} href={openHref(r)} className="block px-4 py-3 active:bg-muted/50">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-foreground">{r.item_name}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          <span className={CODE_CHIP}>#{r.id}</span> <span className="font-mono">{r.item_code}</span>
+                        </p>
+                      </div>
+                      <QcStatusChip status={r.status} />
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                      <span className="text-muted-foreground">Batch size</span>
+                      <span className="text-right tabular-nums">{fmtQty(r.batch_size)}</span>
+                      <span className="text-muted-foreground">Batch no</span>
+                      <span className="text-right font-mono">{r.batch_no || "—"}</span>
+                      <span className="text-muted-foreground">{tab === "AWAITING" ? "Plan date" : "Mfg date"}</span>
+                      <span className="text-right">{fmtDay(tab === "AWAITING" ? r.plan_date : r.mfg_date) || "—"}</span>
+                    </div>
+                    {r.reason && <p className="mt-1.5 truncate text-xs text-muted-foreground">{r.reason}</p>}
+                  </Link>
+                ))}
+              </div>
+
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-2.5 text-sm">
+                  <span className="text-muted-foreground tabular-nums">Page {page} of {totalPages}</span>
+                  <div className="flex gap-1.5">
+                    <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((p) => p - 1)} aria-label="Previous page">
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)} aria-label="Next page">
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </Panel>
+      </main>
     </div>
   );
 }

@@ -26,6 +26,11 @@ const DynamicEntity = () => {
     return config.fields.filter((field) => field.fieldType === "select" && field.fetchFrom);
   }, [config]);
 
+  const rowsOf = (response) => {
+    const rows = response?.data?.data ?? response?.data;
+    return Array.isArray(rows) ? rows : [];
+  };
+
   // Ek query mein sab related data fetch karo
   const { data: relatedData, isLoading } = useQuery({
     queryKey: ['relatedData', entity],
@@ -33,8 +38,11 @@ const DynamicEntity = () => {
       const results = {};
       const promises = selectFields.map(async (field) => {
         try {
-          const response = await axios.get(field.fetchFrom);
-          results[field.name] = response.data.data || response.data;
+          // fetchFrom may be a function of the form's data (e.g. employees of the
+          // chosen department) — the table's lookups use it with an empty form.
+          const url = typeof field.fetchFrom === "function" ? field.fetchFrom({}) : field.fetchFrom;
+          const rows = rowsOf(await axios.get(url));
+          results[field.name] = rows;
         } catch (err) {
           console.error(`Error fetching ${field.name}:`, err);
           results[field.name] = [];

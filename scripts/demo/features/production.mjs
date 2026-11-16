@@ -27,7 +27,7 @@ export async function runProduction({ admin, viewer, set, check, prisma }) {
   try {
     const g = await admin("GET", "/api/settings/production-setup");
     check("production setup: defaults = the old fixed ids", g.status === 200 && g.body.canEdit === true &&
-      JSON.stringify(g.body.values) === JSON.stringify({ finishedCategoryIds: [1], semiFinishedCategoryIds: [2], rawMaterialCategoryIds: [3], packingCategoryIds: [4], productionGodown: 2, finishedGoodsGodown: 3, fgTransferGodown: 6 }), JSON.stringify(g.body.values));
+      JSON.stringify(g.body.values) === JSON.stringify({ finishedCategoryIds: [1], semiFinishedCategoryIds: [2], rawMaterialCategoryIds: [3], packingCategoryIds: [4], productionGodown: 2, finishedGoodsGodown: 3, fgTransferGodown: 6, planFromGodown: 1 }), JSON.stringify(g.body.values));
     const gv = await viewer("GET", "/api/settings/production-setup");
     check("production setup: sales user reads it, read-only", gv.status === 200 && gv.body.canEdit === false);
     const pv = await viewer("PUT", "/api/settings/production-setup", { values: { productionGodown: 1 } });

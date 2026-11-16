@@ -26,6 +26,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { authorize, authErrorResponse } from "@/lib/auth/route";
+import { setAuditActor } from "@/lib/audit/context";
 import { can } from "@/lib/auth/permissions";
 import { resolveEmployeeId } from "@/lib/menu/sessionEmployee";
 import { listRoles, roleCodesByUser } from "@/lib/auth/roleCatalog";
@@ -168,8 +169,9 @@ export async function GET(req) {
 
 export async function PUT(req) {
   try {
-    const { canEdit } = await access();
+    const { session, canEdit } = await access();
     if (!canEdit) return bad(`You do not have permission to change employee menus (${MANAGE}).`, 403);
+    setAuditActor(session); // here, in the function that writes (lib/audit/context.js)
 
     let body;
     try {

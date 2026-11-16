@@ -6,6 +6,9 @@ import { guard } from '@/lib/auth/route';
 import { checkPeriodLock } from '@/lib/periodLock';
 import { recordScopeError } from '@/lib/auth/documentScope';
 import { buildPosting, postPlan, assertIssueStock, postingDate } from '@/lib/manufacturing/processOrder';
+import { feature } from '@/lib/features/server';
+import { getProductionSetup, isFinishedCategory } from '@/lib/production/setup';
+import { qcSendError } from '@/lib/quality/productionQc';
 
 export const POST = guard('materialInput.create', async (request) => {
   try {
@@ -26,6 +29,19 @@ export const POST = guard('materialInput.create', async (request) => {
     const dated = await postingDate(stored.dated, when);
     const lockError = await checkPeriodLock(dated, 8, { action: 'create' });
     if (lockError) return NextResponse.json({ error: lockError }, { status: 422 });
+
+    // QC gate: Failed / On hold / Re-test never goes; with the feature
+    // production.qcBeforeSend a finished-goods order needs QC Passed.
+    const qcPlan = await prisma.productionPlanMaster.findUnique({
+      where: { id: planId },
+      select: { id: true, item: { select: { ic_id: true } }, qualityMaster: { select: { status: true } } },
+    });
+    const setup = await getProductionSetup();
+    const qcError = await qcSendError(qcPlan, {
+      requirePass: await feature('production.qcBeforeSend'),
+      isFinished: (icId) => isFinishedCategory(setup, icId),
+    });
+    if (qcError) return NextResponse.json({ error: qcError }, { status: 422 });
 
     const result = await prisma.$transaction(async (tx) => {
       // Serialize posting for this plan. The status check and voucher writes

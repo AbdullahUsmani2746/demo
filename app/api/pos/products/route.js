@@ -8,6 +8,8 @@ import { existsSync } from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { guard } from "@/lib/auth/route";
+import { getGodownStock } from "@/lib/stock/godownStock";
+import { getPosSettings } from "@/lib/pos/settings";
 
 export async function GET(request) {
   try {
@@ -20,7 +22,7 @@ export async function GET(request) {
     const status = searchParams.get("status") || "";
     const sortBy = searchParams.get("sortBy") || "item";
     const sortOrder = searchParams.get("sortOrder") || "asc";
-    const godown = searchParams.get("godown") || 1; // Add godown parameter
+    const godown = Number(searchParams.get("godown")) || (await getPosSettings()).godown;
 
     // Calculate offset for pagination
     const offset = (page - 1) * limit;
@@ -73,19 +75,7 @@ export async function GET(request) {
       include: {
         itemCategories: {
           include: {
-            mainCategory: {
-              include: {
-                ProductCategories: {
-                  include: {
-                    ProductGroups: {
-                      include: {
-                        ProductMasterCategories: true,
-                      },
-                    },
-                  },
-                },
-              },
-            },
+            mainCategory: true,
           },
         },
       },
@@ -94,34 +84,11 @@ export async function GET(request) {
       take: limit,
     });
 
-    // If godown is provided, get stock for each product using raw query
-    if (godown) {
-      for (let product of products) {
-        try {
-          const stockResult = await prisma.$queryRaw`
-            SELECT SUM(
-              CASE 
-                WHEN tm.tran_code IN (4, 10, 12) AND tm.godown = ${Number(godown)} THEN t.qty  -- Purchase, Sale Return (add to stock)
-                WHEN tm.tran_code IN (6, 9, 5) AND tm.godown = ${Number(godown)} THEN -t.qty  -- Sale, Purchase Return (remove from stock)
-                WHEN tm.tran_code = 11 AND tm.godown = ${Number(godown)} THEN -t.qty  -- Transfer out
-                WHEN tm.tran_code = 11 AND tm.godown2 = ${Number(godown)} THEN t.qty   -- Transfer in
-                ELSE 0
-              END
-            ) as stock
-            FROM "Transactions" t
-            JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
-            WHERE t.itcd = ${product.itcd} 
-            AND (tm.godown = ${Number(godown)} OR tm.godown2 = ${Number(godown)})
-          `;
-          
-          // Add calculated stock to product object
-          product.stock = stockResult[0]?.stock || 0;
-        } catch (stockError) {
-          console.error(`Error calculating stock for item ${product.itcd}:`, stockError);
-          product.stock = 0;
-        }
-      }
-    }
+    // Stock in the godown asked for (default: the POS godown, Settings → Point of Sale) —
+    // the one stock formula (lib/stock/godownStock.js: opening + every IN / OUT type,
+    // control rows excluded). The old inline query missed opening stock, issues (7) and production (8).
+    const stockMap = await getGodownStock(products.map((p) => p.itcd), godown);
+    for (const product of products) product.stock = stockMap.get(product.itcd) || 0;
 
     // Calculate pagination info
     const totalPages = Math.ceil(totalCount / limit);

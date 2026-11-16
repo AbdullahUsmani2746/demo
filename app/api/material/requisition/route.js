@@ -308,7 +308,7 @@ export const POST = guard("requisition.create", async (req) => {
 
     const requisition = await prisma.reqMaster.create({
       data: {
-        userid: master.userid,
+        userid: String(session.user.id), // Entered by — from the session, never the body
         dated: master.dated ? new Date(master.dated) : new Date(),
         issued_for: Number(master.issued_for?.value) || null,
         app_date: master.app_date ? new Date(master.app_date) : null,
@@ -505,7 +505,7 @@ export const PUT = guardBy(
     await prisma.reqMaster.update({
       where: { tran_id: tranId },
       data: {
-        userid: master.userid || existingReq.userid,
+        userid: existingReq.userid, // stays the person who entered it
         dated: master.dated ? new Date(master.dated) : existingReq.dated,
         issued_for: master.issued_for?.value
           ? Number(master.issued_for.value)

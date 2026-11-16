@@ -12,7 +12,8 @@ import StockCheckSettings from "@/components/Settings/StockCheckSettings";
 import FeatureSettings from "@/components/Settings/FeatureSettings";
 import ProductionSetupSettings from "@/components/Settings/ProductionSetupSettings";
 import FixedAssetSettings from "@/components/Settings/FixedAssetSettings";
-import { ArrowUpRight, Bell, Boxes, Building, Building2, DollarSign, Factory, Landmark, ListTree, Lock, Settings2, ShieldCheck, ToggleRight, UserCheck, UserCog, Users } from "lucide-react";
+import PosSettings from "@/components/Settings/PosSettings";
+import { ArrowUpRight, Bell, Boxes, Building, Building2, DollarSign, Factory, Landmark, ListTree, Lock, Settings2, ShieldCheck, Store, ToggleRight, UserCheck, UserCog, Users } from "lucide-react";
 
 // MACNO groups are set on Account settings (its Parties / Vouchers sections),
 // so they are not a section here.
@@ -24,6 +25,7 @@ const TABS = [
   { id: "stock", label: "Stock checking", icon: Boxes, description: "No check, warn or block short stock", Component: StockCheckSettings },
   { id: "production", label: "Production setup", icon: Factory, description: "Item category kinds and production godowns", Component: ProductionSetupSettings },
   { id: "fixedAssets", label: "Fixed assets", icon: Building2, description: "Depreciation rules, category defaults and accounts", Component: FixedAssetSettings },
+  { id: "pos", label: "Point of Sale", icon: Store, description: "Till godown, walk-in account, tax, rounding, receipt", Component: PosSettings },
 ];
 
 const LINKS = [
@@ -34,7 +36,7 @@ const LINKS = [
   // /admin/* — for people whose roles open the Admin area (middleware.js)
   { href: "/admin/roles", label: "Roles", icon: Users, description: "Roles, who holds them, what each may do", adminArea: true },
   { href: "/admin/permissions", label: "Permissions", icon: ShieldCheck, description: "Who can do what", adminArea: true },
-  { href: "/admin/user", label: "Users", icon: UserCog, description: "Logins and their roles", adminArea: true },
+  { href: "/admin/user", label: "Logins & Roles", icon: UserCog, description: "Every login, its roles and employee", adminArea: true },
 ];
 
 const SettingsPage = () => {

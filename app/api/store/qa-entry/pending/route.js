@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { id } from "date-fns/locale";
 
 export async function GET() {
   try {
@@ -49,14 +48,14 @@ export async function GET() {
 
 
     const approvedQAMap = new Map();
+    const inQcMap = new Map();
 
     // Create a Set for quick lookup
     existingQAMasters.forEach(qa => {
-  if (qa.status === "APPROVED") { // approved only
-    const key = `${qa.order_no}-${qa.itcd}`;
-    const prev = approvedQAMap.get(key) || 0;
-    approvedQAMap.set(key, prev + (qa.batch_size || 0));
-  }
+  const key = `${qa.order_no}-${qa.itcd}`;
+  if (qa.status === "APPROVED") approvedQAMap.set(key, (approvedQAMap.get(key) || 0) + (qa.batch_size || 0));
+  // received and still waiting for QC — not open any more
+  else if (qa.status !== "REJECTED") inQcMap.set(key, (inQcMap.get(key) || 0) + (qa.batch_size || 0));
 });
 
 
@@ -92,6 +91,7 @@ export async function GET() {
   const formattedOrders = orderDetails.map(detail => {
   const key = `${detail.order_no}-${detail.itcd}`;
   const approvedQty = approvedQAMap.get(key) || 0;
+  const inQcQty = inQcMap.get(key) || 0;
 
   return {
     order_no: detail.order_no,
@@ -101,7 +101,8 @@ export async function GET() {
     item_name: detail.items?.item || "",
     ordered_qty: detail.qty || 0,
     approved_qty: approvedQty,              // ✅ THIS
-    pending_qty: (detail.qty || 0) - approvedQty, // ✅ OPTIONAL (very useful)
+    in_qc_qty: inQcQty,
+    pending_qty: Math.max(0, (detail.qty || 0) - approvedQty - inQcQty),
     unit: detail.unit || "",
     rate: detail.rate || 0,
     order_detail_id: detail.id

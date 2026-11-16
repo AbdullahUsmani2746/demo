@@ -6,7 +6,7 @@ import { guard } from "@/lib/auth/route";
 // GET /api/item-quality/:itcd
 export async function GET(req, { params }) {
   try {
-    const { id } = params;
+    const { id } = await params;
 
     if (!id) {
       return NextResponse.json({ error: "Item ID is required" }, { status: 400 });
@@ -35,7 +35,8 @@ export async function GET(req, { params }) {
 // for updating or inserting quality parameters
 export const POST = guard("qualityControl.manage", async (req, { params }) => {
   try {
-    const { itcd } = params;
+    // The folder is [id] (the item code); params is a promise in Next 15.
+    const { id: itcd } = await params;
     const body = await req.json();
 
     // body will be an object like { viscosity: "10", gloss: "5", ... }
