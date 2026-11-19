@@ -461,9 +461,10 @@ async function applyLitreConversion(lines) {
       // silent error this whole change exists to stop. The order still saves.
       qty: q.qty,
       qty_ltr: q.qty_ltr,
-      amount: q.amount,
+      // Money to 2 decimals, the form's and Sale Invoicing's rule.
+      amount: q.amount == null ? q.amount : round2(q.amount),
       // Sales tax follows the amount, whichever unit produced it.
-      st_amount: round2((q.amount * (parseFloat(line.st_rate) || 0)) / 100),
+      st_amount: round2((round2(q.amount) * (parseFloat(line.st_rate) || 0)) / 100),
     };
   });
 

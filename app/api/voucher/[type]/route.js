@@ -1260,7 +1260,8 @@ function validateBody(body) {
 
 // Next free voucher number — the same rule as /api/voucher/next-vr-no.
 async function nextVrNo(tranCode) {
-  const where = { tran_code: tranCode };
+  // A row without a number (NULL sorts first in DESC) must not restart the series.
+  const where = { tran_code: tranCode, vr_no: { not: null } };
   if (tranCode === 1 || tranCode === 2) where.acno = { macno: { in: await getCashBankMacnos() } };
   const last = await prisma.transactionsMaster.findFirst({ where, orderBy: { vr_no: "desc" }, select: { vr_no: true } });
   return (last?.vr_no ?? 0) + 1;
@@ -1364,6 +1365,10 @@ async function createVoucher(req, { params, actingSession = null, parsedBody = n
 
     const { master, deductions = [] } = body;
     let { lines } = body;
+    // Every document gets its voucher number: a form that does not send one
+    // (e.g. Dispatch, numbered by dispatch_no) still takes the next of its
+    // series, so ledgers and registers never show VR # 0 / blank.
+    if (master && !(Number(master.vr_no) > 0)) master.vr_no = await nextVrNo(tran_code);
 
     // Settings → Features (lib/features/catalog.js). Switched off = the request
     // cannot use the flow, whatever a screen sends.

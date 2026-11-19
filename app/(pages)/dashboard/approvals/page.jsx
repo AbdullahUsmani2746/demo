@@ -397,6 +397,16 @@ function Detail({ id, onClose, onChanged }) {
                 <div className="min-w-0 space-y-1.5 text-sm">
                   {isSo ? <ReasonChips reasons={reasons} /> : <p className="font-semibold text-slate-900">{d.request.rule_name}</p>}
                   {d.request.rule_condition && !isSo && <p className="text-xs text-slate-600">Held because: {d.request.rule_condition}</p>}
+                  {d.reason_figures?.length > 0 && (
+                    <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 py-1 sm:grid-cols-4">
+                      {d.reason_figures.map((f) => (
+                        <div key={f.label} className="min-w-0">
+                          <dt className="text-[11px] uppercase tracking-wide text-slate-500">{f.label}</dt>
+                          <dd className={`font-semibold tabular-nums ${f.tone === "bad" ? "text-red-700" : "text-slate-900"}`}>{f.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
                   <p className="text-xs text-slate-500">
                     {d.request.held_note ??
                       (isHr

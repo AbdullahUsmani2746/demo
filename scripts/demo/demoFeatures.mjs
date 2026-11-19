@@ -33,11 +33,24 @@ export const DEMO_FEATURES = {
   "costing.reconciliation": true,
 };
 
+// Switched only after the documents are posted (the seeder's history needs the
+// defaults: most demo customers end up past their credit limit, and some demo
+// dispatches are produced from the BOM). From then on, as the Sales tutorial shows:
+//  - a Sale Order that takes a customer over the limit waits on Approvals with the
+//    reason "Credit limit exceeded";
+//  - a dispatch takes finished goods from stock (the demo company makes them on
+//    process orders), so the form has no BOM materials panel.
+export const DEMO_FEATURES_AFTER_SEED = {
+  "saleOrder.creditLimit": "hold",
+  "dispatch.produceOnDispatch": false,
+};
+
 const wait = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 /** PUT the demo switches (Super Admin) and wait out the 10 s feature cache of each route. */
-export async function applyDemoFeatures(call, log = console.log) {
-  await call("admin", "PUT", "/api/settings/features", { values: DEMO_FEATURES });
-  log(`  features on: ${Object.keys(DEMO_FEATURES).length}`);
+export async function applyDemoFeatures(call, log = console.log, { afterSeed = false } = {}) {
+  const values = afterSeed ? { ...DEMO_FEATURES, ...DEMO_FEATURES_AFTER_SEED } : DEMO_FEATURES;
+  await call("admin", "PUT", "/api/settings/features", { values });
+  log(`  features on: ${Object.keys(values).length}`);
   await wait(11000);
 }

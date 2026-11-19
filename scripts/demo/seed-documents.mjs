@@ -20,6 +20,8 @@ import { seedPosDocuments } from "./posDocuments.mjs";
 import { hrDocuments } from "./hrDocuments.mjs";
 import { applyDemoFeatures } from "./demoFeatures.mjs";
 import { moreDocuments } from "./moreDocuments.mjs";
+import { seedSalesTargets } from "./salesTargets.mjs";
+import { seedCustomerPriceLists } from "./customerPriceLists.mjs";
 
 if (!(process.env.DEMO_DATABASE === "1" || process.env.DATABASE_URL?.includes("bizlogist_demo"))) {
   console.error("Refusing: DATABASE_URL is not the demo database.");
@@ -702,8 +704,10 @@ async function main() {
   await seedPosDocuments({ call });
   await hr.finish();
   await more.pendingAndLoans(await prisma.employee.findMany({ select: { id: true, firstName: true, surname: true } }));
+  await seedCustomerPriceLists({ call, prisma });
+  await seedSalesTargets({ call, prisma, from: START, to: new Date() });
   await more.closeMonths();
-  await applyDemoFeatures(call);
+  await applyDemoFeatures(call, console.log, { afterSeed: true });
   await printCounts();
   console.log(`Done: ${stats.ok} calls ok, ${stats.fallback} entered by admin (role lacked the right), ${stats.warnings} with warnings.`);
   for (const [k, n] of fallbacks) console.log(`  fallback ×${n}: ${k}`);

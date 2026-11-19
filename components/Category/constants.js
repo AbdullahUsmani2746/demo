@@ -136,6 +136,10 @@ const subAccountLineField = {
 // calculation that reaches for anything else (ltr_rate, say) silently gets
 // undefined and returns a wrong number. This merges the two shapes so a
 // calculate always sees the whole line, whichever call site ran it.
+// Money on a line is kept to 2 decimals — the same rule Sale Invoicing prices
+// with (round2 in lib/invoicing/core.js), so a form never shows 98,800.722.
+const money2 = (n) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
+
 const calcLine = (a, b) => {
   const looksLikeLine =
     b && typeof b === "object" && !("lastEditedField" in b);
@@ -7591,7 +7595,10 @@ export const VOUCHER_CONFIG = {
         nameKey: "godown",
         valueKey: "id",
         required: true,
-        defaultValue: { value: "1", label: "FACTORY" },
+        // Starts at the company's finished goods godown (Settings → Production
+        // setup), never a fixed id.
+        defaultValue: setupGodownDefault("finishedGoodsGodown"),
+        defaultGodown: "finishedGoodsGodown",
         // "No Godown" sits at the top of the list; picking it saves the order
         // without a godown and sends it for approval.
         extraOptions: [NO_GODOWN_OPTION],
@@ -7843,7 +7850,7 @@ export const VOUCHER_CONFIG = {
         label: "Amount",
         type: "number",
         dependencies: ["qty", "qty_ltr", "unit", "rate"],
-        calculate: (a, b) => litreAwareAmount(calcLine(a, b)),
+        calculate: (a, b) => money2(litreAwareAmount(calcLine(a, b))),
         readOnly: true,
       },
       {
@@ -7860,7 +7867,7 @@ export const VOUCHER_CONFIG = {
         calculate: (a, b) => {
           const line = calcLine(a, b);
           const amount = parseFloat(line.amount) || litreAwareAmount(line);
-          return (amount * (parseFloat(line.st_rate) || 0)) / 100;
+          return money2((amount * (parseFloat(line.st_rate) || 0)) / 100);
         },
         readOnly: true,
       },
@@ -7873,7 +7880,7 @@ export const VOUCHER_CONFIG = {
           const line = calcLine(a, b);
           const amount = parseFloat(line.amount) || litreAwareAmount(line);
           const st = parseFloat(line.st_amount) || 0;
-          return amount + st;
+          return money2(amount + st);
         },
         readOnly: true,
       },
@@ -7897,20 +7904,17 @@ export const VOUCHER_CONFIG = {
       totalAmount: {
         label: "Total Amount",
         calculate: (lines) =>
-          lines.reduce((sum, l) => sum + (l.amount || 0), 0),
+          money2(lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0)),
       },
       totalSalesTax: {
         label: "Total Sales Tax",
         calculate: (lines) =>
-          lines.reduce((sum, l) => sum + (l.st_amount || 0), 0),
+          money2(lines.reduce((sum, l) => sum + (Number(l.st_amount) || 0), 0)),
       },
       grandTotal: {
         label: "Grand Total",
         calculate: (lines) =>
-          lines.reduce(
-            (sum, l) => sum + (l.st_amount || 0) + (l.amount || 0),
-            0,
-          ),
+          money2(lines.reduce((sum, l) => sum + (Number(l.st_amount) || 0) + (Number(l.amount) || 0), 0)),
       },
     },
     tableFields: [
@@ -8108,7 +8112,8 @@ export const VOUCHER_CONFIG = {
         nameKey: "godown",
         valueKey: "id",
         required: true,
-        defaultValue: { value: "1", label: "FACTORY" },
+        defaultValue: setupGodownDefault("finishedGoodsGodown"), // Settings → Production setup
+        defaultGodown: "finishedGoodsGodown",
         extraOptions: [NO_GODOWN_OPTION],
         onChange: async (value) => ({ noGodown: value === NO_GODOWN_OPTION.value }),
       },
