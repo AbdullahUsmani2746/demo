@@ -31,11 +31,29 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           password: ${{ secrets.VPS_PASSWORD }}
           port: 2746
+          # One image, two sites — same code, each with its own database (its .env):
+          #   demo  → ~/demo/.env,  port 3030, uploads /var/www/uploads        (demo.bizlogist.com)
+          #   demo2 → ~/demo2/.env, port 3031, uploads /var/www/uploads-demo2  (demo2.bizlogist.com)
+          # demo2 is skipped until ~/demo2/.env exists on the VPS.
           script: |
-            cd demo
+            set -e
+            IMAGE=ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-            docker stop demo || true
-            docker rm demo || true
-            docker image rm ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest || true
-            docker pull ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
-            docker run -d --env-file .env -p 127.0.0.1:3030:3030 -v /var/www/uploads:/app/public/uploads --name demo --restart unless-stopped ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
+            docker pull "$IMAGE"
+
+            restart_site() {
+              name=$1; envfile=$2; port=$3; uploads=$4
+              docker stop "$name" || true
+              docker rm "$name" || true
+              docker run -d --env-file "$envfile" -p 127.0.0.1:$port:3030 -v "$uploads":/app/public/uploads --name "$name" --restart unless-stopped "$IMAGE"
+            }
+
+            restart_site demo ~/demo/.env 3030 /var/www/uploads
+
+            if [ -f ~/demo2/.env ]; then
+              restart_site demo2 ~/demo2/.env 3031 /var/www/uploads-demo2
+            else
+              echo "demo2 skipped: ~/demo2/.env not found"
+            fi
+
+            docker image prune -f

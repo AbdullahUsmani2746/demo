@@ -1,0 +1,149 @@
+# One-time setup of the second demo site (demo2.bizlogist.com) on the VPS.
+# Run by hand: GitHub → Actions → "Set up demo2" → Run workflow.
+#   step=all  copy the demo database into a NEW database, write ~/demo2/.env,
+#             copy uploads, start the demo2 container, nginx site, and SSL once
+#             the domain points at this server.
+#   step=ssl  only the nginx site + SSL (run again after DNS has spread).
+# Never overwrites: if the new database already exists, the copy is refused.
+# The demo site, its database and its .env are only read, never changed.
+# Afterwards every push to main updates both sites (deploy-VPS.yml).
+name: Set up demo2
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "all = database + site + SSL, ssl = only nginx + SSL"
+        type: choice
+        options: [all, ssl]
+        default: all
+      domain:
+        description: "Address of the new site"
+        default: demo2.bizlogist.com
+      new_db:
+        description: "Name of the new database (keep 'bizlogist_demo' in it)"
+        default: bizlogist_demo2
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up demo2 on the VPS
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: 2746
+          command_timeout: 60m
+          script: |
+            set -eu
+            STEP="${{ inputs.step }}"
+            DOMAIN="${{ inputs.domain }}"
+            NEW_DB="${{ inputs.new_db }}"
+            PORT=3031
+            IMAGE=ghcr.io/${{ secrets.GHCR_USERNAME }}/demo:latest
+            SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo -n"
+
+            case "$NEW_DB" in *bizlogist_demo*) ;; *) echo "Refusing: new database name must contain bizlogist_demo"; exit 1;; esac
+            [ -f ~/demo/.env ] || { echo "~/demo/.env not found"; exit 1; }
+
+            # DATABASE_URL of the demo site, without quotes and without ?schema=… (libpq does not know it).
+            SRC_URL=$(grep -E '^DATABASE_URL=' ~/demo/.env | head -1 | cut -d= -f2- | tr -d '"'"'"'')
+            SRC_PG=${SRC_URL%%\?*}
+            SRC_DB=${SRC_PG##*/}
+            BASE=${SRC_PG%/*}
+            DST_PG="$BASE/$NEW_DB"
+            [ "$SRC_DB" != "$NEW_DB" ] || { echo "Refusing: new database has the demo's own name"; exit 1; }
+            echo "Demo database: $SRC_DB  →  new database: $NEW_DB  (host/user not printed)"
+
+            # PostgreSQL tools in a throwaway container of the server's own major version.
+            pg() { docker run --rm -i --network host -v /tmp/demo2-setup:/work "postgres:$PGV-alpine" "$@"; }
+            mkdir -p /tmp/demo2-setup
+            PGV=17
+            PGV=$(pg psql "$SRC_PG" -tAc "SELECT current_setting('server_version_num')::int / 10000" | tr -d '[:space:]')
+            echo "PostgreSQL server major version: $PGV"
+
+            if [ "$STEP" = all ]; then
+              # 1. Database copy — refuse if the new one already exists.
+              EXISTS=$(pg psql "$SRC_PG" -tAc "SELECT 1 FROM pg_database WHERE datname = '$NEW_DB'" | tr -d '[:space:]')
+              if [ "$EXISTS" = 1 ]; then
+                echo "Database $NEW_DB already exists — not touching it (drop it yourself to copy again)."
+              else
+                pg psql "$SRC_PG" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$NEW_DB\""
+                pg pg_dump "$SRC_PG" -Fc -f /work/demo.dump
+                pg pg_restore --no-owner --no-acl -d "$DST_PG" /work/demo.dump
+                rm -f /tmp/demo2-setup/demo.dump
+                echo "Copied. Tables: $(pg psql "$DST_PG" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | tr -d '[:space:]')"
+              fi
+
+              # 2. ~/demo2/.env = the demo's, with its own database and address.
+              mkdir -p ~/demo2
+              if [ -f ~/demo2/.env ]; then
+                echo "~/demo2/.env already exists — kept as it is."
+              else
+                sed -E \
+                  -e "s#^(DATABASE_URL=\"?[^\"?]*/)[^/?\"]+#\1$NEW_DB#" \
+                  -e "s#^NEXTAUTH_URL=.*#NEXTAUTH_URL=https://$DOMAIN#" \
+                  ~/demo/.env > ~/demo2/.env
+                chmod 600 ~/demo2/.env
+                grep -q "/$NEW_DB" ~/demo2/.env || { echo "Could not set the database in ~/demo2/.env"; rm ~/demo2/.env; exit 1; }
+                echo "~/demo2/.env written."
+              fi
+
+              # 3. Uploaded files (product images etc.) — a copy, so the sites never share new uploads.
+              if [ ! -d /var/www/uploads-demo2 ]; then
+                $SUDO cp -a /var/www/uploads /var/www/uploads-demo2 2>/dev/null || $SUDO mkdir -p /var/www/uploads-demo2
+              fi
+
+              # 4. The demo2 container (same image as demo).
+              echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+              docker pull "$IMAGE"
+              docker stop demo2 2>/dev/null || true
+              docker rm demo2 2>/dev/null || true
+              docker run -d --env-file ~/demo2/.env -p 127.0.0.1:$PORT:3030 -v /var/www/uploads-demo2:/app/public/uploads --name demo2 --restart unless-stopped "$IMAGE"
+              sleep 15
+              echo "demo2 answers locally with HTTP $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/ || echo none)"
+            fi
+
+            # 5. nginx site for the new address (a fresh file; the demo's file is not changed).
+            if command -v nginx >/dev/null; then
+              CONF=/etc/nginx/sites-available/$DOMAIN
+              [ -d /etc/nginx/sites-available ] || CONF=/etc/nginx/conf.d/$DOMAIN.conf
+              if [ ! -f "$CONF" ]; then
+                printf '%s\n' \
+                  "server {" \
+                  "    listen 80;" \
+                  "    server_name $DOMAIN;" \
+                  "    client_max_body_size 50m;" \
+                  "    location / {" \
+                  "        proxy_pass http://127.0.0.1:$PORT;" \
+                  "        proxy_http_version 1.1;" \
+                  "        proxy_set_header Upgrade \$http_upgrade;" \
+                  "        proxy_set_header Connection \"upgrade\";" \
+                  "        proxy_set_header Host \$host;" \
+                  "        proxy_set_header X-Real-IP \$remote_addr;" \
+                  "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
+                  "        proxy_set_header X-Forwarded-Proto \$scheme;" \
+                  "        proxy_read_timeout 300;" \
+                  "    }" \
+                  "}" | $SUDO tee "$CONF" >/dev/null
+                [ -d /etc/nginx/sites-enabled ] && $SUDO ln -sf "$CONF" /etc/nginx/sites-enabled/
+                echo "nginx site written: $CONF"
+              fi
+              $SUDO nginx -t && $SUDO systemctl reload nginx
+
+              # 6. SSL — only once the address points at this server.
+              MYIP=$(curl -s https://api.ipify.org || true)
+              DNSIP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)
+              if [ -n "$DNSIP" ] && [ "$DNSIP" = "$MYIP" ]; then
+                $SUDO certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect --keep-until-expiring \
+                  && echo "SSL done: https://$DOMAIN"
+              else
+                echo "SSL skipped: $DOMAIN points to '${DNSIP:-nothing}', this server is $MYIP."
+                echo "Add the DNS A record, wait, then run this workflow again with step=ssl."
+              fi
+            else
+              echo "nginx not found on this server — the site runs on 127.0.0.1:$PORT; point your web server at it."
+            fi
+            echo "Finished."
