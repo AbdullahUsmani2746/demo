@@ -15,8 +15,11 @@ on:
       step:
         description: "all = database + site + SSL, ssl = only nginx + SSL"
         type: choice
-        options: [all, ssl]
+        options: [all, ssl, clear-transactions]
         default: all
+      confirm:
+        description: "For clear-transactions only: type CLEAR <new database name>"
+        default: ""
       domain:
         description: "Address of the new site"
         default: demo2.bizlogist.com
@@ -63,6 +66,58 @@ jobs:
             PGV=17
             PGV=$(pg psql "$SRC_PG" -tAc "SELECT current_setting('server_version_num')::int / 10000" | tr -d '[:space:]')
             echo "PostgreSQL server major version: $PGV"
+
+            # step=clear-transactions — empty every transaction table of the NEW database
+            # (setup / masters / users / settings / employees stay). One SQL transaction:
+            # all or nothing. Never the demo's database. Maintenance SQL, not through the
+            # app, so it is not in the audit trail (the audit log itself is emptied too).
+            if [ "$STEP" = clear-transactions ]; then
+              [ "${{ inputs.confirm }}" = "CLEAR $NEW_DB" ] || { echo "Refusing: type exactly 'CLEAR $NEW_DB' in confirm"; exit 1; }
+              case "$DST_PG" in "$SRC_PG") echo "Refusing: that is the demo's database"; exit 1;; esac
+              printf '%s\n' \
+                "TRANSACTIONS_MASTER Transactions OrderMaster OrderDetail checks_in_hand INVOICE_KNOCKOFF INVOICE_KNOCKOFF_RUN" \
+                "service_invoice_links SALE_RETURN_REMARK TAX_CHALLAN SALES_LOAN SALES_LOAN_LINE SALES_LOAN_RETURN" \
+                "ApprovalRequest AuditLog Notification push_subscriptions Session VerificationToken" \
+                "MonthlyOpeningStock MonthlyOpeningRate PeriodLock PeriodLockException PeriodLockLog" \
+                "CostingPeriod FutureCosting ProductionCostEntry ProductionCostDetail" \
+                "CustomerMonthlyTarget SALES_FORECAST INPUT_FOR_PP BiFollowup BiFollowupNote bi_events" \
+                "productionPlanMaster productionPlanDetail productionPlanIssue productionPlanOutput productionPlanChangeLog" \
+                "ReqMaster ReqDetail InboundMaster InboundDetail QUALITY_MASTER QUALITY_DETAIL QUALITY_DETAIL_DETAIL" \
+                "PROCESS_SCAN_LOG LCMaster LCDetail pos_held_bills pos_payments pos_receipts pos_shifts" \
+                "fixed_assets fixed_asset_depreciation_runs fixed_asset_depreciation_lines fixed_asset_disposals fixed_asset_movements" \
+                "hr_attendance hr_punches hr_leave_requests hr_leave_balances hr_loans hr_loan_events hr_loan_recoveries" \
+                "hr_off_swaps hr_payroll_runs hr_payslips hr_payroll_payments hr_separations hr_settlements" \
+                "PayrollProcess PeriodicAttendance" | tr ' ' '\n' | grep . > /tmp/demo2-setup/clear-tables.txt
+              LIST=$(awk '{printf "%s'"'"'%s'"'"'", (NR>1?",":""), $1}' /tmp/demo2-setup/clear-tables.txt)
+              COUNTS="SELECT string_agg(t || '=' || n, '  ' ORDER BY t) FROM (SELECT t, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', t), false, true, '')))[1]::text AS n FROM unnest(ARRAY[$LIST]) t WHERE to_regclass(format('%I', t)) IS NOT NULL) x WHERE n <> '0'"
+              echo "Rows before: $(pg psql "$DST_PG" -tAc "$COUNTS")"
+              pg psql "$DST_PG" -v ON_ERROR_STOP=1 -q <<SQL
+            SET lock_timeout = '60s';
+            BEGIN;
+            DO \$\$
+            DECLARE names text;
+            BEGIN
+              SELECT string_agg(format('%I', t), ', ') INTO names
+                FROM unnest(ARRAY[$LIST]) t WHERE to_regclass(format('%I', t)) IS NOT NULL;
+              EXECUTE 'TRUNCATE ' || names || ' RESTART IDENTITY';
+            END \$\$;
+            -- Numbering starts again from 1.
+            DO \$\$
+            DECLARE s text;
+            BEGIN
+              IF to_regclass('tran_code_sequences') IS NOT NULL THEN
+                FOR s IN SELECT unnest(ARRAY[sequence_name, off_sequence_name]) FROM tran_code_sequences LOOP
+                  IF s IS NOT NULL AND to_regclass(s) IS NOT NULL THEN PERFORM setval(s, 1, false); END IF;
+                END LOOP;
+              END IF;
+              IF to_regclass('order_region_sequences') IS NOT NULL THEN DELETE FROM order_region_sequences; END IF;
+            END \$\$;
+            COMMIT;
+            SQL
+              echo "Rows after (non-empty only): $(pg psql "$DST_PG" -tAc "$COUNTS")"
+              echo "Transactions cleared in $NEW_DB."
+              exit 0
+            fi
 
             if [ "$STEP" = all ]; then
               # 1. Database copy. Created if missing; filled only while it has no tables
