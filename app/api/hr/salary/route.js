@@ -22,7 +22,7 @@ export const GET = hrRoute(VIEW, async (req, { session }) => {
   const on = isDayKey(sp.get("date")) ? sp.get("date") : todayKey();
   const employees = await prisma.employee.findMany({
     where: { AND: [await employeeFilter(session, sp), { status: "ACTIVE" }] },
-    select: { ...EMPLOYEE_SELECT, advanceAcno: true, loanAcno: true },
+    select: { ...EMPLOYEE_SELECT, advanceAcno: true, loanAcno: true, incomeTaxMode: true },
     orderBy: [{ departmentId: "asc" }, { firstName: "asc" }],
   });
   const ids = employees.map((e) => e.id);
@@ -35,6 +35,8 @@ export const GET = hrRoute(VIEW, async (req, { session }) => {
     date: on,
     employees: employees.map((e) => ({
       employee: employeeLite(e),
+      // Income tax: SLAB (by the slabs) or NONE (not deducted) — /api/hr/salary/tax
+      tax_mode: e.incomeTaxMode || "SLAB",
       current: structureLite(current.get(e.id)) ?? null,
       pending: structureLite(pendingOf.get(e.id)) ?? null,
     })),

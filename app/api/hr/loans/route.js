@@ -14,7 +14,8 @@ import { hrRoute, jsonBody } from "@/lib/hr/route";
 import { activate, loanData, logEvent, thisMonth } from "@/lib/hr/loans/service";
 import { dueInMonth, isRefundable, LOAN_KINDS, LOAN_STATUS, loanApprovalType, outstandingOf, recoveredTotal } from "@/lib/hr/loans/schedule";
 import { fmtMoney } from "@/lib/hr/salary/calc";
-import { createHrRequest } from "@/lib/hr/approvals";
+import { createHrRequest, mayPayOut, payersOf } from "@/lib/hr/approvals";
+import { chainForNewRequest } from "@/lib/hr/chains";
 import { EMPLOYEE_SELECT, employeeLite } from "@/lib/hr/attendance/sheet";
 import { dayKeyOfDb } from "@/lib/hr/time";
 
@@ -36,11 +37,14 @@ export const GET = hrRoute(ALL, async (req, { session }) => {
     include: { employee: { select: EMPLOYEE_SELECT }, recoveries: { select: { amount: true } } },
   });
   const month = thisMonth();
+  // Approved but not paid yet: who the approval chain sent each one to for payment.
+  const payers = await payersOf(loans.filter((l) => l.status === "active" && !l.disbursed_on).map((l) => l.approval_request_id));
   return NextResponse.json({
     selfId,
     month,
     loans: loans.map((l) => {
       const owed = outstandingOf(l, l.recoveries);
+      const payer = payers.get(l.approval_request_id);
       return {
         id: l.id,
         employee: employeeLite(l.employee),
@@ -56,6 +60,7 @@ export const GET = hrRoute(ALL, async (req, { session }) => {
         disbursed_on: l.disbursed_on ? dayKeyOfDb(l.disbursed_on) : null,
         requested_at: l.requested_at,
         self: l.employee_id === selfId,
+        pay_with: payer ? { names: payer.names, mine: mayPayOut(session, payer) } : null,
       };
     }),
   });
@@ -65,6 +70,10 @@ export const POST = hrRoute([HR_PERMS.loanApply, HR_PERMS.loanManage], async (re
   const b = await jsonBody(req);
   const who = await loanActor(session, b.employee_id ? Number(b.employee_id) : null);
   const d = await loanData({ ...b, employee_id: who.employeeId });
+  // Its approval chain (lib/hr/chains.js) — refused here, before anything is saved.
+  // Advances / loans follow their approval chain; PF loans / withdrawals have
+  // their own approvers (hr.pfloan.approve) and no chain.
+  const chain = loanApprovalType(d.kind) === "hrLoan" ? await chainForNewRequest({ docType: "hrLoan", employeeId: who.employeeId, loanKind: d.kind }) : null;
   const waiting = await prisma.hrLoan.findFirst({ where: { employee_id: who.employeeId, kind: d.kind, status: "pending" } });
   if (waiting) return NextResponse.json({ error: `A ${LOAN_KINDS[d.kind].label.toLowerCase()} for this employee is already waiting (#A-${waiting.id}).` }, { status: 409 });
 
@@ -88,11 +97,18 @@ export const POST = hrRoute([HR_PERMS.loanApply, HR_PERMS.loanManage], async (re
   const docType = loanApprovalType(d.kind);
   const mayApprove = docType === "hrPfLoan" ? who.rights.pfLoanApprove : who.rights.loanApprove;
 
-  if (b.approve_now && !who.self && mayApprove) {
+  if (b.approve_now && !chain && !who.self && mayApprove) {
     await activate(loan.id, { actor: session.user.id, note: "Approved when entered" });
     return NextResponse.json({ id: loan.id, status: "active", message: `#A-${loan.id} recorded and approved — ${what}.` }, { status: 201 });
   }
-  const request = await createHrRequest({ docType, payload: { loan_id: loan.id }, summary: `${what}${d.reason ? ` — ${d.reason}` : ""}`, session });
+  const request = await createHrRequest({
+    docType,
+    payload: { loan_id: loan.id },
+    summary: `${what}${d.reason ? ` — ${d.reason}` : ""}`,
+    session,
+    chain,
+    employeeId: who.employeeId,
+  });
   await prisma.hrLoan.update({ where: { id: loan.id }, data: { approval_request_id: request.id } });
   return NextResponse.json({ id: loan.id, status: "pending", message: `#A-${loan.id} sent for approval — ${what}.` }, { status: 201 });
 });

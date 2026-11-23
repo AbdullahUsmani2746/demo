@@ -15738,6 +15738,9 @@ REPORT_CONFIG.exbondReport = {
 // employees the person may see. Defaults and range limits (a year of days,
 // three years of months) are enforced there too.
 const HR_FILTERS = {
+  day: () => [
+    { name: "day", label: "Date", type: "date", required: true, default: new Date() },
+  ],
   month: () => [
     { name: "month", label: "Month", type: "select", options: hrMonthOptions(), default: hrMonthOptions()[0], required: true },
   ],

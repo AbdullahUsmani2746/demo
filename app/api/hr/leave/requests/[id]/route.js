@@ -10,7 +10,7 @@ import { HR_PERMS } from "@/lib/hr/access";
 import { hrRoute, intParam, jsonBody } from "@/lib/hr/route";
 import { assertCanActFor, leaveContext } from "@/lib/hr/leave/access";
 import { withdrawLeave } from "@/lib/hr/leave/requests";
-import { canDecideHr, decideHrRequest } from "@/lib/hr/approvals";
+import { decideHrRequest, mayDecideHr } from "@/lib/hr/approvals";
 import { REQUEST_STATUS } from "@/lib/approvals/rules";
 
 export const POST = hrRoute([HR_PERMS.leaveApply, HR_PERMS.leaveManage, HR_PERMS.leaveApprove], async (req, { params, session }) => {
@@ -27,7 +27,8 @@ export const POST = hrRoute([HR_PERMS.leaveApply, HR_PERMS.leaveManage, HR_PERMS
     if (!request || request.status !== REQUEST_STATUS.PENDING) {
       return NextResponse.json({ error: "Its approval request is not waiting any more — refresh." }, { status: 409 });
     }
-    if (!(await canDecideHr(session, "hrLeave"))) return NextResponse.json({ error: "You may not approve leave." }, { status: 403 });
+    // In an approval chain only the current step's people decide (lib/hr/chains.js).
+    if (!(await mayDecideHr(session, request))) return NextResponse.json({ error: "You may not approve leave (or not at this step)." }, { status: 403 });
     const { status, body } = await decideHrRequest({ request, action, note, session });
     return NextResponse.json(body, { status });
   }

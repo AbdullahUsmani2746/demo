@@ -20,7 +20,7 @@ import { POST as voucherPost, PUT as voucherPut } from "@/app/api/voucher/[type]
 import { POST as orderPost, PUT as orderPut } from "@/app/api/orders/[type]/route";
 // Production Plan Nature change (kind "plan") — applied by the requisition route
 import { PUT as planPut } from "@/app/api/material/requisition/route";
-import { canDecideHr, decideHrRequest, describeHrRequest, hrRequestCancelled, hrSelfError } from "@/lib/hr/approvals";
+import { chainOf, chainView, decideHrRequest, describeHrRequest, hrRequestCancelled, hrSelfError, mayDecideHr, mayViewHr } from "@/lib/hr/approvals";
 import { HR_APPROVAL_TYPES, HR_KIND, isHrType } from "@/lib/hr/approvalTypes";
 import { describeSaleOrder, diffLines, SO_CATEGORY, soOrderNo } from "@/lib/approvals/saleOrders";
 import { POST as saleOrderDecide } from "@/app/api/orders/saleOrder/approval/route";
@@ -43,13 +43,17 @@ async function load(id) {
 
 /** An HR request (kind "hr"): laid out by its type in lib/hr/approvals.js. */
 async function hrGet(request, session) {
-  const approver = await canDecideHr(session, request.doc_type);
-  if (!approver && request.requested_by !== session.user.id) {
+  if (!(await mayViewHr(session, request))) {
     return NextResponse.json({ error: "Not yours to see" }, { status: 403 });
   }
-  const [{ header, changes, lines }, people] = await Promise.all([
+  const approver = await mayDecideHr(session, request);
+  const chained = chainOf(request);
+  // In a chain the chain says who decides — not the HR data scope.
+  const ownError = chained ? null : await hrSelfError(request, session);
+  const [{ header, changes, lines }, people, chain] = await Promise.all([
     describeHrRequest(request),
     prisma.user.findMany({ where: { id: { in: [request.requested_by, request.decided_by].filter(Boolean) } }, select: { id: true, name: true, email: true } }),
+    chainView(request),
   ]);
   const nameOf = new Map(people.map((u) => [u.id, u.name || u.email]));
   return NextResponse.json({
@@ -62,7 +66,9 @@ async function hrGet(request, session) {
       rule_name: request.rule_name,
       action: request.action,
       target_no: null,
-      rule_condition: `Decided by anyone holding "${HR_APPROVAL_TYPES[request.doc_type]?.permission}" (Admin → Permissions)`,
+      rule_condition: chained
+        ? `Approval chain "${chained.name}" — ${chained.steps.length} step(s) (Admin → Permissions → Approvals → HR approval chains)`
+        : `Decided by anyone holding "${HR_APPROVAL_TYPES[request.doc_type]?.permission}" (Admin → Permissions)`,
       summary: request.summary,
       requested_by: nameOf.get(request.requested_by) || request.requested_by,
       requested_at: request.requested_at,
@@ -78,7 +84,8 @@ async function hrGet(request, session) {
     changes,
     lines,
     ui_state: null,
-    canDecide: approver && request.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, request) && !(await hrSelfError(request, session)),
+    chain,
+    canDecide: approver && request.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, request) && !ownError,
     canEdit: request.requested_by === session.user.id && request.status === REQUEST_STATUS.PENDING,
     canReopen: false,
     edit_hint: "To change it, cancel this request and enter the days again.",
@@ -261,7 +268,7 @@ export const POST = guard(null, async (req, { params, session }) => {
   if (orderNo !== null) return saleOrderPost(orderNo, req, session);
   const request = await load(id);
   if (!request) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  const { action, remarks } = await req.json();
+  const { action, remarks, next_users: nextUsers } = await req.json();
   const note = remarks ? String(remarks).trim().slice(0, 500) || null : null;
   if (request.status === REQUEST_STATUS.POSTING) {
     // A claim older than 10 minutes means the posting process died: release
@@ -293,10 +300,10 @@ export const POST = guard(null, async (req, { params, session }) => {
 
   if (request.kind === HR_KIND && isHrType(request.doc_type)) {
     if (action !== "approve" && action !== "reject") return NextResponse.json({ error: "action must be approve, reject or cancel" }, { status: 400 });
-    if (!(await canDecideHr(session, request.doc_type))) return NextResponse.json({ error: "You may not decide this request." }, { status: 403 });
+    if (!(await mayDecideHr(session, request))) return NextResponse.json({ error: "You may not decide this request (or not at this step)." }, { status: 403 });
     const hrSelfError = selfDecisionError(session, request);
     if (hrSelfError) return NextResponse.json({ error: hrSelfError }, { status: 403 });
-    const { status, body } = await decideHrRequest({ request, action, note, session });
+    const { status, body } = await decideHrRequest({ request, action, note, session, nextUsers });
     return NextResponse.json(body, { status });
   }
 

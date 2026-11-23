@@ -270,6 +270,7 @@ const MENU = [
     ["PAY HISTORY", "/accounting/hr/pay-history", "History"],
     ["LEAVING & SETTLEMENT", "/accounting/hr/leaving", "UserMinus"],
     ["HR REPORTS", null, "ChartColumn", [
+      rep("hrAttendanceDaily", "DAILY ATTENDANCE"),
       rep("hrAttendanceSummary", "MONTHLY ATTENDANCE SUMMARY"),
       rep("hrAttendanceExceptions", "LATES, ABSENCES & MISSED PUNCHES"),
       rep("hrOvertime", "OVERTIME"),

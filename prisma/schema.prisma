@@ -1729,6 +1729,10 @@ model Employee {
   allowanceAmount         Float? // ALLOWNCE
   insCom                  String?               @db.VarChar(100) // INS_COM
   eobiNo                  String?               @db.VarChar(25) // EOBI_NO
+  /// SLAB (deducted by the tax slabs) | NONE (not deducted) — prisma/sql/2026-11-17_employee_income_tax_mode.sql
+  incomeTaxMode           String                @default("SLAB") @map("income_tax_mode") @db.VarChar(10)
+  /// DIRECT | INDIRECT (Employee page → Job) — prisma/sql/2026-11-17_employee_salary_category.sql
+  salaryCategory          String?               @map("salary_category") @db.VarChar(10)
   licCat                  String?               @db.VarChar(10) // LIC_CAT
   leaveAll                String?               @db.VarChar(10) // LEAVE_ALL
   salaryMode              Int? // SALARY_MODE
@@ -2703,12 +2707,40 @@ model ApprovalRequest {
   posted_no      String?       @db.VarChar(60)
   post_error     String?       @db.VarChar(500)
   updated_at     DateTime      @default(now()) @updatedAt
+  // HR approval chain (lib/hr/chains.js): where the request is in its chain
+  chain_id       Int?
+  chain_step     Int?
+  step_users     String[]      @default([]) // who acts on the current step
+  watchers       String[]      @default([]) // told at every step
+  chain_actors   String[]      @default([]) // everyone who acted on it
+  chain_log      Json          @default("[]")
   rule           ApprovalRule? @relation(fields: [rule_id], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([requested_by])
   @@index([rule_id])
   @@index([kind, target_id, status], map: "ApprovalRequest_target_idx")
+}
+
+/// HR approval chain — Admin → Permissions → Approvals → HR approval chains
+/// (lib/hr/chains.js, prisma/sql/2026-11-19_hr_approval_chains.sql).
+model HrApprovalChain {
+  id                Int      @id @default(autoincrement())
+  name              String   @db.VarChar(150)
+  doc_type          String   @db.VarChar(30) // hrLeave | hrLoan
+  loan_kind         String?  @db.VarChar(20) // ADVANCE | LOAN | null = both
+  work_location_ids Int[]    @default([]) // empty = every location
+  department_ids    Int[]    @default([]) // empty = every department
+  steps             Json     @default("[]")
+  watchers          Json     @default("[]")
+  is_active         Boolean  @default(true)
+  sort              Int      @default(0)
+  created_by        String?  @db.VarChar(50)
+  created_at        DateTime @default(now()) @db.Timestamp(3)
+  updated_at        DateTime @default(now()) @updatedAt @db.Timestamp(3)
+
+  @@index([doc_type, is_active])
+  @@map("hr_approval_chains")
 }
 
 model MenuBlock {

@@ -112,6 +112,7 @@ export default function LoansList({ meta, mine = false }) {
                     )}
                   </div>
                   <LoanStatus status={l.status} />
+                  {l.pay_with && <PayWith p={l.pay_with} />}
                 </div>
                 <div className="mt-3 flex items-center gap-2">
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${pct}%` }} /></div>
@@ -177,7 +178,7 @@ export default function LoansList({ meta, mine = false }) {
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-primary">{fmtMoney(l.outstanding)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{fmtMoney(l.installment)}<span className="block text-[10px] text-muted-foreground">from {l.start_month}</span></td>
-                  <td className="px-4 py-2.5"><LoanStatus status={l.status} /></td>
+                  <td className="px-4 py-2.5"><LoanStatus status={l.status} />{l.pay_with && <PayWith p={l.pay_with} />}</td>
                 </tr>
               ))}
             </tbody>
@@ -199,5 +200,14 @@ export default function LoansList({ meta, mine = false }) {
       <ApplyLoanDialog open={applying} onClose={() => setApplying(false)} meta={meta} forOthers={!mine} />
       <LoanDetail loanId={openId} onClose={() => setOpenId(null)} meta={meta} />
     </div>
+  );
+}
+
+// Approved, waiting to be paid out by the person the approval chain sent it to.
+function PayWith({ p }) {
+  return (
+    <span className={cn("ml-1.5 inline-block rounded px-1.5 py-0.5 text-[11px] font-medium", p.mine ? "bg-[#800000]/10 text-[#800000]" : "bg-muted text-muted-foreground")}>
+      {p.mine ? "To pay — you" : `With ${p.names.join(" / ")} for payment`}
+    </span>
   );
 }
