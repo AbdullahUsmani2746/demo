@@ -109,6 +109,8 @@ import {
   Copy,
 } from "lucide-react";
 import axios from "axios";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useFeatures } from "@/hooks/useFeatures";
 import { createPortal } from "react-dom";
 import { generateVoucherPDF } from "@/components/Template/Payment"; // Update path as needed
 import { generateUnifiedPDF } from "../Template/UnifiedReport";
@@ -3708,6 +3710,27 @@ export default function VoucherTable({
   // "Entered by" column: only for lists whose API sends entered_by (vouchers, orders).
   const showEnteredBy = !hasUserField && data.some((e) => e && "entered_by" in e);
 
+  // Delete is a right few hold; everyone else gets "Request deletion" — a
+  // reason, sent to Approvals (lib/approvals/deletions.js).
+  // Settings → Features "approvals.deletionRequests": off = the plain Delete
+  // button for everyone (the server refuses it without the right).
+  const { can: canPerm, loading: permLoading } = usePermissions();
+  const deletionRequestsOn = useFeatures().on("approvals.deletionRequests");
+  const mayDeleteNow = !deletionRequestsOn || canPerm(`${type}.delete`);
+  const requestDeleteMutation = useMutation({
+    mutationFn: async ({ rowData, reason }) => {
+      const isOrder = ["purchaseOrder", "purchaseOrderEdit", "saleOrder", "serviceOrder"].includes(type);
+      const { data } = await axios.post("/api/approvals/delete-requests", {
+        type,
+        id: isOrder ? rowData.order_no : rowData.tran_id,
+        reason,
+      });
+      return data;
+    },
+    onSuccess: (data) => toast.success(data?.message || "Deletion requested — it waits on Approvals."),
+    onError: (error) => toast.error(error?.response?.data?.error || "Could not send the deletion request"),
+  });
+
   // Mutation for deleting a voucher
   const deleteMutation = useMutation({
     mutationFn: async (rowData) => {
@@ -4460,6 +4483,16 @@ export default function VoucherTable({
   };
 
   const handleDeleteClick = async (rowData) => {
+    if (!mayDeleteNow) {
+      const reason = window.prompt("Why should this entry be deleted? (The approver will see this reason.)");
+      if (reason === null) return;
+      if (reason.trim().length < 5) {
+        toast.error("Please give the reason for deleting it.");
+        return;
+      }
+      requestDeleteMutation.mutate({ rowData, reason: reason.trim() });
+      return;
+    }
     if (!window.confirm("Delete this voucher?")) return;
     deleteMutation.mutate(rowData);
   };
@@ -5440,10 +5473,10 @@ const orderTypes = [
                                 e.stopPropagation();
                                 handleDeleteClick(entry);
                               }}
-                              disabled={deleteMutation.isPending || invoiceLocked}
-                              title={invoiceLocked ? "Invoiced — unlock it in Invoicing first" : "Delete"}
+                              disabled={deleteMutation.isPending || requestDeleteMutation.isPending || invoiceLocked || (deletionRequestsOn && permLoading)}
+                              title={invoiceLocked ? "Invoiced — unlock it in Invoicing first" : mayDeleteNow ? "Delete" : "Request deletion (with a reason — goes to Approvals)"}
                             >
-                              {deleteMutation.isPending ? (
+                              {deleteMutation.isPending || requestDeleteMutation.isPending ? (
                                 <RefreshCw className="h-4 w-4 animate-spin" />
                               ) : (
                                 <Delete className="h-4 w-4" />

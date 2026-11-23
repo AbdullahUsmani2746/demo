@@ -3691,7 +3691,7 @@ const ReportViewer = ({ reportType }) => {
   //   rowGrouping: {
   //     by: "acno",                                  // field that identifies the group
   //     labelFields: ["acno", "acname"],             // how the group is named
-  //     activateWhen: { filter: "account", minSelected: 2 },  // optional
+  //     activateWhen: { filter: "account", minSelected: 2, emptyMeansAll? },  // optional
   //     subtotalLabel: "Account Total",              // default "Total"
   //     totalFields: ["debit", "credit"],            // default: columns with showTotal
   //     showHeader: true,                            // default true
@@ -3710,6 +3710,8 @@ const ReportViewer = ({ reportType }) => {
       : typeof v === "string" && v
         ? v.split(",").filter(Boolean).length
         : v ? 1 : 0;
+    // emptyMeansAll: nothing picked = every account (e.g. Cash & Bank Book).
+    if (aw.emptyMeansAll && count === 0) return true;
     return count >= (aw.minSelected ?? 2);
   }, [rowGrouping, filters]);
 

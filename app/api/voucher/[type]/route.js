@@ -63,6 +63,7 @@ import { systemVoucherError } from "@/lib/vouchers/systemVouchers";
 import { documentLabel } from "@/lib/periodLockCatalog";
 import { guardedSave } from "@/lib/voucher/saveGuard";
 import { approvalGate, runApprovedRequest } from "@/lib/approvals/rules";
+import { deletionCallAllowed } from "@/lib/approvals/deletions";
 import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { feature } from "@/lib/features/server";
 import { markGrnDirectRates } from "@/lib/grn/directRate";
@@ -2227,15 +2228,25 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
 }
 
 // DELETE method
+// An approved "Request deletion" (lib/approvals/deletions.js) comes here with
+// header x-approval-delete: the approver need not hold <type>.delete — the
+// request is checked instead, and every check below still runs.
 export const DELETE = guardBy(
-  async (req, { params }) => `${(await params).type}.delete`,
+  async (req, { params }) => (req.headers.get("x-approval-delete") ? null : `${(await params).type}.delete`),
   async (req, { params }) => {
   try {
     const { type } = await params;
     const session = await getServerSession(authOptions);
     setAuditActor(session);
 
-    const { tran_id } = await req.json();
+    let tran_id;
+    if (req.headers.get("x-approval-delete")) {
+      const allowed = await deletionCallAllowed(req, session, type);
+      if (!allowed.ok) return allowed.response;
+      tran_id = allowed.targetId;
+    } else {
+      ({ tran_id } = await req.json());
+    }
 
     if (!tran_id) {
       return NextResponse.json(

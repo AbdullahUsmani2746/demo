@@ -7,6 +7,12 @@
 //          approve  (approver)  → posted now, as its requester (voucher route)
 //          reject   (approver)  → reason required; nothing is posted
 //          cancel   (requester) → withdrawn while still pending
+// A rule that approves IN STEPS (lib/approvals/docChains.js): approve moves
+// the entry to the next step; only the last step posts it. The people on the
+// current step decide (Super Admin: any step); watchers and earlier approvers
+// may open it to follow.
+// A deletion request (action "delete", lib/approvals/deletions.js): decided by
+// holders of deletion.approve; approving deletes through the form's DELETE route.
 // A Sale Order waiting for approval has the id "so-<order_no>": it is shown
 // by lib/approvals/saleOrders.js and decided by its own engine,
 // POST /api/orders/saleOrder/approval (called here, after the self check).
@@ -16,14 +22,18 @@ import { guard } from "@/lib/auth/route";
 import { VOUCHER_CONFIG } from "@/components/Category/constants";
 import { canDecide, formLabel, notifyRequester, REQUEST_STATUS, selfDecisionError } from "@/lib/approvals/rules";
 import { describeConditions, ruleFieldsFor } from "@/lib/approvals/conditions";
-import { POST as voucherPost, PUT as voucherPut } from "@/app/api/voucher/[type]/route";
-import { POST as orderPost, PUT as orderPut } from "@/app/api/orders/[type]/route";
+import { POST as voucherPost, PUT as voucherPut, DELETE as voucherDelete } from "@/app/api/voucher/[type]/route";
+import { POST as orderPost, PUT as orderPut, DELETE as orderDelete } from "@/app/api/orders/[type]/route";
+import { approveDeletion, DELETE_ACTION, deletionDetail, mayDecideDeletion, tellRequester } from "@/lib/approvals/deletions";
 // Production Plan Nature change (kind "plan") — applied by the requisition route
 import { PUT as planPut } from "@/app/api/material/requisition/route";
-import { canDecideHr, decideHrRequest, describeHrRequest, hrRequestCancelled, hrSelfError } from "@/lib/hr/approvals";
+import { chainOf, chainView, decideHrRequest, describeHrRequest, hrRequestCancelled, hrSelfError, mayDecideHr, mayViewHr } from "@/lib/hr/approvals";
 import { HR_APPROVAL_TYPES, HR_KIND, isHrType } from "@/lib/hr/approvalTypes";
 import { describeSaleOrder, diffLines, SO_CATEGORY, soOrderNo } from "@/lib/approvals/saleOrders";
 import { POST as saleOrderDecide } from "@/app/api/orders/saleOrder/approval/route";
+import {
+  approveDocStep, docChainOf, docChainView, followsDocChain, isLastStep, mayDecideDocStep, rejectChainData, tellDocProgress,
+} from "@/lib/approvals/docChains";
 
 // The route handler that saves this request: voucher / order × new / edit.
 const handlerFor = (request) =>
@@ -43,13 +53,17 @@ async function load(id) {
 
 /** An HR request (kind "hr"): laid out by its type in lib/hr/approvals.js. */
 async function hrGet(request, session) {
-  const approver = await canDecideHr(session, request.doc_type);
-  if (!approver && request.requested_by !== session.user.id) {
+  if (!(await mayViewHr(session, request))) {
     return NextResponse.json({ error: "Not yours to see" }, { status: 403 });
   }
-  const [{ header, changes, lines }, people] = await Promise.all([
+  const approver = await mayDecideHr(session, request);
+  const chained = chainOf(request);
+  // In a chain the chain says who decides — not the HR data scope.
+  const ownError = chained ? null : await hrSelfError(request, session);
+  const [{ header, changes, lines, form }, people, chain] = await Promise.all([
     describeHrRequest(request),
     prisma.user.findMany({ where: { id: { in: [request.requested_by, request.decided_by].filter(Boolean) } }, select: { id: true, name: true, email: true } }),
+    chainView(request),
   ]);
   const nameOf = new Map(people.map((u) => [u.id, u.name || u.email]));
   return NextResponse.json({
@@ -62,7 +76,9 @@ async function hrGet(request, session) {
       rule_name: request.rule_name,
       action: request.action,
       target_no: null,
-      rule_condition: `Decided by anyone holding "${HR_APPROVAL_TYPES[request.doc_type]?.permission}" (Admin → Permissions)`,
+      rule_condition: chained
+        ? `Approval chain "${chained.name}" — ${chained.steps.length} step(s) (Admin → Permissions → Approvals → HR approval chains)`
+        : `Decided by anyone holding "${HR_APPROVAL_TYPES[request.doc_type]?.permission}" (Admin → Permissions)`,
       summary: request.summary,
       requested_by: nameOf.get(request.requested_by) || request.requested_by,
       requested_at: request.requested_at,
@@ -77,8 +93,10 @@ async function hrGet(request, session) {
     header,
     changes,
     lines,
+    form: form ?? null,
     ui_state: null,
-    canDecide: approver && request.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, request) && !(await hrSelfError(request, session)),
+    chain,
+    canDecide: approver && request.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, request) && !ownError,
     canEdit: request.requested_by === session.user.id && request.status === REQUEST_STATUS.PENDING,
     canReopen: false,
     edit_hint: "To change it, cancel this request and enter the days again.",
@@ -117,9 +135,11 @@ export const GET = guard(null, async (req, { params, session }) => {
   }
   const request = await load(rawId);
   if (!request) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (request.action === DELETE_ACTION) return deletionDetail(request, session);
   if (request.kind === HR_KIND && isHrType(request.doc_type)) return hrGet(request, session);
-  const approver = canDecide(session, request.rule);
-  if (!approver && request.requested_by !== session.user.id) {
+  const chained = Boolean(docChainOf(request));
+  const approver = chained ? mayDecideDocStep(session, request) : canDecide(session, request.rule);
+  if (!approver && request.requested_by !== session.user.id && !followsDocChain(session, request) && !canDecide(session, request.rule)) {
     return NextResponse.json({ error: "Not yours to see" }, { status: 403 });
   }
 
@@ -230,7 +250,9 @@ export const GET = guard(null, async (req, { params, session }) => {
       rule_name: request.rule_name,
       action: request.action,
       target_no: request.target_id,
-      rule_condition: request.rule ? describeConditions(request.rule, ruleFieldsFor(config)) : null,
+      rule_condition: request.rule
+        ? `${describeConditions(request.rule, ruleFieldsFor(config))}${chained ? ` — approved in ${request.chain.steps.length} steps` : ""}`
+        : null,
       summary: request.summary,
       requested_by: nameOf.get(request.requested_by) || request.requested_by,
       requested_at: request.requested_at,
@@ -247,6 +269,7 @@ export const GET = guard(null, async (req, { params, session }) => {
     line_changes,
     lines: { columns: lineCols.map((f) => f.label || f.name), rows: lineRows },
     ui_state: request.requested_by === session.user.id && request.status === REQUEST_STATUS.PENDING ? request.ui_state : null,
+    chain: chained ? await docChainView(request) : null,
     canDecide: approver && request.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, request),
     // "Edit in form" re-opens a NEW entry; an edit request is changed by
     // editing the document again (it replaces the waiting one) or cancelled.
@@ -261,7 +284,7 @@ export const POST = guard(null, async (req, { params, session }) => {
   if (orderNo !== null) return saleOrderPost(orderNo, req, session);
   const request = await load(id);
   if (!request) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  const { action, remarks } = await req.json();
+  const { action, remarks, next_users: nextUsers } = await req.json();
   const note = remarks ? String(remarks).trim().slice(0, 500) || null : null;
   if (request.status === REQUEST_STATUS.POSTING) {
     // A claim older than 10 minutes means the posting process died: release
@@ -291,29 +314,76 @@ export const POST = guard(null, async (req, { params, session }) => {
     return NextResponse.json({ success: true, message: "Request cancelled — nothing was posted." });
   }
 
-  if (request.kind === HR_KIND && isHrType(request.doc_type)) {
+  if (request.action === DELETE_ACTION) {
     if (action !== "approve" && action !== "reject") return NextResponse.json({ error: "action must be approve, reject or cancel" }, { status: 400 });
-    if (!(await canDecideHr(session, request.doc_type))) return NextResponse.json({ error: "You may not decide this request." }, { status: 403 });
-    const hrSelfError = selfDecisionError(session, request);
-    if (hrSelfError) return NextResponse.json({ error: hrSelfError }, { status: 403 });
-    const { status, body } = await decideHrRequest({ request, action, note, session });
+    if (!(await mayDecideDeletion(session))) return NextResponse.json({ error: "You may not decide deletion requests." }, { status: 403 });
+    const delSelfError = selfDecisionError(session, request);
+    if (delSelfError) return NextResponse.json({ error: delSelfError }, { status: 403 });
+    if (action === "reject") {
+      if (!note) return NextResponse.json({ error: "Give the reason for rejecting — the requester will see it." }, { status: 400 });
+      const claimed = await prisma.approvalRequest.updateMany({
+        where: { id: request.id, status: REQUEST_STATUS.PENDING },
+        data: { status: REQUEST_STATUS.REJECTED, decided_by: session.user.id, decided_at: new Date(), remarks: note },
+      });
+      if (claimed.count !== 1) return NextResponse.json({ error: "This request is already being decided by someone else." }, { status: 409 });
+      await tellRequester({ ...request, remarks: note }, "rejected — the entry stays as it is", "error");
+      return NextResponse.json({ success: true, message: "Rejected — nothing was deleted; the requester has been told why." });
+    }
+    const { status, body } = await approveDeletion({
+      request,
+      session,
+      note,
+      runDelete: () =>
+        (request.kind === "order" ? orderDelete : voucherDelete)(
+          new Request(`http://internal/approvals/${request.id}`, { method: "DELETE", headers: { "x-approval-delete": String(request.id) } }),
+          { params: Promise.resolve({ type: request.doc_type }) },
+        ),
+    });
     return NextResponse.json(body, { status });
   }
 
-  if (!canDecide(session, request.rule)) return NextResponse.json({ error: "You are not an approver of this rule." }, { status: 403 });
+  if (request.kind === HR_KIND && isHrType(request.doc_type)) {
+    if (action !== "approve" && action !== "reject") return NextResponse.json({ error: "action must be approve, reject or cancel" }, { status: 400 });
+    if (!(await mayDecideHr(session, request))) return NextResponse.json({ error: "You may not decide this request (or not at this step)." }, { status: 403 });
+    const hrSelfError = selfDecisionError(session, request);
+    if (hrSelfError) return NextResponse.json({ error: hrSelfError }, { status: 403 });
+    const { status, body } = await decideHrRequest({ request, action, note, session, nextUsers });
+    return NextResponse.json(body, { status });
+  }
+
+  const chained = Boolean(docChainOf(request));
+  if (chained ? !mayDecideDocStep(session, request) : !canDecide(session, request.rule)) {
+    return NextResponse.json({ error: chained ? "This entry is not at your step." : "You are not an approver of this rule." }, { status: 403 });
+  }
   const selfError = selfDecisionError(session, request);
   if (selfError) return NextResponse.json({ error: selfError }, { status: 403 });
+
+  // In steps: an approval before the last step only moves it on.
+  if (chained && action === "approve" && !isLastStep(request)) {
+    const { status, body } = await approveDocStep({ request, note, session, nextUsers });
+    return NextResponse.json(body, { status });
+  }
 
   if (action === "reject") {
     if (!note) return NextResponse.json({ error: "Give the reason for rejecting — the requester will see it." }, { status: 400 });
     // Only while still pending — an approver may be posting it this moment.
     const claimed = await prisma.approvalRequest.updateMany({
       where: { id: request.id, status: REQUEST_STATUS.PENDING },
-      data: { status: REQUEST_STATUS.REJECTED, decided_by: session.user.id, decided_at: new Date(), remarks: note },
+      data: {
+        status: REQUEST_STATUS.REJECTED, decided_by: session.user.id, decided_at: new Date(), remarks: note,
+        ...(chained ? rejectChainData(request, session, note) : {}),
+      },
     });
     if (claimed.count !== 1) return NextResponse.json({ error: "This request is already being decided by someone else." }, { status: 409 });
     const done = await prisma.approvalRequest.findUnique({ where: { id: request.id } });
     await notifyRequester(done, "rejected", "error");
+    if (chained) {
+      const step = request.chain.steps[request.chain_step]?.label ?? "";
+      await tellDocProgress(done, `rejected at "${step}" by ${session.user.name || session.user.email || session.user.id}`, session.user.id, {
+        type: "error",
+        skip: [done.requested_by],
+      });
+    }
     return NextResponse.json({ success: true, message: "Rejected — nothing was posted; the requester has been told why." });
   }
 

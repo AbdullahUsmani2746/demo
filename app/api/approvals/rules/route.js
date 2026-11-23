@@ -4,6 +4,7 @@
 //   POST   { …rule }    → create
 //   PUT    { id, …rule }→ update
 //   DELETE ?id=         → delete; its pending requests are cancelled ("Rule deleted")
+// A rule may approve in steps (steps / watchers — lib/approvals/docChains.js).
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { activeRoleCodes } from "@/lib/auth/roleCatalog";
@@ -11,6 +12,7 @@ import { guard } from "@/lib/auth/route";
 import { VOUCHER_CONFIG } from "@/components/Category/constants";
 import { approvableForms, APPLIES_ON, RULE_MODES, FLAG_FORMS, REQUEST_STATUS } from "@/lib/approvals/rules";
 import { ruleFieldsFor, CONDITION_OPS } from "@/lib/approvals/conditions";
+import { cleanRuleSteps } from "@/lib/approvals/docChains";
 
 // Approver roles: any active role (Admin → Roles).
 function clean(body, forms, ROLES) {
@@ -21,19 +23,29 @@ function clean(body, forms, ROLES) {
   const conditions = (Array.isArray(body.conditions) ? body.conditions : [])
     .filter((c) => c && c.field && ops.has(c.op))
     .map((c) => ({ field: String(c.field), op: c.op, value: c.value == null ? "" : String(c.value).slice(0, 200) }));
-  const approver_users = [...new Set((body.approver_users || []).map(String))];
-  const approver_roles = [...new Set((body.approver_roles || []).filter((r) => ROLES.includes(r)))];
-  if (!approver_users.length && !approver_roles.length) throw new Error("Choose at least one approver.");
+  const mode = body.mode === "flag" && FLAG_FORMS.includes(body.doc_type) ? "flag" : "hold";
+  // Approve in steps (lib/approvals/docChains.js) — a held entry only; a
+  // "flag" rule (saved, dispatch blocked) keeps one set of approvers.
+  const steps = mode === "hold" ? cleanRuleSteps(body.steps, { roles: ROLES }) : [];
+  const watchers = steps.length ? [...new Set((Array.isArray(body.watchers) ? body.watchers : []).map(String).filter(Boolean))] : [];
+  // With steps, the rule's approvers are the LAST step's people: they are the
+  // final approvers (and their own saves are not held — CLAUDE.md rule 12).
+  const last = steps[steps.length - 1];
+  const approver_users = last ? last.users : [...new Set((body.approver_users || []).map(String))];
+  const approver_roles = last ? last.roles : [...new Set((body.approver_roles || []).filter((r) => ROLES.includes(r)))];
+  if (!steps.length && !approver_users.length && !approver_roles.length) throw new Error("Choose at least one approver.");
   return {
     name,
     doc_type: body.doc_type,
     match: body.match === "any" ? "any" : "all",
     applies_on: APPLIES_ON.some((a) => a.key === body.applies_on) ? body.applies_on : "create",
     // "flag" (save, block dispatch) exists only where something downstream waits on it.
-    mode: body.mode === "flag" && FLAG_FORMS.includes(body.doc_type) ? "flag" : "hold",
+    mode,
     conditions,
     approver_users,
     approver_roles,
+    steps,
+    watchers,
     message: body.message ? String(body.message).trim().slice(0, 300) || null : null,
     is_active: body.is_active !== false,
     sort: Number(body.sort) || 0,

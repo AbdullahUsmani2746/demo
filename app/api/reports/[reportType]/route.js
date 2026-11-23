@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { checkPeriodLock } from "@/lib/periodLock";
 import { getOpening, getOpeningRates, getLatestOpeningPeriod, openingQtySql, openingQtyByGodownSql } from "@/lib/openingStock";
 import { REPORT_CONFIG, ENTERED_BY_REPORTS } from "@/components/Reports/config";
@@ -1086,10 +1087,19 @@ export async function GET(request, { params }) {
         data = await expandItemRows(base);
         break;
       }
-        case "cbBook":
-        data = await getAccountLedger(filters);
+        case "cbBook": {
+        // No account picked = all cash & bank accounts (Finance → Account
+        // Settings "Cash / Bank" groups), each as its own block.
+        const picked = Array.isArray(filters.account) ? filters.account.filter(Boolean) : String(filters.account ?? "").split(",").filter(Boolean);
+        if (!picked.length) {
+          const macnos = await getCashBankMacnos();
+          const accounts = await prisma.aCNO.findMany({ where: { macno: { in: macnos } }, select: { acno: true }, orderBy: { acno: "asc" } });
+          filters.account = accounts.map((a) => a.acno);
+        }
+        data = filters.account.length ? await getAccountLedger(filters) : [];
         summary = calculateAccountLedgerSummary(data);
         break;
+      }
       case "accountsActivity": {
         const activity = await getAccountActivity(filters);
         if (activity && Array.isArray(activity.columns)) {
