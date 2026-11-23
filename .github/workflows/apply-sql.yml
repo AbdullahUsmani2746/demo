@@ -1,0 +1,74 @@
+# Apply hand-written prisma/sql files to the demo databases on the VPS
+# (CLAUDE.md rule 8: only after the owner approves the run).
+# Run by hand: Actions → "Apply SQL" → Run workflow, choosing the branch whose
+# prisma/sql files to apply. Each file runs in one transaction, in the order
+# given; the first error stops the run. Files are re-runnable by convention.
+name: Apply SQL
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: "File names in prisma/sql, space-separated, in apply order"
+        required: true
+      sites:
+        description: "Sites whose database to apply to (folders on the VPS)"
+        default: "demo demo2"
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Collect the files
+        run: |
+          set -eu
+          mkdir -p apply-sql
+          i=0
+          for f in ${{ inputs.files }}; do
+            case "$f" in */*|*..*) echo "Give bare file names only: $f"; exit 1;; esac
+            [ -f "prisma/sql/$f" ] || { echo "Not found: prisma/sql/$f"; exit 1; }
+            i=$((i+1))
+            cp "prisma/sql/$f" "apply-sql/$(printf '%02d' $i)_$f"
+          done
+          ls apply-sql
+
+      - name: Upload to the VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: 2746
+          source: "apply-sql/*"
+          target: "/tmp/bizlogist-sql-${{ github.run_id }}"
+          strip_components: 1
+
+      - name: Apply on each site's database
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: 2746
+          command_timeout: 30m
+          script: |
+            set -eu
+            DIR=/tmp/bizlogist-sql-${{ github.run_id }}
+            trap 'rm -rf "$DIR"' EXIT
+            for site in ${{ inputs.sites }}; do
+              ENV=~/$site/.env
+              [ -f "$ENV" ] || { echo "$site: $ENV not found"; exit 1; }
+              URL=$(grep -E '^DATABASE_URL=' "$ENV" | head -1 | cut -d= -f2- | tr -d '"'"'"'')
+              URL=${URL%%\?*}
+              echo "== $site (database ${URL##*/})"
+              for f in $(ls "$DIR" | sort); do
+                docker run --rm -i --network host -v "$DIR":/sql:ro postgres:17-alpine \
+                  psql "$URL" -v ON_ERROR_STOP=1 -1 -q -f "/sql/$f" \
+                  && echo "   ok  ${f#*_}" \
+                  || { echo "   FAILED  ${f#*_} — rolled back, run stopped"; exit 1; }
+              done
+            done
+            echo "Done."
