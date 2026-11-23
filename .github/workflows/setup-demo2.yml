@@ -73,6 +73,41 @@ jobs:
               # The demo connects through PgBouncer (6432), which only knows the databases
               # listed in its config. If it does not know the new one, demo2 talks to
               # PostgreSQL itself on 5432.
+              # PgBouncer: add the new database next to the demo's line (same server
+              # and options, only the name changes). Backup first; reload keeps the
+              # demo's connections. Nothing from the file is printed.
+              if ! pg psql "$DST_PG" -tAc "SELECT 1" >/dev/null 2>&1; then
+                INIS=""; OWNER=""
+                [ -f /etc/pgbouncer/pgbouncer.ini ] && INIS="/etc/pgbouncer/pgbouncer.ini=host"
+                for c in $(docker ps --format '{{.Names}}'); do
+                  for m in $(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$c"); do
+                    for f in "$m" "$m/pgbouncer.ini"; do
+                      case "$f" in *.ini) $SUDO test -f "$f" && $SUDO grep -q '^\[databases\]' "$f" && INIS="$INIS $f=$c";; esac
+                    done
+                  done
+                done
+                for entry in $INIS; do
+                  ini=${entry%=*}; who=${entry##*=}
+                  if $SUDO grep -qE "^[[:space:]]*$NEW_DB[[:space:]]*=" "$ini"; then echo "PgBouncer already lists $NEW_DB ($ini)."; continue; fi
+                  $SUDO grep -qE "^[[:space:]]*$SRC_DB[[:space:]]*=" "$ini" || continue
+                  $SUDO cp -p "$ini" "$ini.bak-before-demo2"
+                  $SUDO awk -v src="$SRC_DB" -v dst="$NEW_DB" '
+                    { print }
+                    !done && $0 ~ "^[[:space:]]*" src "[[:space:]]*=" {
+                      l = $0; sub("^[[:space:]]*" src, dst, l)
+                      sub("dbname=" src "([[:space:]]|$)", "dbname=" dst " ", l)
+                      print l; done = 1
+                    }' "$ini.bak-before-demo2" | $SUDO tee "$ini" >/dev/null
+                  if [ "$who" = host ]; then
+                    $SUDO systemctl reload pgbouncer 2>/dev/null || $SUDO pkill -HUP -x pgbouncer
+                  else
+                    docker kill -s HUP "$who" >/dev/null
+                  fi
+                  echo "Added $NEW_DB to PgBouncer ($ini, backup .bak-before-demo2) and reloaded it."
+                  sleep 3
+                done
+              fi
+
               if ! pg psql "$DST_PG" -tAc "SELECT 1" >/dev/null 2>&1; then
                 DIRECT_BASE=$(echo "$BASE" | sed -E 's#:6432$#:5432#')
                 if [ "$DIRECT_BASE" != "$BASE" ] && pg psql "$DIRECT_BASE/$NEW_DB" -tAc "SELECT 1" >/dev/null 2>&1; then
