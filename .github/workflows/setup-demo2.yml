@@ -189,7 +189,8 @@ jobs:
 
               # 6. SSL — only once the address points at this server.
               MYIP=$(curl -s https://api.ipify.org || true)
-              DNSIP=$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)
+              # Public DNS (the server's own lookup may answer from /etc/hosts).
+              DNSIP=$(curl -s "https://dns.google/resolve?name=$DOMAIN&type=A" | grep -o '"data":"[0-9.]*"' | head -1 | cut -d'"' -f4 || true)
               if [ -n "$DNSIP" ] && [ "$DNSIP" = "$MYIP" ]; then
                 $SUDO certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect --keep-until-expiring \
                   && echo "SSL done: https://$DOMAIN"
