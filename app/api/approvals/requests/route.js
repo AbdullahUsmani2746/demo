@@ -46,7 +46,7 @@ export const GET = guard(null, async (req, { session }) => {
         id: true, kind: true, action: true, target_id: true, rule_id: true, rule_name: true, doc_type: true, status: true, summary: true,
         requested_by: true, requested_at: true, decided_by: true, decided_at: true, remarks: true,
         posted_no: true, posted_tran_id: true, post_error: true, updated_at: true,
-        chain_id: true, chain_step: true, step_users: true,
+        chain_id: true, chain_step: true, step_users: true, chain: true,
       },
     }),
     prisma.approvalRequest.count({ where: { ...decides, status: REQUEST_STATUS.PENDING } }),
@@ -55,11 +55,16 @@ export const GET = guard(null, async (req, { session }) => {
   ]);
 
   // Chained HR requests: the step they are on (from the chain copied into the payload).
+  // Entries held by a rule that approves in steps carry their chain (chain column).
+  const isChained = (r) => r.chain_id != null || (r.chain_step != null && Array.isArray(r.chain?.steps));
   const chained = rows.filter((r) => r.chain_id != null);
   const chainPayloads = chained.length
     ? await prisma.approvalRequest.findMany({ where: { id: { in: chained.map((r) => r.id) } }, select: { id: true, payload: true } })
     : [];
-  const stepsOf = new Map(chainPayloads.map((r) => [r.id, r.payload?.chain?.steps ?? []]));
+  const stepsOf = new Map([
+    ...chainPayloads.map((r) => [r.id, r.payload?.chain?.steps ?? []]),
+    ...rows.filter((r) => r.chain_id == null && isChained(r)).map((r) => [r.id, r.chain.steps]),
+  ]);
   const superAdmin = isSuperAdmin(session);
 
   const ids = [...new Set(rows.flatMap((r) => [r.requested_by, r.decided_by, ...(r.step_users ?? [])]).filter(Boolean))];
@@ -69,17 +74,17 @@ export const GET = guard(null, async (req, { session }) => {
   // In the inbox every row is one this person approves (the where above); a
   // requester sees their own there too, but may not decide it.
   const decidableBase = (r) => box !== "mine" && r.status === REQUEST_STATUS.PENDING && !selfDecisionError(session, r);
-  const stepOf = (r) => (r.chain_id != null ? stepsOf.get(r.id)?.[r.chain_step] ?? null : null);
+  const stepOf = (r) => (isChained(r) ? stepsOf.get(r.id)?.[r.chain_step] ?? null : null);
   const decidable = (r) => {
     if (!decidableBase(r)) return false;
-    if (r.chain_id == null) return true;
+    if (!isChained(r)) return true;
     const step = stepOf(r);
     return step?.type === "approve" && (superAdmin || (r.step_users ?? []).includes(me));
   };
   const data = [
-    ...rows.map(({ step_users, ...r }) => ({
+    ...rows.map(({ step_users, chain, ...r }) => ({
       ...r,
-      ...(r.chain_id != null
+      ...(isChained({ ...r, chain })
         ? (() => {
             const steps = stepsOf.get(r.id) ?? [];
             const step = steps[r.chain_step];
@@ -96,8 +101,8 @@ export const GET = guard(null, async (req, { session }) => {
       requested_by_name: nameOf.get(r.requested_by) || r.requested_by,
       decided_by_name: r.decided_by ? nameOf.get(r.decided_by) || r.decided_by : null,
       mine: r.requested_by === me,
-      can_decide: decidable({ ...r, step_users }),
-      can_approve: decidable({ ...r, step_users }),
+      can_decide: decidable({ ...r, step_users, chain }),
+      can_approve: decidable({ ...r, step_users, chain }),
     })),
     ...so.rows,
   ];

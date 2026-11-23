@@ -393,7 +393,7 @@ function Detail({ id, onClose, onChanged }) {
   const noteLabel = d?.request?.note_label ?? d?.header?.find((h) => NOTE_LABEL.test(h.label))?.label ?? "Note";
   const reasons = d?.reasons ?? (d?.request?.rule_name ? [d.request.rule_name] : []);
   const hasChanges = (d?.changes?.length ?? 0) + (d?.line_changes?.length ?? 0) > 0;
-  const approveLabel = isSo || isHr ? "Approve" : d?.request?.action === "update" ? "Approve edit" : "Approve & post";
+  const approveLabel = d?.approve_label ? d.approve_label : isSo || isHr ? "Approve" : d?.request?.action === "update" ? "Approve edit" : "Approve & post";
   const RowIcon = d ? iconOf(d.request) : FileText;
 
   return (
@@ -780,6 +780,7 @@ function RequestRow({ r, active, selectable, checked, onToggle, onOpen, bulkRunn
               <span className="text-slate-400"> · </span>
               {r.form}
               {r.action === "update" && r.kind !== "saleOrder" && <span className="font-normal text-slate-500"> · edit</span>}
+              {r.action === "delete" && <span className="font-normal text-red-600"> · delete</span>}
             </span>
             <StatusChip status={r.status} className="shrink-0" />
           </span>

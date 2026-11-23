@@ -2674,6 +2674,8 @@ model ApprovalRule {
   conditions     Json              @default("[]")
   approver_users Json              @default("[]")
   approver_roles Json              @default("[]")
+  steps          Json              @default("[]") // approval chain (lib/approvals/docChains.js); empty = single approval
+  watchers       Json              @default("[]") // told at every step
   message        String?           @db.VarChar(300)
   is_active      Boolean           @default(true)
   sort           Int               @default(0)
@@ -2714,6 +2716,7 @@ model ApprovalRequest {
   watchers       String[]      @default([]) // told at every step
   chain_actors   String[]      @default([]) // everyone who acted on it
   chain_log      Json          @default("[]")
+  chain          Json? // a rule's steps copied when the entry was held (lib/approvals/docChains.js)
   rule           ApprovalRule? @relation(fields: [rule_id], references: [id], onDelete: SetNull)
 
   @@index([status])

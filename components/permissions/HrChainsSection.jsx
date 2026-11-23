@@ -17,7 +17,7 @@ const LABEL = "text-[11px] font-bold uppercase tracking-wider text-primary";
 const INPUT =
   "h-9 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/20";
 
-const blankStep = (n) => ({ id: `s${Date.now()}${n}`, label: "", type: "approve", final: false, users: [], roles: [], manager: false, pickNext: false });
+export const blankStep = (n) => ({ id: `s${Date.now()}${n}`, label: "", type: "approve", final: false, users: [], roles: [], manager: false, pickNext: false });
 const blankChain = () => ({
   name: "",
   doc_type: "hrLeave",
@@ -30,7 +30,11 @@ const blankChain = () => ({
   sort: 0,
 });
 
-function StepEditor({ step, index, count, meta, payAllowed, onChange, onMove, onRemove }) {
+// Shared with the approval rules (ApprovalRulesSection — "Approve in steps").
+export function StepEditor({
+  step, index, count, meta, payAllowed, onChange, onMove, onRemove,
+  showFinal = true, managerLabel = "The employee's reporting manager",
+}) {
   const set = (patch) => onChange({ ...step, ...patch });
   return (
     <div className="space-y-3 rounded-lg border border-border bg-background p-3">
@@ -43,16 +47,18 @@ function StepEditor({ step, index, count, meta, payAllowed, onChange, onMove, on
           placeholder="e.g. Initial review"
           className={`${INPUT} min-w-0 flex-1`}
         />
+        {meta.stepTypes && (
         <select
           aria-label={`Step ${index + 1} type`}
           value={step.type}
           onChange={(e) => set({ type: e.target.value, final: e.target.value === "pay" ? false : step.final })}
           className={`${INPUT} w-auto`}
         >
-          {meta.stepTypes.filter((t) => payAllowed || t.value !== "pay").map((t) => (
+          {(meta.stepTypes ?? [{ value: "approve", label: "Approve" }]).filter((t) => payAllowed || t.value !== "pay").map((t) => (
             <option key={t.value} value={t.value}>{t.label}</option>
           ))}
         </select>
+        )}
         <div className="flex gap-1">
           <Button type="button" size="icon" variant="outline" className="h-9 w-9" disabled={index === 0} onClick={() => onMove(-1)} aria-label="Move up">
             <ArrowUp className="h-4 w-4" />
@@ -100,9 +106,9 @@ function StepEditor({ step, index, count, meta, payAllowed, onChange, onMove, on
       <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={step.manager} onChange={(e) => set({ manager: e.target.checked })} className="h-4 w-4 accent-[#800000]" />
-          The employee&apos;s reporting manager
+          {managerLabel}
         </label>
-        {step.type === "approve" && (
+        {showFinal && step.type === "approve" && (
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={step.final} onChange={(e) => set({ final: e.target.checked })} className="h-4 w-4 accent-[#800000]" />
             Final approval (the request counts from here)

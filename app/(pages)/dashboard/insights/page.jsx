@@ -42,8 +42,11 @@ const BOOKS = [
   { key: "On books", label: "On" },
   { key: "Off books", label: "Off" },
 ];
-const AUTO_REFRESH_MS = 5 * 60 * 1000;
-const STALE_MS = 15 * 60 * 1000;
+// Live dashboards: every minute while the tab is shown — the server keeps
+// each figure for 1 minute (app/api/bi/my/[id]) — and at once when the person
+// comes back to the tab. A hidden tab does not poll.
+const AUTO_REFRESH_MS = 60 * 1000;
+const STALE_MS = 5 * 60 * 1000; // "not refreshed for a while" after 5 missed minutes
 
 /** ?period=…&f_customer=A&f_customer=B — one parameter per chosen value. */
 function queryString(period, filters, refresh) {
@@ -178,18 +181,23 @@ function InsightsPage() {
   }, [activeId, period, router]);
 
   const load = useCallback(
-    async (refresh = false) => {
+    // silent: the automatic refresh — figures change in place, no loading state.
+    async (refresh = false, { silent = false } = {}) => {
       if (!activeId || !period) return;
-      setLoading(true);
-      setError(null);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const { data: d } = await axios.get(`/api/bi/my/${activeId}?${queryString(period, filters, refresh)}`);
-        setData(d);
+        // A silent answer for a dashboard the person has since left is dropped.
+        setData((prev) => (silent && prev?.dashboard?.id !== d?.dashboard?.id ? prev : d));
+        if (silent) setError(null);
         if (Array.isArray(d.builtinFilters)) setBuiltins(d.builtinFilters);
       } catch (e) {
-        setError(e.response?.data?.error || e.message);
+        if (!silent) setError(e.response?.data?.error || e.message);
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
       }
     },
     [activeId, period, filters],
@@ -242,9 +250,16 @@ function InsightsPage() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    const t = setInterval(() => load(), AUTO_REFRESH_MS);
+    const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+    const t = setInterval(() => visible() && load(false, { silent: true }), AUTO_REFRESH_MS);
     const c = setInterval(() => setNow(new Date()), 30000);
-    return () => { clearInterval(t); clearInterval(c); };
+    const onShow = () => visible() && load(false, { silent: true });
+    document.addEventListener("visibilitychange", onShow);
+    return () => {
+      clearInterval(t);
+      clearInterval(c);
+      document.removeEventListener("visibilitychange", onShow);
+    };
   }, [load]);
 
   // Keys: T / Y / M — not while typing in a box.
@@ -536,7 +551,7 @@ function InsightsPage() {
                 {compare && range && <span> · vs {rangeText(range.prev, { year: false })} and last year</span>}
               </p>
               {updated && (
-                <p className={`bi-fresh ${stale ? "stale" : ""}`} title={stale ? "These figures have not refreshed for a while" : "Refreshes every 5 minutes"}>
+                <p className={`bi-fresh ${stale ? "stale" : ""}`} title={stale ? "These figures have not refreshed for a while" : "Live — refreshes every minute, and when you come back to this tab"}>
                   <span className="dot" aria-hidden="true" />Updated {updated}
                 </p>
               )}

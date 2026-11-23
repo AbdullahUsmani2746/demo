@@ -7990,15 +7990,18 @@ export const REPORT_CONFIG = {
       by: "acno",
       labelFields: ["acno", "acname"],
       labelSeparator: " — ",
-      activateWhen: { filter: "account", minSelected: 2 },
+      // No account picked = all cash & bank accounts → one block each.
+      activateWhen: { filter: "account", minSelected: 2, emptyMeansAll: true },
       subtotalLabel: "Account Total",
       showHeader: true,
     },
     showSummary: true,
     title: "Cash And Bank Books",
     description:
-      "Detailed ledger entries for a specific account showing running balance",
-    apiEndpoint: "/api/reports/accountLedger",
+      "Every cash and bank account with its running balance — or pick the ones you want",
+    // Its own report key: no account picked = all cash & bank accounts
+    // (app/api/reports/[reportType]/route.js, case "cbBook").
+    apiEndpoint: "/api/reports/cbBook",
     filters: [
       {
         name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -8013,7 +8016,8 @@ export const REPORT_CONFIG = {
         valueKey: "acno",
         options: "accounts",
         apiEndpoint: `/api/accounts/acno?${CASH_BANK_GROUP_PARAM}`,
-        required: true,
+        // Empty (the default) = all cash & bank accounts.
+        placeholder: "All cash & bank accounts",
         clearable: true,
         multiple: true,
       },
