@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
 import { recordScopeError } from "@/lib/auth/documentScope";
+import { feature } from "@/lib/features/server";
 
 export async function GET(request) {
   try {
@@ -155,6 +156,8 @@ export async function GET(request) {
 export const POST = guard("setup.items.manage", async (request, { session }) => {
   try {
     const data = await request.json();
+    // "Packing Returnable?" only while Settings → Features "documents.returnablePacking" is on.
+    if (!(await feature("documents.returnablePacking"))) delete data.packing_returnable;
 
     // Data scope (Admin → Permissions → Item categories): only items of the
     // person's own categories.

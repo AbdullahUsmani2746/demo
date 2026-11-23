@@ -97,6 +97,9 @@ export const REF_LABELS = [
   ["po_no", "PO", "PURCHASE ORDER", "order"],
   ["dispatch_no", "DSP", "DISPATCH", "source"],
   ["grn_no", "GRN", "GRN", "source"],
+  // The user's paper-book numbers (TransactionsMaster.manual_no).
+  ["manual_dc", "MDC", "MANUAL DC NO", "source"],
+  ["manual_grn", "MGRN", "MANUAL GRN NO", "source"],
 ];
 
 // Where a suggested rate came from (Line.rate_source).

@@ -605,6 +605,9 @@ model Item {
   is_Card               Boolean?                     @default(false)
   nature_of_ink         String?                      @db.VarChar(100)
   packing_material_code Int?
+  // Default "Returnable?" for packing_material_code on new document lines
+  // (Settings → Features "documents.returnablePacking").
+  packing_returnable    Boolean                      @default(false)
   printing_property     String?                      @db.VarChar(100)
   wastage_percentage    Float?
   mc_id                 Int?

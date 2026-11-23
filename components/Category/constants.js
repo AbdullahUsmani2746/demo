@@ -1443,7 +1443,9 @@ const dispatchGodownStock = async (line, formData, itemId) => {
 
 // Dispatch / Dispatch Edit master field: the godown BOM materials are issued
 // from (master.godown2). Closed godowns are hidden by /api/setup/godowns.
-// Godown 2 (PLANT) is where production draws its materials.
+// It starts at the production godown (Settings → Production setup) or, with
+// Settings → Features "dispatch.issueMaterialsFrom" = warehouse, follows the
+// dispatch's Warehouse (`sameAs`) until the user picks another godown.
 const DISPATCH_ISSUE_GODOWN_FIELD = {
   name: "godown2",
   label: "Issue Materials From",
@@ -1455,6 +1457,8 @@ const DISPATCH_ISSUE_GODOWN_FIELD = {
   valueKey: "id",
   defaultValue: setupGodownDefault("productionGodown"),
   defaultGodown: "productionGodown", // Settings → Production setup
+  sameAs: "godown",
+  sameAsWhen: (features) => features?.["dispatch.issueMaterialsFrom"] === "warehouse",
 };
 
 // Dispatch / Dispatch Edit carry quantities only: rate and GST % are set on
@@ -2017,7 +2021,7 @@ export const documentTotal = (entry) =>
 // Legacy document number of an imported GRN / dispatch / sale return lives in
 // rmk5. Shown read-only, and only when there is one.
 // The user's own paper-book number, kept next to the system number
-// (TransactionsMaster.manual_no; only a dispatch / GRN stores it).
+// (TransactionsMaster.manual_no; a dispatch, GRN or dispatch return stores it).
 // Dispatch Manual DC No / City / Route exist while Settings → Features
 // "dispatch.extraFields" is on (the server keeps stored values when it is off).
 const MANUAL_DC_NO_FIELD = { name: "manual_no", label: "Manual DC No", type: "text", uppercase: true, feature: "dispatch.extraFields" };
@@ -2091,10 +2095,118 @@ const grnLinesFromPo = async (poNo) => {
 
 // GRN item picked: with a PO linked the line notes the PO quantity. No rate —
 // the GRN is quantity only (priced on Purchase Invoicing).
+// ── Returnable Packing on line documents ─────────────────────────────────
+// Settings → Features "documents.returnablePacking" (lib/packing/returnable.js).
+// Dispatch Return, GRN and GRN Return lines name the packing the goods came in
+// / went back in (packing_material_code), whether it is returnable
+// (returnable) and how many (no_of_pack) — as dispatch lines always have. The
+// server keeps one automatic packing voucher per document in step
+// (lib/dispatch/packingConsumption.js); the Returnable Packing report reads the
+// balances (lib/reports/returnablePacking.js). New lines take the item's
+// defaults (Setup → Item: Packing Material + Packing Returnable?); a return
+// copies its source line's packing. Off: the fields are hidden, except on a
+// document already saved with packing (featureKeep).
+const RETURNABLE_PACKING = "documents.returnablePacking";
+const returnablePackingOn = () => featureAsync(RETURNABLE_PACKING).then((v) => v === true);
+const savedHasPacking = (saved) =>
+  (saved?.lines || saved?.transactions || []).some((l) => l?.packing_material_code != null || l?.returnable === true);
+
+const packingOption = (itcd, name) =>
+  itcd != null && itcd !== ""
+    ? { value: String(itcd), label: name ? `${itcd} - ${name}` : String(itcd) }
+    : null;
+
+const packingLineFields = () => [
+  {
+    name: "packing_material",
+    formName: "packing_material_code",
+    label: "Packing Material",
+    type: "select",
+    options: "packingMaterials",
+    apiEndpoint: "/api/setup/all-packing-materials",
+    createEndpoint: "/api/setup/items",
+    nameKey: "item",
+    nameKeys: ["itcd", "item"],
+    valueKey: "itcd",
+    required: false,
+    visibility: { dependsOn: "itcd", condition: "truthy" },
+    feature: RETURNABLE_PACKING,
+    featureKeep: savedHasPacking,
+  },
+  {
+    name: "returnable",
+    label: "Returnable?",
+    type: "checkbox",
+    labelText: "YES",
+    feature: RETURNABLE_PACKING,
+    featureKeep: savedHasPacking,
+  },
+];
+
+/** The item's default packing + returnable (Setup → Item) for a new line. */
+const itemPackingDefaults = async (itemData) => {
+  const code = itemData?.packing_material_code;
+  if (!code) return { packing_material_code: null, returnable: false };
+  let name = "";
+  try {
+    name = (await axios.get(`/api/forms/items/${code}`)).data?.item || "";
+  } catch {
+    name = "";
+  }
+  return { packing_material_code: packingOption(code, name), returnable: itemData?.packing_returnable === true };
+};
+
+/** The packing of a saved source line (dispatch / GRN) for its return. */
+const linePacking = (t) => ({
+  packing_material_code: packingOption(t?.packing_material_code, t?.packingDetails?.item),
+  returnable: t?.returnable === true,
+});
+
+/** An empty packing line: the item IS the packing (a returned drum). */
+const emptyPackingLine = (itemData) => ({
+  packing_material_code: null,
+  returnable: true,
+  qty_per_pack: 1,
+  item_name: itemData?.item || "",
+});
+
+// Packing material categories (Settings → Production setup), cached a minute.
+let packingCatsCache = { at: 0, ids: null };
+const packingCategoryIds = async () => {
+  if (packingCatsCache.ids && Date.now() - packingCatsCache.at < 60_000) return packingCatsCache.ids;
+  let ids = resolveProductionSetup(null).packingCategoryIds;
+  try {
+    ids = (await axios.get("/api/settings/production-setup")).data?.values?.packingCategoryIds || ids;
+  } catch {
+    /* the defaults */
+  }
+  packingCatsCache = { at: Date.now(), ids };
+  return ids;
+};
+
+// GRN: an item picked on a line
 const grnItemChanged = async (value, formData) => {
   const itcd = selVal(value);
   if (!itcd) return {};
-  const out = { mm: itcd };
+  let out = { mm: itcd };
+  // Returnable packing: a packing material itself without a PO = empty drums
+  // coming back (Returnable ticked, counted off the party's drums); otherwise
+  // the item's default packing.
+  if (await returnablePackingOn()) {
+    try {
+      const itemData = (await axios.get(`/api/forms/items/${itcd}`)).data || {};
+      if ((await packingCategoryIds()).includes(Number(itemData.ic_id))) {
+        out = {
+          ...out,
+          ...(hasValue(selVal(formData?.po_no)) ? { packing_material_code: null, returnable: false } : emptyPackingLine(itemData)),
+        };
+      } else {
+        out = { ...out, ...(await itemPackingDefaults(itemData)) };
+      }
+    } catch (error) {
+      console.error("Error fetching item packing:", error);
+    }
+  }
   // Settings → Features "grn.directRateByItem": a ticked item gets a GRN Rate
   if (await featureAsync("grn.directRateByItem")) {
     out.direct_rate = (await grnDirectRateSet([itcd])).has(String(itcd));
@@ -2327,6 +2439,7 @@ const dispatchedByItem = (dispatch) => {
 const dispatchPickLabel = (d) =>
   [
     String(d?.dispatch_no ?? d?.tran_id ?? ""),
+    d?.manual_no || "",
     d?.invoice_no || "",
     d?.acno?.acname || "",
   ]
@@ -2340,6 +2453,7 @@ const dispatchPickLabel = (d) =>
  */
 export const saleReturnFromDispatch = async (dispatch) => {
   if (!dispatch) return { master: {}, lines: [] };
+  const packingOn = await returnablePackingOn(); // comes back in the packing it went out in
   const lines = mainDocLines(dispatch)
     .filter((t) => t.itcd != null)
     .map((t) => {
@@ -2360,6 +2474,7 @@ export const saleReturnFromDispatch = async (dispatch) => {
         qty_ltr: litre ? 0 : "",
         qty: 0,
         original_qty: parseFloat(t.qty) || 0,
+        ...(packingOn ? linePacking(t) : {}),
       };
     });
 
@@ -2370,6 +2485,7 @@ export const saleReturnFromDispatch = async (dispatch) => {
           ? { value: String(dispatch.dispatch_no), label: dispatchPickLabel(dispatch) }
           : null,
       so_no: dispatch.so_no ?? null,
+      dispatch_manual_no: dispatch.manual_no || "",
       pycd:
         dispatch.pycd != null
           ? { value: String(dispatch.pycd), label: `${dispatch.pycd} - ${dispatch.acno?.acname || ""}` }
@@ -2450,6 +2566,7 @@ const saleReturnItemChanged = async (value, formData) => {
     const it = await axios.get(`/api/forms/items/${itcd}`);
     out.item_name = it.data?.item || "";
     out.ltr_rate = it.data?.ltr_rate ?? null;
+    if (await returnablePackingOn()) Object.assign(out, await itemPackingDefaults(it.data));
   } catch (error) {
     console.error("Error fetching item:", error);
   }
@@ -2471,6 +2588,8 @@ const saleReturnItemChanged = async (value, formData) => {
         out.unit = isLitreUnit(t.unit) ? UNIT_LTR : UNIT_KG;
         out.batch_no = t.batch_no || "";
         out.ltr_rate = t.ltr_rate ?? t.itemDetails?.ltr_rate ?? out.ltr_rate ?? null;
+        // Comes back in the packing it went out in.
+        if (await returnablePackingOn()) Object.assign(out, linePacking(t));
       }
     } catch (error) {
       console.error("Error fetching dispatch line:", error);
@@ -2524,6 +2643,7 @@ const grnPickLabel = (g) =>
  */
 export const grnReturnFromGrn = async (grn) => {
   if (!grn) return { master: {}, lines: [] };
+  const packingOn = await returnablePackingOn(); // goes back in the packing it came in
   const lines = mainDocLines(grn)
     .filter((t) => t.itcd != null)
     .map((t) => {
@@ -2541,6 +2661,7 @@ export const grnReturnFromGrn = async (grn) => {
         qty_per_pack: parseFloat(t.qty_per_pack) || 0,
         qty: 0,
         original_qty: parseFloat(t.qty) || 0,
+        ...(packingOn ? linePacking(t) : {}),
       };
     });
 
@@ -2589,7 +2710,15 @@ const createGrnReturnQtyField = () => ({
       const grn = await fetchGrnByNo(grnNo);
       if (!grn) return null;
       const received = dispatchedByItem(grn)[itemId] || 0;
-      if (!received) return `This item is not on GRN ${grnNo}`;
+      if (!received) {
+        // The vendor's empty returnable drums that came on this GRN (returnable packing).
+        const drums = mainDocLines(grn)
+          .filter((t) => t.returnable === true && String(t.packing_material_code) === itemId)
+          .reduce((sum, t) => sum + (parseFloat(t.no_of_pack) || 0), 0);
+        if (!drums) return `This item is not on GRN ${grnNo}`;
+        const packs = parseFloat(line?.no_of_pack) || 0;
+        return packs > drums + 0.001 ? `GRN ${grnNo} brought only ${drums} of these returnable packs` : null;
+      }
       const returned = (await returnedAgainstGrn(grnNo, formData?.tran_id))[itemId] || 0;
 
       let earlier = 0;
@@ -2625,10 +2754,19 @@ const grnReturnItemChanged = async (value, formData) => {
     try {
       const grn = await fetchGrnByNo(grnNo);
       const t = mainDocLines(grn).find((x) => String(x.itcd) === String(itcd));
+      const packingOn = await returnablePackingOn();
       if (t) {
         out.batch_no = t.batch_no || "";
         out.item_name = t.itemDetails?.item || "";
         out.qty_per_pack = parseFloat(t.qty_per_pack) || 0;
+        // Goes back in the packing it came in.
+        if (packingOn) Object.assign(out, linePacking(t));
+      } else if (packingOn) {
+        // The GRN's returnable packing itself = the vendor's empty drums going back.
+        const drum = mainDocLines(grn).find(
+          (x) => x.returnable === true && String(x.packing_material_code) === String(itcd),
+        );
+        if (drum) Object.assign(out, emptyPackingLine(drum.packingDetails));
       }
     } catch (error) {
       console.error("Error fetching GRN line:", error);
@@ -5049,6 +5187,7 @@ export const VOUCHER_CONFIG = {
         required: true,
         onChange: async (value, line, allLines, formData) => grnReturnItemChanged(value, formData),
       },
+      ...packingLineFields(),
       { name: "batch_no", label: "Batch No", type: "text" },
       { name: "unit", label: "Unit", type: "text", readOnly: true, width: "90px" },
       { name: "no_of_pack", label: "No of Packs", type: "number" },
@@ -5424,7 +5563,8 @@ export const VOUCHER_CONFIG = {
             ? `/api/voucher/dispatchEdit?limit=50&multiFilters=${jsonParam({ pycd: [Number(customer)] })}`
             : "/api/voucher/dispatchEdit?limit=50";
         },
-        nameKeys: ["dispatch_no", "invoice_no", "acno.acname"],
+        // Dispatch no - Manual DC No - invoice no - customer (search finds any).
+        nameKeys: ["dispatch_no", "manual_no", "invoice_no", "acno.acname"],
         // " - " keeps a picked label from being re-fetched (Form.jsx).
         valueKey: "dispatch_no",
         // Required on the form while "saleReturn.requireDispatchLink" is off (as
@@ -5433,7 +5573,7 @@ export const VOUCHER_CONFIG = {
         lockInEdit: true,
         getPlaceholder: () => "Search dispatch no",
         onChange: async (value, formData) => {
-          if (!value) return {};
+          if (!value) return { dispatch_manual_no: "" };
           try {
             const dispatch = await fetchDispatchByNo(value);
             if (!dispatch) return {};
@@ -5474,6 +5614,9 @@ export const VOUCHER_CONFIG = {
         valueKey: "id",
         required: true,
       },
+      // The picked dispatch's paper DC no — shown only, not stored on the return.
+      { name: "dispatch_manual_no", label: "Manual DC No (Dispatch)", type: "text", readOnly: true },
+      MANUAL_GRN_NO_FIELD,
       { name: "rmk4", label: "Vehicle No", type: "text", uppercase: true },
       // A dispatch from before the system started (not in the system): its old
       // number + the warehouse; lines carry their cost rate (saleReturn.requireDispatchLink).
@@ -5501,6 +5644,7 @@ export const VOUCHER_CONFIG = {
         required: true,
         onChange: async (value, line, allLines, formData) => saleReturnItemChanged(value, formData),
       },
+      ...packingLineFields(),
       // Old dispatch only: the cost the goods come back at — the system-start
       // rate (prefilled; the server sets it) or typed when the item has none.
       {
@@ -5549,6 +5693,8 @@ export const VOUCHER_CONFIG = {
       { name: "dated", label: "Date", type: "date" },
       { name: "return_no", label: "Return No", type: "text", render: (e) => String(e.vr_no || e.tran_id || "-") },
       { name: "dispatch_no", label: "Dispatch No", type: "text" },
+      { name: "dispatch_manual_no", label: "Manual DC No", type: "text" },
+      { name: "manual_no", label: "Manual GRN No", type: "text" },
       { name: "pycd", label: "Customer", type: "text", options: true, value1: "acno", value2: "acname" },
       { name: "godown", label: "Godown", type: "text", options: true, value1: "godownDetails", value2: "godown" },
       { name: "qty", label: "Total Qty", type: "number", isInnerTotal: true, key: "transactions" },
@@ -5669,6 +5815,8 @@ export const VOUCHER_CONFIG = {
     tableFields: [
       { name: "dated", label: "Date", type: "date" },
       { name: "dispatch_no", label: "Dispatch No", type: "text" },
+      { name: "dispatch_manual_no", label: "Manual DC No", type: "text" },
+      { name: "manual_no", label: "Manual GRN No", type: "text" },
       { name: "so_no", label: "SO No", type: "text" },
       {
         name: "pycd",
@@ -8476,6 +8624,7 @@ export const VOUCHER_CONFIG = {
           hasValue(formData?.po_no) ? "Select item from the PO" : "Select item",
         onChange: async (value, line, allLines, formData) => grnItemChanged(value, formData),
       },
+      ...packingLineFields(),
       { name: "batch_no", label: "Batch No", type: "text" },
       { name: "no_of_pack", label: "No of Packs", type: "number", required: true },
       { name: "qty_per_pack", label: "Qty per Pack", type: "number", required: true },
@@ -9957,7 +10106,9 @@ export const VOUCHER_CONFIG = {
         nameKeys: ["id", "godown"],
         valueKey: "id",
         required: true,
-        defaultValue: { value: "3", label: "3 - DESPATCH" }
+        // Starts at the company's finished goods godown (Settings → Production setup).
+        defaultValue: setupGodownDefault("finishedGoodsGodown"),
+        defaultGodown: "finishedGoodsGodown",
         // modalFields: [
         // {
         // name: "godown",
@@ -10083,6 +10234,10 @@ export const VOUCHER_CONFIG = {
             return {
               mm: value?.value || value,
               packing_material_code: pmOption,
+              // Returnable packing on: the item's default "Packing Returnable?".
+              ...(featureNow(RETURNABLE_PACKING) === true
+                ? { returnable: pmOption ? itemData.packing_returnable === true : false }
+                : {}),
               unit,
               // Carried onto the line so Qty (KG) can be derived and the save
               // can be refused when the conversion is missing.
@@ -10389,8 +10544,10 @@ export const VOUCHER_CONFIG = {
         nameKey: "godown",
         valueKey: "id",
         required: true,
-        // New Dispatch only — an edit keeps the saved godown.
-        defaultValue: { value: "3", label: "3 - DESPATCH" },
+        // New Dispatch only — an edit keeps the saved godown. Starts at the
+        // company's finished goods godown (Settings → Production setup).
+        defaultValue: setupGodownDefault("finishedGoodsGodown"),
+        defaultGodown: "finishedGoodsGodown",
         // modalFields: [
         // {
         // name: "godown",
@@ -10503,6 +10660,10 @@ export const VOUCHER_CONFIG = {
             return {
               mm: value?.value || value,
               packing_material_code: pmOption,
+              // Returnable packing on: the item's default "Packing Returnable?".
+              ...(featureNow(RETURNABLE_PACKING) === true
+                ? { returnable: pmOption ? itemData.packing_returnable === true : false }
+                : {}),
               unit,
               ltr_rate: ltrRate,
               item_name: itemData.item || "",

@@ -664,7 +664,7 @@ export default function InvoicingPage({ kind }) {
               ref={searchRef}
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
-              placeholder={`Search ${cfg.docNoun} no, order no, ${cfg.partyLabel.toLowerCase()}, invoice no${cfg.vendorBill ? ", vendor bill" : ""}…`}
+              placeholder={`Search ${cfg.docNoun} no, ${{ 4: "manual GRN no, ", 6: "manual DC no, ", 10: "manual DC / GRN no, " }[cfg.tranCode] ?? ""}order no, ${cfg.partyLabel.toLowerCase()}, invoice no${cfg.vendorBill ? ", vendor bill" : ""}…`}
               aria-label="Search (press /)"
               className="h-10 rounded-lg bg-background pl-9 pr-10"
             />

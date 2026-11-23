@@ -218,6 +218,7 @@ export default function ItemForm() {
     l: "",
     b: "",
     packing_material_code: "",
+    packing_returnable: false,
     code: "",
     ink_type: null,
     lamination: null,
@@ -329,6 +330,7 @@ export default function ItemForm() {
           alternate_id: itemData.alternate_id ? String(itemData.alternate_id) : "",
           code: itemData.code || "",
           packing_material_code: itemData.packing_material_code ? String(itemData.packing_material_code) : "",
+          packing_returnable: itemData.packing_returnable === true,
           valid_from: itemData.valid_from ? new Date(itemData.valid_from).toISOString().split("T")[0] : todayStr(),
           valid_to: itemData.valid_to ? new Date(itemData.valid_to).toISOString().split("T")[0] : validToStr(),
           color: itemData.color || null,
@@ -356,7 +358,17 @@ export default function ItemForm() {
   // Settings → Production setup: finished goods carry a packing material
   const { setup } = useProductionSetup();
   const features = useFeatures();
-  const isPackingMaterialEnabled = React.useMemo(() => isFinishedCategory(setup, formData.ic_id), [formData.ic_id, setup]);
+  // Settings → Features "documents.returnablePacking": any item that is not
+  // itself a packing material may carry a default packing (finished goods on
+  // dispatch, raw materials on GRN) and a default "Packing Returnable?".
+  const returnablePacking = features.on("documents.returnablePacking");
+  const isPackingMaterialEnabled = React.useMemo(
+    () =>
+      returnablePacking
+        ? formData.ic_id !== "" && formData.ic_id != null && !isPackingCategory(setup, formData.ic_id)
+        : isFinishedCategory(setup, formData.ic_id),
+    [formData.ic_id, setup, returnablePacking],
+  );
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -478,6 +490,7 @@ export default function ItemForm() {
         grn_direct_rate: features.on("grn.directRateByItem") ? data.grn_direct_rate === true : undefined,
         alternate_id: data.alternate_id && String(data.alternate_id).trim() ? parseInt(String(data.alternate_id)) : null,
         packing_material_code: data.packing_material_code ? parseInt(data.packing_material_code) : undefined,
+        packing_returnable: features.on("documents.returnablePacking") ? data.packing_returnable === true : undefined,
         valid_from: data.valid_from ? new Date(data.valid_from).toISOString() : null,
         valid_to: data.valid_to ? new Date(data.valid_to).toISOString() : null,
         wastage_percentage: data.wastage_percentage ? parseFloat(data.wastage_percentage) : null,
@@ -895,17 +908,48 @@ export default function ItemForm() {
                 <Input name="ltr_rate" type="number" step="0.01" value={formData.ltr_rate} onChange={handleChange} placeholder="0.00" className={inputCls} />
               </Field>
 
-              <Field label="Packing Material" hint={!isPackingMaterialEnabled ? "For finished goods only" : undefined} wide>
+              <Field
+                label="Packing Material"
+                hint={
+                  !isPackingMaterialEnabled
+                    ? returnablePacking
+                      ? "Not for a packing material itself"
+                      : "For finished goods only"
+                    : returnablePacking
+                      ? "Pre-filled on Dispatch / GRN lines"
+                      : undefined
+                }
+                wide
+              >
                 <SearchableSelect
                   inputId="packing_material_code"
                   value={formData?.packing_material_code}
                   onChange={(value) => handleSelectChange("packing_material_code", value)}
                   options={packingMaterialOptions}
                   isDisabled={!isPackingMaterialEnabled}
-                  placeholder={!isPackingMaterialEnabled ? "Choose the finished-goods category first" : "Search packing material…"}
+                  placeholder={
+                    !isPackingMaterialEnabled
+                      ? returnablePacking
+                        ? "Choose the item's category first"
+                        : "Choose the finished-goods category first"
+                      : "Search packing material…"
+                  }
                   emptyMessage="No packing materials available"
                 />
               </Field>
+
+              {returnablePacking && (
+                <Field label="Packing Returnable?" hint="Pre-ticks Returnable on Dispatch / GRN lines">
+                  <label className="flex h-10 cursor-pointer items-center justify-between gap-3 rounded-lg border border-input bg-background px-3">
+                    <span className="text-sm text-muted-foreground">{formData.packing_returnable ? "Yes" : "No"}</span>
+                    <Switch
+                      checked={formData.packing_returnable === true}
+                      disabled={!isPackingMaterialEnabled}
+                      onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, packing_returnable: checked }))}
+                    />
+                  </label>
+                </Field>
+              )}
             </div>
           </Section>
 

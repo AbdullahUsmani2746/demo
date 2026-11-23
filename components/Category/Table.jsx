@@ -114,6 +114,8 @@ import { generateVoucherPDF } from "@/components/Template/Payment"; // Update pa
 import { generateUnifiedPDF } from "../Template/UnifiedReport";
 import { generateSalesOrderPDF } from "../Template/SalesOrder";
 import { toast } from "sonner";
+import ManualNoCell from "./ManualNoCell";
+import { useFeatures } from "@/hooks/useFeatures";
 import { generateDispatchNotePDF } from "../Template/Dispatch";
 import { generateDeliveryNotePDF } from "../Template/DeliveryNote";
 import { generateRequisitionNotePDF } from "../Template/RequistNote";
@@ -3448,6 +3450,12 @@ export default function VoucherTable({
 
   // React Query Client
   const queryClient = useQueryClient();
+  const features = useFeatures();
+  // Manual DC / GRN No set from the list (PATCH /api/voucher/[type]/manual-no):
+  // GRN, Dispatch Return, and Dispatch while "dispatch.extraFields" is on.
+  const tranCodeOfType = VOUCHER_CONFIG[type]?.tran_code;
+  const manualNoEditable =
+    [4, 10].includes(tranCodeOfType) || (tranCodeOfType === 6 && features.on("dispatch.extraFields"));
 
   // States
   const [page, setPage] = useState(1);
@@ -5246,6 +5254,14 @@ const orderTypes = [
                           >
                             {typeof field.render === "function" ? (
                               field.render(entry)
+                            ) : field.name === "manual_no" && manualNoEditable ? (
+                              // Paper DC / GRN no: settable on its own, even when invoiced.
+                              <ManualNoCell
+                                type={type}
+                                entry={entry}
+                                label={typeof field.label === "string" ? field.label : "Manual No"}
+                                onSaved={() => queryClient.invalidateQueries({ queryKey: ["vouchers", type] })}
+                              />
                             ) : isUserField(field) && "entered_by" in entry ? (
                               <EnteredByChip name={entry.entered_by} />
                             ) : field.name === "status" ? (
