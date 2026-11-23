@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
 import { recordScopeError } from "@/lib/auth/documentScope";
+import { feature } from "@/lib/features/server";
 
 export async function GET(request, { params }) {
     try {
@@ -36,6 +37,9 @@ async function itemScopeError(session, ...categoryIds) {
 export const PUT = guard("setup.items.manage", async (request, { session }) => {
     try {
         const data = await request.json();
+        // "Packing Returnable?" only while Settings → Features "documents.returnablePacking"
+        // is on; off, the stored value is kept.
+        if (!(await feature("documents.returnablePacking"))) delete data.packing_returnable;
 
         const stored = await prisma.item.findUnique({ where: { itcd: parseInt(data.itcd) }, select: { ic_id: true } });
         if (!stored) return NextResponse.json({ error: 'Item not found' }, { status: 404 });

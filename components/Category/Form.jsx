@@ -867,6 +867,7 @@ const FormInput = ({
 }) => {
   const isActuallyReadOnly = readOnly || locked;
   const isAmount = type === "number" && grouped;
+  const fullText = type !== "number" && typeof value === "string" && value.trim() ? value : undefined;
 
   // While the box is being typed in, `draft` is what is on screen. It holds
   // the half-finished states a number cannot — "1,000." mid-decimal, or "-"
@@ -938,7 +939,9 @@ const FormInput = ({
         </label>
       )}
 
-      <div className="relative">
+      {/* Hover shows the whole text (a long narration is cut off in the box).
+          On the wrapper too: a disabled box shows no tooltip of its own. */}
+      <div className="relative" title={fullText}>
         {typeof Icon === "string" ? (
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
             {Icon}
@@ -989,6 +992,7 @@ const FormInput = ({
           }}
           onKeyDown={onKeyDown}
           step={isAmount ? undefined : step} // Add step attribute
+          title={fullText}
           {...props}
         />
 
@@ -1571,6 +1575,11 @@ export default function VoucherForm({
   // Source-mapped seed (master + lines) so "Discard Draft" can fall back to it
   // instead of an empty form.
   const sourceSeedRef = useRef(null);
+  // The config defaults a fresh form opens with (date, Warehouse, Issue
+  // Materials From, ...) — "Discard Draft" goes back to these, not to {}.
+  const defaultMasterRef = useRef(null);
+  // Bumped by "Discard Draft" so the godown defaults (setup / same-as) apply again.
+  const [defaultsEpoch, setDefaultsEpoch] = useState(0);
 
   // ✅ INITIALIZE FORM COOKIES HOOK
   const { loadFromStorage, clearFromStorage, finalizeDraft, markInitialized } = useFormCookies(
@@ -2435,9 +2444,17 @@ export default function VoucherForm({
   // Production setup, not a fixed id. Only an untouched default is replaced;
   // the label comes from the godown list.
   const { setup: productionSetup, isSuccess: productionSetupReady } = useProductionSetup();
+  // A field with `sameAs: "<master field>"` (and `sameAsWhen(featureValues)`
+  // true) follows that field — e.g. "Issue Materials From" = the dispatch's
+  // Warehouse (Settings → Features "dispatch.issueMaterialsFrom") — until the
+  // user picks another value. It then takes no `defaultGodown`.
+  const sameAsFields = useMemo(
+    () => godownDefaultFields.filter((f) => f.sameAs && (!f.sameAsWhen || f.sameAsWhen(features.values))),
+    [godownDefaultFields, features.values],
+  );
   useEffect(() => {
     if (editMode || !allowedGodowns?.length) return;
-    const fields = godownDefaultFields.filter((f) => f.defaultGodown);
+    const fields = godownDefaultFields.filter((f) => f.defaultGodown && !sameAsFields.includes(f));
     if (!fields.length) return;
     const byId = new Map(allowedGodowns.map((g) => [String(g.id), g]));
     setMasterData((prev) => {
@@ -2456,7 +2473,31 @@ export default function VoucherForm({
       }
       return next;
     });
-  }, [allowedGodowns, editMode, godownDefaultFields, productionSetup, productionSetupReady]);
+  }, [allowedGodowns, editMode, godownDefaultFields, sameAsFields, productionSetup, productionSetupReady, defaultsEpoch]);
+
+  const sameAsAuto = useRef({}); // field → the value it was last set to by following
+  const sameAsSource = sameAsFields
+    .map((f) => String(masterData?.[f.sameAs]?.value ?? masterData?.[f.sameAs] ?? ""))
+    .join("|");
+  useEffect(() => {
+    if (editMode || !sameAsFields.length) return;
+    setMasterData((prev) => {
+      let next = prev;
+      for (const f of sameAsFields) {
+        const key = f.formName || f.name;
+        const src = prev?.[f.sameAs];
+        const want = String(src?.value ?? src ?? "");
+        if (!want) continue;
+        const cur = String(prev?.[key]?.value ?? prev?.[key] ?? "");
+        const def = String(f.defaultValue?.value ?? f.defaultValue ?? "");
+        if (cur && cur !== def && cur !== sameAsAuto.current[key]) continue; // the user's pick
+        sameAsAuto.current[key] = want;
+        if (cur === want && (typeof src !== "object" || prev?.[key]?.label === src?.label)) continue;
+        next = { ...next, [key]: typeof src === "object" ? { value: want, label: src.label } : want };
+      }
+      return next;
+    });
+  }, [editMode, sameAsFields, sameAsSource, defaultsEpoch]);
 
   // Main initialization useEffect
   useEffect(() => {
@@ -2525,6 +2566,7 @@ export default function VoucherForm({
           },
           { tran_code: voucherConfig.tran_code }
         ) || {};
+      defaultMasterRef.current = defaultMasterData;
 
       if ((editMode || isClone) && existingData) {
 
@@ -5077,6 +5119,7 @@ export default function VoucherForm({
       fieldConfig.type === "textarea" ? (
         <Textarea
           value={value || ""}
+          title={typeof value === "string" && value.trim() ? value : undefined}
           disabled={readOnly || isReadOnly || saveMutation.isPending || loading.submit}
           name={`${isMain ? "main" : "deduction"}-${index}-${fieldName}`}
           onChange={(e) =>
@@ -6183,6 +6226,10 @@ export default function VoucherForm({
     const producing = materials.some((m) => bomItcdOf(m?.itcd) && Number(m?.qty) > 0);
     const shortCount = materials.filter((m) => isShort(matGodownOf(m), bomItcdOf(m?.itcd))).length;
     const totalQty = materials.reduce((s, m) => s + (Number(m?.qty) || 0), 0);
+    // Each material as a share of the line's qty (material qty ÷ dispatch qty);
+    // typing a % sets the qty, typing a qty updates the %.
+    const lineQty = Number(line.qty) || 0;
+    const pctOf = (q) => (lineQty > 0 && q !== "" && q != null ? Math.round(((Number(q) || 0) / lineQty) * 10000) / 100 : "");
     const showEmpty = !loadingBom && materials.length === 0;
 
     const setRow = (mi, patch) =>
@@ -6320,11 +6367,12 @@ export default function VoucherForm({
                         </div>
                       ) : (
                         <div className="overflow-x-auto">
-                          <table className="w-full min-w-[800px] text-xs">
+                          <table className="w-full min-w-[900px] text-xs">
                             <thead className="bg-muted/60">
                               <tr className="border-b border-border">
                                 <th className={`${th} text-left`}>Material</th>
                                 <th className={`${th} w-48 text-left`}>Issue from</th>
+                                <th className={`${th} w-28 text-right`} title="Share of this line's qty (material qty ÷ dispatch qty)">% of qty</th>
                                 <th className={`${th} w-36 text-right`}>Required qty</th>
                                 <th className={`${th} w-44 text-right`}>Available</th>
                                 <th className={`${th} w-16 text-left`}>Unit</th>
@@ -6334,7 +6382,7 @@ export default function VoucherForm({
                             <tbody className="divide-y divide-border">
                               {loadingBom && materials.length === 0 && (
                                 <tr>
-                                  <td colSpan={6} className="px-3 py-3">
+                                  <td colSpan={7} className="px-3 py-3">
                                     <div className="h-3 w-48 animate-pulse rounded bg-muted" />
                                   </td>
                                 </tr>
@@ -6399,6 +6447,29 @@ export default function VoucherForm({
                                           menuPortalTarget={typeof window !== "undefined" ? document.body : null}
                                           styles={compactSelectStyles(30)}
                                         />
+                                      </div>
+                                    </td>
+                                    <td className="px-3 py-1 text-right">
+                                      <div className="inline-flex items-center gap-1">
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="any"
+                                          inputMode="decimal"
+                                          name={`main-${idx}-material-${mi}-pct`}
+                                          aria-label={`${m?.itcd?.label || "Material"} as % of the line qty`}
+                                          value={pctOf(m?.qty)}
+                                          disabled={busy || lineQty <= 0}
+                                          title={lineQty <= 0 ? "Enter the line qty first" : undefined}
+                                          onKeyDown={noEnterSubmit}
+                                          onChange={(e) =>
+                                            setRow(mi, {
+                                              qty: e.target.value === "" ? "" : bomRound(((Number(e.target.value) || 0) * lineQty) / 100),
+                                            })
+                                          }
+                                          className="h-[30px] w-20 rounded-md border border-input bg-background px-2 text-right tabular-nums outline-none transition-shadow focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 disabled:opacity-60"
+                                        />
+                                        <span className="text-muted-foreground">%</span>
                                       </div>
                                     </td>
                                     <td className="px-3 py-1 text-right">
@@ -6516,6 +6587,12 @@ export default function VoucherForm({
                           <span className="pr-2 text-[11px] tabular-nums text-muted-foreground">
                             Total material qty{" "}
                             <span className="font-semibold text-foreground">{bomFmt(totalQty)}</span>
+                            {lineQty > 0 && (
+                              <>
+                                {" · "}
+                                <span className="font-semibold text-foreground">{pctOf(totalQty)}%</span> of the line qty
+                              </>
+                            )}
                           </span>
                         )}
                       </div>
@@ -7067,15 +7144,27 @@ export default function VoucherForm({
                 setHasDraft(false);
                 // Source-created doc: go back to the SO/PO data, not a blank form.
                 const seed = sourceSeedRef.current;
+                const today = new Date().toISOString().split("T")[0];
+                const defaults = {
+                  ...(defaultMasterRef.current || { tran_code: voucherConfig.tran_code }),
+                  ...(defaultMasterRef.current && "dated" in defaultMasterRef.current ? { dated: today } : {}),
+                };
                 if (seed) {
-                  setMasterData(seed.masterData);
+                  // Any default the source left blank (e.g. godown) is filled in again.
+                  const master = { ...seed.masterData };
+                  for (const [k, v] of Object.entries(defaults)) {
+                    if (master[k] == null || master[k] === "") master[k] = v;
+                  }
+                  setMasterData(master);
                   setMainLines(seed.mainLines);
                   setDeductionLines(seed.deductionLines);
                 } else {
-                  setMasterData({});
+                  setMasterData(defaults);
                   setMainLines([{ ...(voucherConfig.newLineDefaults || {}) }]);
                   setDeductionLines([{}]);
                 }
+                sameAsAuto.current = {};
+                setDefaultsEpoch((n) => n + 1);
                 toast.success("Draft cleared.");
               }}
               className="border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 text-sm px-4 py-2 flex items-center gap-2"

@@ -185,6 +185,7 @@ export const PATCH = guard("fgTransfer.create", async (req) => {
         where: {
           tran_code: 11,
           dated: { gte: todayStart, lt: todayEnd },
+          vr_no: { not: null }, // unnumbered vouchers would sort first (NULL first in DESC)
         },
         orderBy: { vr_no: "desc" },
         select:  { vr_no: true },
