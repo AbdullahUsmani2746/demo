@@ -65,12 +65,30 @@ jobs:
             echo "PostgreSQL server major version: $PGV"
 
             if [ "$STEP" = all ]; then
-              # 1. Database copy — refuse if the new one already exists.
+              # 1. Database copy. Created if missing; filled only while it has no tables
+              #    (an existing database with data is never touched).
               EXISTS=$(pg psql "$SRC_PG" -tAc "SELECT 1 FROM pg_database WHERE datname = '$NEW_DB'" | tr -d '[:space:]')
-              if [ "$EXISTS" = 1 ]; then
-                echo "Database $NEW_DB already exists — not touching it (drop it yourself to copy again)."
+              [ "$EXISTS" = 1 ] || pg psql "$SRC_PG" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$NEW_DB\""
+
+              # The demo connects through PgBouncer (6432), which only knows the databases
+              # listed in its config. If it does not know the new one, demo2 talks to
+              # PostgreSQL itself on 5432.
+              if ! pg psql "$DST_PG" -tAc "SELECT 1" >/dev/null 2>&1; then
+                DIRECT_BASE=$(echo "$BASE" | sed -E 's#:6432$#:5432#')
+                if [ "$DIRECT_BASE" != "$BASE" ] && pg psql "$DIRECT_BASE/$NEW_DB" -tAc "SELECT 1" >/dev/null 2>&1; then
+                  DST_PG="$DIRECT_BASE/$NEW_DB"; DST_PORT=5432
+                  echo "PgBouncer does not list $NEW_DB — demo2 connects to PostgreSQL directly (port 5432)."
+                else
+                  echo "Cannot reach $NEW_DB through PgBouncer (6432) or PostgreSQL (5432)."
+                  echo "Add $NEW_DB to the [databases] section of pgbouncer.ini (same line as the demo's database), reload PgBouncer, run again."
+                  exit 1
+                fi
+              fi
+
+              TABLES=$(pg psql "$DST_PG" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | tr -d '[:space:]')
+              if [ "$TABLES" != 0 ]; then
+                echo "Database $NEW_DB already has $TABLES tables — not touching it."
               else
-                pg psql "$SRC_PG" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$NEW_DB\""
                 pg pg_dump "$SRC_PG" -Fc -f /work/demo.dump
                 pg pg_restore --no-owner --no-acl -d "$DST_PG" /work/demo.dump
                 rm -f /tmp/demo2-setup/demo.dump
@@ -84,6 +102,7 @@ jobs:
               else
                 sed -E \
                   -e "s#^(DATABASE_URL=\"?[^\"?]*/)[^/?\"]+#\1$NEW_DB#" \
+                  -e "${DST_PORT:+s#^(DATABASE_URL=\"?[^\"?]*):6432/#\1:$DST_PORT/#}" \
                   -e "s#^NEXTAUTH_URL=.*#NEXTAUTH_URL=https://$DOMAIN#" \
                   ~/demo/.env > ~/demo2/.env
                 chmod 600 ~/demo2/.env
