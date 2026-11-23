@@ -109,11 +109,14 @@ import {
   Copy,
 } from "lucide-react";
 import axios from "axios";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useFeatures } from "@/hooks/useFeatures";
 import { createPortal } from "react-dom";
 import { generateVoucherPDF } from "@/components/Template/Payment"; // Update path as needed
 import { generateUnifiedPDF } from "../Template/UnifiedReport";
 import { generateSalesOrderPDF } from "../Template/SalesOrder";
 import { toast } from "sonner";
+import ManualNoCell from "./ManualNoCell";
 import { generateDispatchNotePDF } from "../Template/Dispatch";
 import { generateDeliveryNotePDF } from "../Template/DeliveryNote";
 import { generateRequisitionNotePDF } from "../Template/RequistNote";
@@ -3448,6 +3451,12 @@ export default function VoucherTable({
 
   // React Query Client
   const queryClient = useQueryClient();
+  const features = useFeatures();
+  // Manual DC / GRN No set from the list (PATCH /api/voucher/[type]/manual-no):
+  // GRN, Dispatch Return, and Dispatch while "dispatch.extraFields" is on.
+  const tranCodeOfType = VOUCHER_CONFIG[type]?.tran_code;
+  const manualNoEditable =
+    [4, 10].includes(tranCodeOfType) || (tranCodeOfType === 6 && features.on("dispatch.extraFields"));
 
   // States
   const [page, setPage] = useState(1);
@@ -3707,6 +3716,27 @@ export default function VoucherTable({
   const filteredData = data;
   // "Entered by" column: only for lists whose API sends entered_by (vouchers, orders).
   const showEnteredBy = !hasUserField && data.some((e) => e && "entered_by" in e);
+
+  // Delete is a right few hold; everyone else gets "Request deletion" — a
+  // reason, sent to Approvals (lib/approvals/deletions.js).
+  // Settings → Features "approvals.deletionRequests": off = the plain Delete
+  // button for everyone (the server refuses it without the right).
+  const { can: canPerm, loading: permLoading } = usePermissions();
+  const deletionRequestsOn = useFeatures().on("approvals.deletionRequests");
+  const mayDeleteNow = !deletionRequestsOn || canPerm(`${type}.delete`);
+  const requestDeleteMutation = useMutation({
+    mutationFn: async ({ rowData, reason }) => {
+      const isOrder = ["purchaseOrder", "purchaseOrderEdit", "saleOrder", "serviceOrder"].includes(type);
+      const { data } = await axios.post("/api/approvals/delete-requests", {
+        type,
+        id: isOrder ? rowData.order_no : rowData.tran_id,
+        reason,
+      });
+      return data;
+    },
+    onSuccess: (data) => toast.success(data?.message || "Deletion requested — it waits on Approvals."),
+    onError: (error) => toast.error(error?.response?.data?.error || "Could not send the deletion request"),
+  });
 
   // Mutation for deleting a voucher
   const deleteMutation = useMutation({
@@ -4460,6 +4490,16 @@ export default function VoucherTable({
   };
 
   const handleDeleteClick = async (rowData) => {
+    if (!mayDeleteNow) {
+      const reason = window.prompt("Why should this entry be deleted? (The approver will see this reason.)");
+      if (reason === null) return;
+      if (reason.trim().length < 5) {
+        toast.error("Please give the reason for deleting it.");
+        return;
+      }
+      requestDeleteMutation.mutate({ rowData, reason: reason.trim() });
+      return;
+    }
     if (!window.confirm("Delete this voucher?")) return;
     deleteMutation.mutate(rowData);
   };
@@ -5246,6 +5286,14 @@ const orderTypes = [
                           >
                             {typeof field.render === "function" ? (
                               field.render(entry)
+                            ) : field.name === "manual_no" && manualNoEditable ? (
+                              // Paper DC / GRN no: settable on its own, even when invoiced.
+                              <ManualNoCell
+                                type={type}
+                                entry={entry}
+                                label={typeof field.label === "string" ? field.label : "Manual No"}
+                                onSaved={() => queryClient.invalidateQueries({ queryKey: ["vouchers", type] })}
+                              />
                             ) : isUserField(field) && "entered_by" in entry ? (
                               <EnteredByChip name={entry.entered_by} />
                             ) : field.name === "status" ? (
@@ -5440,10 +5488,10 @@ const orderTypes = [
                                 e.stopPropagation();
                                 handleDeleteClick(entry);
                               }}
-                              disabled={deleteMutation.isPending || invoiceLocked}
-                              title={invoiceLocked ? "Invoiced — unlock it in Invoicing first" : "Delete"}
+                              disabled={deleteMutation.isPending || requestDeleteMutation.isPending || invoiceLocked || (deletionRequestsOn && permLoading)}
+                              title={invoiceLocked ? "Invoiced — unlock it in Invoicing first" : mayDeleteNow ? "Delete" : "Request deletion (with a reason — goes to Approvals)"}
                             >
-                              {deleteMutation.isPending ? (
+                              {deleteMutation.isPending || requestDeleteMutation.isPending ? (
                                 <RefreshCw className="h-4 w-4 animate-spin" />
                               ) : (
                                 <Delete className="h-4 w-4" />

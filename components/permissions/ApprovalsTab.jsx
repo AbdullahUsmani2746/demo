@@ -12,6 +12,7 @@ import { CheckCircle2, Loader2, Save, ShieldCheck, Users, AlertTriangle, Externa
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/bi/SearchSelect";
 import ApprovalRulesSection from "@/components/permissions/ApprovalRulesSection";
+import HrChainsSection from "@/components/permissions/HrChainsSection";
 
 const LABEL = "text-[11px] font-bold uppercase tracking-wider text-primary";
 
@@ -178,6 +179,10 @@ export default function ApprovalsTab() {
             </div>
           </section>
         ))}
+      </div>
+
+      <div className="border-t border-border pt-6">
+        <HrChainsSection />
       </div>
 
       <div className="border-t border-border pt-6">

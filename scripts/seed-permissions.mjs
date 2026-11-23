@@ -67,6 +67,8 @@ const SPECIAL = [
   // status 3 until someone holding this approves them (Permissions →
   // Approvals). lib/orders/saleOrderApproval.js
   ["saleOrder.approve", "Sales", "Approve Sale Orders held for approval (Free of Cost / Trial / No Godown …)"],
+  // "Request deletion" (lib/approvals/deletions.js): decide deletion requests.
+  ["deletion.approve", "Approvals", "Decide deletion requests (approving deletes the entry)"],
   // Sale Returns given a Technical reason wait for this (granted on
   // Permissions → Approvals). lib/saleReturns/remarks.js
   ["saleReturn.approve", "Sales", "Approve sale returns with a Technical reason"],

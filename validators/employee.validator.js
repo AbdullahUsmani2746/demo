@@ -71,6 +71,8 @@ export const employeeSchema = z.object({
   ),
   payFrequency: z.enum(["MONTHLY", "FORTNIGHTLY", "WEEKLY"]).default("MONTHLY"),
   costCenterId: requiredId("Cost center is required"),
+  // Salary category: Direct / Indirect (optional)
+  salaryCategory: z.enum(["DIRECT", "INDIRECT"]).optional().nullable(),
 
   allowanceIds: z.array(z.coerce.number().int()).optional().default([]),
   deductionIds: z.array(z.coerce.number().int()).optional().default([]),

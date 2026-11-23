@@ -215,6 +215,7 @@ const bodyOf = async (req) => {
 };
 import { closedGodownError } from "@/lib/godowns";
 import { attachEnteredBy, ENTERED_BY_USER_SELECT, userDisplayName } from "@/lib/audit/enteredBy";
+import { deletionCallAllowed } from "@/lib/approvals/deletions";
 
 // Free of Cost / Trial Process orders carry no price at all. The client
 // already zeroes the rates, but the server never trusts that.
@@ -368,6 +369,13 @@ export const GET = guardBy(
   // lookup for the page) — lib/audit/enteredBy.js.
   orders.forEach((o) => { o.entered_by = userDisplayName(o.users); });
   await attachEnteredBy(orders, "OrderMaster");
+  // "Approved By" on the printed order (components/Template/OrderLetterhead.js).
+  const approverIds = [...new Set(orders.map((o) => o.approved_by).filter(Boolean))];
+  if (approverIds.length) {
+    const approvers = await prisma.user.findMany({ where: { id: { in: approverIds } }, select: { id: true, name: true, email: true } });
+    const nm = new Map(approvers.map((u) => [u.id, u.name || u.email]));
+    orders.forEach((o) => { if (o.approved_by) o.approved_by_name = nm.get(o.approved_by) || null; });
+  }
 
   // Lines carry prev_qty / prev_rate / edited_by / edited_at (all scalars of
   // OrderDetail); add the name of whoever last changed each line's qty / rate.
@@ -1110,11 +1118,13 @@ async function updateOrder(req, { params, actingSession = null }) {
 }
 
 // DELETE method
+// An approved "Request deletion" (lib/approvals/deletions.js) comes here with
+// header x-approval-delete — the request is checked instead of <type>.delete.
 export const DELETE = guardBy(
-  async (req, { params }) => `${(await params).type}.delete`,
+  async (req, { params }) => (req.headers.get("x-approval-delete") ? null : `${(await params).type}.delete`),
   async (req, { params }) => {
   try {
-    const { type } = params;
+    const { type } = await params;
     const config = VOUCHER_CONFIG[type];
     const session = await getServerSession(authOptions);
     setAuditActor(session);
@@ -1126,7 +1136,14 @@ export const DELETE = guardBy(
       );
     }
 
-    const { order_no } = await req.json();
+    let order_no;
+    if (req.headers.get("x-approval-delete")) {
+      const allowed = await deletionCallAllowed(req, session, type);
+      if (!allowed.ok) return allowed.response;
+      order_no = allowed.targetId;
+    } else {
+      ({ order_no } = await req.json());
+    }
 
     if (!order_no) {
       return NextResponse.json(

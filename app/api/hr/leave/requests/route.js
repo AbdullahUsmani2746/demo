@@ -14,6 +14,7 @@ import { hrRoute, jsonBody } from "@/lib/hr/route";
 import { assertCanActFor, leaveContext } from "@/lib/hr/leave/access";
 import { applyApproved, assertPlanFits, planLeave } from "@/lib/hr/leave/requests";
 import { createHrRequest } from "@/lib/hr/approvals";
+import { chainForNewRequest } from "@/lib/hr/chains";
 import { fmtDays } from "@/lib/hr/leave/policy";
 import { EMPLOYEE_SELECT, employeeLite } from "@/lib/hr/attendance/sheet";
 import { dayKeyOfDb, dbDay, isDayKey } from "@/lib/hr/time";
@@ -84,6 +85,8 @@ export const POST = hrRoute([HR_PERMS.leaveApply, HR_PERMS.leaveManage], async (
   const reason = b.reason ? String(b.reason).trim().slice(0, 500) || null : null;
 
   const plan = await planLeave({ employee_id: employeeId, leave_type_id: b.leave_type_id, from: b.from, to: b.to, half_day: b.half_day });
+  // Its approval chain (lib/hr/chains.js) — refused here, before anything is saved.
+  const chain = await chainForNewRequest({ docType: "hrLeave", employeeId });
   await assertPlanFits(plan);
 
   const lr = await prisma.hrLeaveRequest.create({
@@ -100,7 +103,7 @@ export const POST = hrRoute([HR_PERMS.leaveApply, HR_PERMS.leaveManage], async (
   });
   const what = `${employeeName(plan.employee)} · ${plan.type.name} · ${plan.from}${plan.to !== plan.from ? ` → ${plan.to}` : ""} · ${fmtDays(plan.days)} day(s)`;
 
-  if (b.approve_now && who === "other" && lc.rights.leaveApprove) {
+  if (b.approve_now && !chain && who === "other" && lc.rights.leaveApprove) {
     try {
       await applyApproved(lr.id, { actor: session.user.id, note: "Approved when entered" });
     } catch (e) {
@@ -115,6 +118,8 @@ export const POST = hrRoute([HR_PERMS.leaveApply, HR_PERMS.leaveManage], async (
     payload: { leave_request_id: lr.id },
     summary: `${what}${reason ? ` — ${reason}` : ""}`,
     session,
+    chain,
+    employeeId,
   });
   await prisma.hrLeaveRequest.update({ where: { id: lr.id }, data: { approval_request_id: request.id } });
   return NextResponse.json({ id: lr.id, status: "pending", message: `Leave #L-${lr.id} sent for approval — ${what}.` }, { status: 201 });

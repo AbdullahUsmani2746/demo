@@ -555,6 +555,7 @@ export const POST = guard("materialInput.create", async (request) => {
               lt: new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate() + 1),
             },
             tran_code: 7,
+            vr_no: { not: null }, // unnumbered vouchers would sort first (NULL first in DESC)
           },
           orderBy: { vr_no: 'desc' },
         });
@@ -584,6 +585,7 @@ export const POST = guard("materialInput.create", async (request) => {
               lt: new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate() + 1),
             },
             tran_code: 8,
+            vr_no: { not: null }, // unnumbered vouchers would sort first (NULL first in DESC)
           },
           orderBy: { vr_no: 'desc' },
         });
@@ -750,6 +752,7 @@ export const POST = guard("materialInput.create", async (request) => {
               lt: new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate() + 1),
             },
             tran_code: 7,
+            vr_no: { not: null }, // unnumbered vouchers would sort first (NULL first in DESC)
           },
           orderBy: { vr_no: 'desc' },
         });
@@ -780,6 +783,7 @@ export const POST = guard("materialInput.create", async (request) => {
               lt: new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate() + 1),
             },
             tran_code: 8,
+            vr_no: { not: null }, // unnumbered vouchers would sort first (NULL first in DESC)
           },
           orderBy: { vr_no: 'desc' },
         });

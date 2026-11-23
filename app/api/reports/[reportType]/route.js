@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { checkPeriodLock } from "@/lib/periodLock";
 import { getOpening, getOpeningRates, getLatestOpeningPeriod, openingQtySql, openingQtyByGodownSql } from "@/lib/openingStock";
 import { REPORT_CONFIG, ENTERED_BY_REPORTS } from "@/components/Reports/config";
@@ -45,6 +46,7 @@ import { getCcComponents } from "@/lib/costing/ccRates";
 import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
 import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingApprovals";
 import { getPosReport } from "@/lib/reports/pos";
+import { getReturnablePackingReport as getReturnablePackingBalances, returnablePackingSummary } from "@/lib/reports/returnablePacking";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
@@ -1086,10 +1088,19 @@ export async function GET(request, { params }) {
         data = await expandItemRows(base);
         break;
       }
-        case "cbBook":
-        data = await getAccountLedger(filters);
+        case "cbBook": {
+        // No account picked = all cash & bank accounts (Finance → Account
+        // Settings "Cash / Bank" groups), each as its own block.
+        const picked = Array.isArray(filters.account) ? filters.account.filter(Boolean) : String(filters.account ?? "").split(",").filter(Boolean);
+        if (!picked.length) {
+          const macnos = await getCashBankMacnos();
+          const accounts = await prisma.aCNO.findMany({ where: { macno: { in: macnos } }, select: { acno: true }, orderBy: { acno: "asc" } });
+          filters.account = accounts.map((a) => a.acno);
+        }
+        data = filters.account.length ? await getAccountLedger(filters) : [];
         summary = calculateAccountLedgerSummary(data);
         break;
+      }
       case "accountsActivity": {
         const activity = await getAccountActivity(filters);
         if (activity && Array.isArray(activity.columns)) {
@@ -1269,8 +1280,9 @@ export async function GET(request, { params }) {
           config.columns || [];
         break;
       case "returnablePacking":
-        data = await getReturnablePackingReport(filters);
-        summary = calculateReturnablePackingSummary(data);
+        // Customers' and vendors' returnable drums (lib/reports/returnablePacking.js).
+        data = await getReturnablePackingBalances(filters);
+        summary = returnablePackingSummary(data, filters);
         break;
       case "monthlyStock":
         data = await getMonthlyStockReport(filters);
@@ -9484,416 +9496,6 @@ async function getQCParametersReport(filters) {
     parameterColumns,
   };
 }
-async function getReturnablePackingReport(filters) {
-  try {
-    // Build base query for DISPATCH transactions (tran_code: 6)
-    const dispatchWhere = {
-      tran_code: 6,
-      dated: {
-        gte: filters.dateFrom ? new Date(filters.dateFrom) : undefined,
-        lte: filters.dateTo ? new Date(filters.dateTo) : undefined,
-      },
-    };
-
-    if (filters.customer) {
-      dispatchWhere.pycd = parseInt(filters.customer);
-    }
-    if (filters.godown) {
-      dispatchWhere.godown = parseInt(filters.godown);
-    }
-
-    // Get all DISPATCH transactions with returnable packing
-    const dispatchTransactions = await prisma.transactionsMaster.findMany({
-      where: dispatchWhere,
-      include: {
-        acno: true,
-        godownDetails: true,
-        transactions: {
-          where: {
-            returnable: true,
-            packing_material_code: { not: null },
-            ...(filters.item ? { packing_material_code: parseInt(filters.item) } : {}),
-          },
-          include: {
-            packingDetails: true,
-            itemDetails: true,
-          },
-        },
-      },
-      orderBy: { dated: "asc" },
-    });
-
-    // Build base query for RETURN transactions (tran_code: 4)
-    const returnWhere = {
-      tran_code: 4,
-      dated: {
-        gte: filters.dateFrom ? new Date(filters.dateFrom) : undefined,
-        lte: filters.dateTo ? new Date(filters.dateTo) : undefined,
-      },
-    };
-
-    if (filters.customer) {
-      returnWhere.pycd = parseInt(filters.customer);
-    }
-    if (filters.godown) {
-      returnWhere.godown = parseInt(filters.godown);
-    }
-
-    // Get all RETURN transactions
-    const returnTransactions = await prisma.transactionsMaster.findMany({
-      where: returnWhere,
-      include: {
-        acno: true,
-        godownDetails: true,
-        transactions: {
-          where: {
-            itcd: { not: null },
-            ...(filters.item ? { itcd: parseInt(filters.item) } : {}),
-          },
-          include: {
-            itemDetails: true,
-          },
-        },
-      },
-      orderBy: { dated: "asc" },
-    });
-
-    // Process DISPATCHES - create dispatch records
-    const dispatchRecords = [];
-
-    dispatchTransactions.forEach((dispatch) => {
-      dispatch.transactions.forEach((packingLine) => {
-        if (packingLine.returnable && packingLine.packing_material_code) {
-          dispatchRecords.push({
-            type: "DISPATCH",
-            master_id: dispatch.tran_id,
-            dated: new Date(dispatch.dated),
-            vr_no: dispatch.vr_no,
-            dispatch_no: dispatch.dispatch_no, // Int
-            invoice_no: dispatch.invoice_no,
-            party_code: dispatch.pycd,
-            party_name: dispatch.acno?.acname || "Unknown",
-            godown: dispatch.godownDetails?.godown || "",
-
-            // Packing details from dispatch
-            packing_item_code: packingLine.packing_material_code,
-            packing_item_name: packingLine.packingDetails?.item || "Unknown Packing",
-            dispatch_packing_qty: packingLine.no_of_pack || 0,
-            qty_per_pack: packingLine.qty_per_pack || 1,
-            total_items: packingLine.qty || 0,
-            returnable: packingLine.returnable,
-
-            // For tracking returns
-            returned_qty: 0,
-            balance_qty: packingLine.no_of_pack || 0,
-            return_transactions: [],
-          });
-        }
-      });
-    });
-
-    // Process RETURNS - match with dispatches
-    const returnRecords = [];
-
-    returnTransactions.forEach((returnTran) => {
-      // Skip if no ref_dispatch_no
-      if (!returnTran.ref_dispatch_no) return;
-
-      returnTran.transactions.forEach((returnLine) => {
-        // Only include if it has packing quantity
-        if (returnLine.no_of_pack > 0) {
-          returnRecords.push({
-            type: "RETURN",
-            master_id: returnTran.tran_id,
-            dated: new Date(returnTran.dated),
-            vr_no: returnTran.vr_no,
-            grn_no: returnTran.grn_no,
-            invoice_no: returnTran.invoice_no,
-            party_code: returnTran.pycd,
-            party_name: returnTran.acno?.acname || "Unknown",
-            godown: returnTran.godownDetails?.godown || "",
-
-            // Return details
-            return_item_code: returnLine.itcd,
-            return_item_name: returnLine.itemDetails?.item || "",
-            return_packing_qty: returnLine.no_of_pack || 0,
-            return_qty_per_pack: returnLine.qty_per_pack || 1,
-            return_total_qty: returnLine.qty || 0,
-
-            // Reference to original dispatch (String needs to be converted to Number)
-            reference_dispatch_no: returnTran.ref_dispatch_no,
-
-            // Will be matched below
-            matched_dispatch_id: null,
-          });
-        }
-      });
-    });
-
-    // Match returns to dispatches based on dispatch_no = ref_dispatch_no
-    returnRecords.forEach((returnItem) => {
-      // Convert ref_dispatch_no (String) to Number for comparison
-      const refDispatchNo = Number(returnItem.reference_dispatch_no);
-      if (isNaN(refDispatchNo)) return; // Skip if not a number
-
-      // Find dispatch with matching dispatch_no (Int)
-      const matchingDispatch = dispatchRecords.find(
-        (dispatch) => dispatch.dispatch_no == refDispatchNo
-      );
-
-      // Also check if the packing item codes match
-      if (matchingDispatch && matchingDispatch.packing_item_code == returnItem.return_item_code) {
-        returnItem.matched_dispatch_id = matchingDispatch.master_id;
-        matchingDispatch.return_transactions.push(returnItem);
-        matchingDispatch.returned_qty += returnItem.return_packing_qty;
-        matchingDispatch.balance_qty = matchingDispatch.dispatch_packing_qty - matchingDispatch.returned_qty;
-      }
-    });
-
-    // Prepare final report data
-    const reportData = [];
-
-    // Add dispatch records with their returns
-    dispatchRecords.forEach((dispatch) => {
-      // Add dispatch row
-      reportData.push({
-        transaction_id: dispatch.master_id,
-        tran_id: dispatch.master_id, // voucher drill (rule 15): dispatch
-        tran_code: 6,
-        dated: dispatch.dated.toLocaleDateString(),
-        transaction_type: "DISPATCH",
-        reference_no: dispatch.dispatch_no, // Show as number
-        invoice_no: dispatch.invoice_no,
-        party_code: dispatch.party_code,
-        party_name: dispatch.party_name,
-        godown: dispatch.godown,
-
-        // Packing details
-        item_code: dispatch.packing_item_code,
-        item_name: dispatch.packing_item_name,
-        dispatch_qty: dispatch.dispatch_packing_qty,
-        qty_per_pack: dispatch.qty_per_pack,
-        total_items: dispatch.total_items,
-        returned_qty: dispatch.returned_qty,
-        balance_qty: dispatch.balance_qty,
-
-        // Balance tracking
-        quantity_change: -dispatch.dispatch_packing_qty, // Negative for going OUT
-        opening_balance: 0,
-        closing_balance: 0,
-
-        returnable: dispatch.returnable ? "Yes" : "No",
-      });
-
-      // Add matching returns under this dispatch
-      dispatch.return_transactions.forEach((returnItem) => {
-        reportData.push({
-          transaction_id: returnItem.master_id,
-          tran_id: returnItem.master_id, // voucher drill (rule 15): GRN
-          tran_code: 4,
-          dated: returnItem.dated.toLocaleDateString(),
-          transaction_type: "RETURN",
-          reference_no: returnItem.grn_no,
-          invoice_no: returnItem.invoice_no,
-          party_code: returnItem.party_code,
-          party_name: returnItem.party_name,
-          godown: returnItem.godown,
-
-          // Return details
-          item_code: returnItem.return_item_code,
-          item_name: returnItem.return_item_name,
-          dispatch_qty: 0,
-          returned_qty: returnItem.return_packing_qty,
-          qty_per_pack: returnItem.return_qty_per_pack,
-          total_items: returnItem.return_total_qty,
-          balance_qty: 0,
-
-          // Balance tracking
-          quantity_change: returnItem.return_packing_qty, // Positive for coming IN
-          opening_balance: 0,
-          closing_balance: 0,
-
-          // Reference info
-          reference_to: returnItem.reference_dispatch_no,
-          returnable: "-",
-        });
-      });
-    });
-
-    // Add unmatched returns (if any)
-    returnRecords.forEach((returnItem) => {
-      if (!returnItem.matched_dispatch_id) {
-        reportData.push({
-          transaction_id: returnItem.master_id,
-          tran_id: returnItem.master_id, // voucher drill (rule 15): GRN
-          tran_code: 4,
-          dated: returnItem.dated.toLocaleDateString(),
-          transaction_type: "RETURN (UNMATCHED)",
-          reference_no: returnItem.grn_no,
-          invoice_no: returnItem.invoice_no,
-          party_code: returnItem.party_code,
-          party_name: returnItem.party_name,
-          godown: returnItem.godown,
-
-          item_code: returnItem.return_item_code,
-          item_name: returnItem.return_item_name,
-          dispatch_qty: 0,
-          returned_qty: returnItem.return_packing_qty,
-          qty_per_pack: returnItem.return_qty_per_pack,
-          total_items: returnItem.return_total_qty,
-          balance_qty: 0,
-
-          quantity_change: returnItem.return_packing_qty,
-          opening_balance: 0,
-          closing_balance: 0,
-
-          reference_to: returnItem.reference_dispatch_no,
-          note: "No matching dispatch found",
-          returnable: "-",
-        });
-      }
-    });
-
-    // Calculate running balances for each packing item
-    const itemBalances = new Map();
-
-    // Sort by date for proper balance calculation
-    const sortedData = [...reportData].sort((a, b) =>
-      new Date(a.dated) - new Date(b.dated)
-    );
-
-    // Calculate opening balance (before report period) with proper type casting
-    if (filters.dateFrom) {
-      // Get opening balance: All dispatches minus returns before dateFrom
-      const openingQuery = await prisma.$queryRaw`
-        WITH packing_summary AS (
-          -- Get dispatches before dateFrom
-          SELECT 
-            t.packing_material_code as item_code,
-            COALESCE(SUM(t.no_of_pack), 0) as dispatched_qty
-          FROM "Transactions" t
-          JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
-          WHERE tm.tran_code = 6
-            AND tm.dated < ${new Date(filters.dateFrom)}
-            AND t.returnable = true
-            AND t.packing_material_code IS NOT NULL
-            ${filters.item ? Prisma.sql`AND t.packing_material_code = ${parseInt(filters.item)}` : Prisma.empty}
-            ${filters.customer ? Prisma.sql`AND tm.pycd = ${parseInt(filters.customer)}` : Prisma.empty}
-          GROUP BY t.packing_material_code
-        ),
-        return_summary AS (
-          -- Get returns before dateFrom
-          SELECT 
-            t.itcd as item_code,
-            COALESCE(SUM(t.no_of_pack), 0) as returned_qty
-          FROM "Transactions" t
-          JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
-          WHERE tm.tran_code = 4
-            AND tm.dated < ${new Date(filters.dateFrom)}
-            AND tm.ref_dispatch_no IS NOT NULL
-            ${filters.item ? Prisma.sql`AND t.itcd = ${parseInt(filters.item)}` : Prisma.empty}
-            ${filters.vendor ? Prisma.sql`AND tm.pycd = ${parseInt(filters.vendor)}` : Prisma.empty}
-          GROUP BY t.itcd
-        )
-        SELECT 
-          COALESCE(p.item_code, r.item_code) as item_code,
-          COALESCE(p.dispatched_qty, 0) - COALESCE(r.returned_qty, 0) as opening_balance
-        FROM packing_summary p
-        FULL OUTER JOIN return_summary r ON p.item_code = r.item_code
-      `;
-
-      openingQuery.forEach((row) => {
-        if (row.item_code) {
-          itemBalances.set(row.item_code, {
-            running_balance: Number(row.opening_balance) || 0,
-          });
-        }
-      });
-    }
-
-    // Apply period transactions to calculate running balance
-    sortedData.forEach((row) => {
-      const itemCode = row.item_code;
-
-      if (!itemBalances.has(itemCode)) {
-        itemBalances.set(itemCode, { running_balance: 0 });
-      }
-
-      const balance = itemBalances.get(itemCode);
-      const opening = balance.running_balance;
-
-      // Update balance based on transaction
-      balance.running_balance += Number(row.quantity_change);
-
-      // Update row with calculated balances
-      row.opening_balance = opening;
-      row.closing_balance = balance.running_balance;
-    });
-
-    return sortedData;
-
-  } catch (error) {
-    console.error("Error in getReturnablePackingReport:", error);
-    throw new Error(`Failed to generate returnable packing report: ${error.message}`);
-  }
-}
-function calculateReturnablePackingSummary(data) {
-  if (!data || data.length === 0) {
-    return {
-      total_transactions: 0,
-      total_dispatches: 0,
-      total_returns: 0,
-      total_dispatched_qty: 0,
-      total_returned_qty: 0,
-      net_outstanding_qty: 0,
-      matched_returns: 0,
-      unmatched_returns: 0,
-      current_balance: 0,
-    };
-  }
-
-  const summary = {
-    total_transactions: data.length,
-    total_dispatches: 0,
-    total_returns: 0,
-    total_dispatched_qty: 0,
-    total_returned_qty: 0,
-    matched_returns: 0,
-    unmatched_returns: 0,
-  };
-
-  data.forEach((row) => {
-    if (row.transaction_type === "DISPATCH") {
-      summary.total_dispatches++;
-      summary.total_dispatched_qty += row.dispatch_qty || 0;
-    } else if (row.transaction_type.includes("RETURN")) {
-      summary.total_returns++;
-      summary.total_returned_qty += row.returned_qty || 0;
-
-      if (row.transaction_type.includes("UNMATCHED")) {
-        summary.unmatched_returns++;
-      } else {
-        summary.matched_returns++;
-      }
-    }
-  });
-
-  summary.net_outstanding_qty = summary.total_dispatched_qty - summary.total_returned_qty;
-
-  // Calculate current balance from the latest closing balance of each item
-  const latestBalances = {};
-  data.forEach(row => {
-    // Only use valid closing balances
-    if (row.closing_balance !== undefined && row.closing_balance !== null) {
-      latestBalances[row.item_code] = row.closing_balance;
-    }
-  });
-
-  summary.current_balance = Object.values(latestBalances).reduce((sum, bal) => sum + Number(bal || 0), 0);
-
-  return summary;
-}
-
 async function getMonthlyStockReport(filters = {}) {
   try {
     const { year, month, item, category, godown } = filters;

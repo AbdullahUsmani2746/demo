@@ -99,6 +99,7 @@ const baseFormSchema = z.object({
   emergencyContactPhone: z.string().max(25, "Max 25 characters").optional().nullable(),
   residentialAddress: z.string().max(255, "Max 255 characters").optional().nullable(),
   bloodGroup: z.enum(BLOOD_GROUPS.map((b) => b.value)).optional().nullable(),
+  salaryCategory: z.preprocess((v) => (v === "" ? null : v), z.enum(["DIRECT", "INDIRECT"]).optional().nullable()),
   nextOfKinName: z.string().max(100, "Max 100 characters").optional().nullable(),
   nextOfKinRelation: z.string().max(50, "Max 50 characters").optional().nullable(),
   nextOfKinPhone: z.string().max(25, "Max 25 characters").optional().nullable(),
@@ -145,7 +146,7 @@ function buildFormSchema(hasExistingUser) {
 
 const SECTIONS = [
   { value: "personal", label: "Personal", icon: User, fields: ["id", "firstName", "middleName", "surname", "dob", "gender", "cnicNumber", "bloodGroup", "qualification", "status"] },
-  { value: "job", label: "Job", icon: Briefcase, fields: ["departmentId", "designationId", "workLocationId", "branchId", "employeetypeId", "employeecatId", "managerId", "costCenterId", "hireDate", "dor"] },
+  { value: "job", label: "Job", icon: Briefcase, fields: ["departmentId", "designationId", "workLocationId", "branchId", "employeetypeId", "employeecatId", "salaryCategory", "managerId", "costCenterId", "hireDate", "dor"] },
   { value: "contact", label: "Contact", icon: Phone, fields: ["phoneNumber", "emailAddress", "cityId", "residentialAddress", "emergencyContactName", "emergencyContactPhone", "nextOfKinName", "nextOfKinRelation", "nextOfKinPhone"] },
   { value: "pay", label: "Pay & Bank", icon: Wallet, fields: ["paymentMethod", "payType", "payFrequency", "rate", "bankId", "bank_bracnhId", "accountName", "accountNumber"] },
   { value: "login", label: "Login & Roles", icon: ShieldCheck, fields: ["username", "email", "role", "password", "confirmPassword"] },
@@ -200,6 +201,7 @@ function employeeToFormValues(employee) {
     emergencyContactPhone: e.emergencyContactPhone || "",
     residentialAddress: e.residentialAddress || "",
     bloodGroup: e.bloodGroup ?? null,
+    salaryCategory: e.salaryCategory ?? null,
     nextOfKinName: e.nextOfKinName || "",
     nextOfKinRelation: e.nextOfKinRelation || "",
     nextOfKinPhone: e.nextOfKinPhone || "",
@@ -886,6 +888,14 @@ export default function EmployeeFormModal({
                 <LookupSelect control={control} name="workLocationId" label="Work location" options={lookups?.workLocations} labelKey="location_name" error={errors.workLocationId} loading={lookupsLoading} />
                 <LookupSelect control={control} name="employeetypeId" label="Employee type" options={lookups?.employeeTypes} labelKey="name" error={errors.employeetypeId} loading={lookupsLoading} />
                 <LookupSelect control={control} name="employeecatId" label="Employee category" options={lookups?.employeeCategories} labelKey="name" error={errors.employeecatId} loading={lookupsLoading} />
+                <EnumSelect
+                  control={control}
+                  name="salaryCategory"
+                  label="Salary category"
+                  allowNone
+                  error={errors.salaryCategory}
+                  options={[{ value: "DIRECT", label: "Direct" }, { value: "INDIRECT", label: "Indirect" }]}
+                />
                 <TextField register={register} name="hireDate" label="Hire date" type="date" required error={errors.hireDate} />
                 <TextField register={register} name="dor" label="Date of regularization" type="date" error={errors.dor} />
               </div>

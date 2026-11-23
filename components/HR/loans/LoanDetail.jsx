@@ -136,6 +136,7 @@ export default function LoanDetail({ loanId, onClose, meta }) {
                   {l.disbursed_on
                     ? ` · paid out ${l.disbursed_on}${l.disburse_tran_id ? ` (payment voucher #${l.disburse_tran_id})` : ""}${l.disbursement_ref ? ` · ${l.disbursement_ref}` : ""}`
                     : l.status === "active" ? " · not paid out yet — payroll does not recover it until it is" : ""}
+                  {!l.disbursed_on && l.status === "active" && l.pay_with ? ` · with ${l.pay_with.names.join(" / ")} for payment` : ""}
                   {" · account "}{l.acno ?? "default"}
                 </p>
                 {l.reason && <p className="mt-2 text-sm text-foreground/90">“{l.reason}”</p>}

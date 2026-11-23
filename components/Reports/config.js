@@ -7990,15 +7990,18 @@ export const REPORT_CONFIG = {
       by: "acno",
       labelFields: ["acno", "acname"],
       labelSeparator: " — ",
-      activateWhen: { filter: "account", minSelected: 2 },
+      // No account picked = all cash & bank accounts → one block each.
+      activateWhen: { filter: "account", minSelected: 2, emptyMeansAll: true },
       subtotalLabel: "Account Total",
       showHeader: true,
     },
     showSummary: true,
     title: "Cash And Bank Books",
     description:
-      "Detailed ledger entries for a specific account showing running balance",
-    apiEndpoint: "/api/reports/accountLedger",
+      "Every cash and bank account with its running balance — or pick the ones you want",
+    // Its own report key: no account picked = all cash & bank accounts
+    // (app/api/reports/[reportType]/route.js, case "cbBook").
+    apiEndpoint: "/api/reports/cbBook",
     filters: [
       {
         name: "dateFrom", label: "From Date", type: "date", required: true, default: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
@@ -8013,7 +8016,8 @@ export const REPORT_CONFIG = {
         valueKey: "acno",
         options: "accounts",
         apiEndpoint: `/api/accounts/acno?${CASH_BANK_GROUP_PARAM}`,
-        required: true,
+        // Empty (the default) = all cash & bank accounts.
+        placeholder: "All cash & bank accounts",
         clearable: true,
         multiple: true,
       },
@@ -11470,9 +11474,13 @@ export const REPORT_CONFIG = {
     },
   },
 
+  // Returnable Packing (lib/reports/returnablePacking.js): who holds whose
+  // drums — customers (Dispatch out, Dispatch Return / empty-drum GRN back)
+  // and vendors (GRN in, GRN Return back). Balance = one row per party ×
+  // packing, drilling to its Movements (one row per voucher line).
   returnablePacking: {
-    title: "Returnable Packing Material Report",
-    description: "Track dispatch (OUT) and return (IN) of returnable packing materials",
+    title: "Returnable Packing",
+    description: "Returnable drums with customers and vendors' drums with us — balance, age and every movement",
     apiEndpoint: "/api/reports/returnablePacking",
 
     filters: [
@@ -11491,6 +11499,41 @@ export const REPORT_CONFIG = {
         default: new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0),
       },
       {
+        name: "view",
+        label: "View",
+        type: "select",
+        section: "display",
+        options: [
+          { value: "balance", label: "Balance — one row per party and packing" },
+          { value: "movements", label: "Movements — one row per voucher line" },
+        ],
+        default: { value: "balance", label: "Balance — one row per party and packing" },
+        clearable: false,
+      },
+      {
+        name: "side",
+        label: "Customers / Vendors",
+        type: "select",
+        options: [
+          { value: "all", label: "Both" },
+          { value: "customer", label: "Customers — our drums with them" },
+          { value: "vendor", label: "Vendors — their drums with us" },
+        ],
+        default: { value: "all", label: "Both" },
+        clearable: false,
+      },
+      {
+        name: "party",
+        label: "Party",
+        type: "select",
+        nameKeys: ["acno", "acname"],
+        separator: " - ",
+        valueKey: "acno",
+        options: "accounts",
+        apiEndpoint: "/api/accounts/acno?group=customers,vendors",
+        clearable: true,
+      },
+      {
         name: "item",
         label: "Packing Material",
         type: "select",
@@ -11502,17 +11545,6 @@ export const REPORT_CONFIG = {
         clearable: true,
       },
       {
-        name: "customer",
-        label: "Customer",
-        type: "select",
-        nameKeys: ["acno", "acname"],
-        separator: " - ",
-        valueKey: "acno",
-        options: "accounts",
-        apiEndpoint: `/api/accounts/acno?${CUSTOMER_GROUP_PARAM}`, // Customers only
-        clearable: true,
-      },
-      {
         name: "godown",
         label: "Godown",
         type: "select",
@@ -11521,57 +11553,105 @@ export const REPORT_CONFIG = {
         apiEndpoint: "/api/setup/godowns?includeInactive=true",
         clearable: true,
       },
+      {
+        name: "showSettled",
+        label: "Settled balances",
+        type: "select",
+        section: "display",
+        options: [
+          { value: "false", label: "Hide (balance 0, nothing this period)" },
+          { value: "true", label: "Show" },
+        ],
+        default: { value: "false", label: "Hide (balance 0, nothing this period)" },
+        clearable: false,
+      },
     ],
 
     columns: [
       { field: "dated", headerName: "Date", width: 20, type: "date" },
-      { field: "transaction_type", headerName: "Type", width: 25 },
-      { field: "reference_no", headerName: "Ref No", width: 20 },
-      { field: "party_name", headerName: "Party", width: 50 },
-      { field: "godown", headerName: "Godown", width: 30 },
-
-      // Packing material details
-      { field: "item_code", headerName: "Code", width: 20 },
-      { field: "item_name", headerName: "Packing Material", width: 50 },
-      {
-        field: "dispatch_qty",
-        headerName: "Dispatch Qty",
-        width: 20,
-        type: "number",
-        valueGetter: (params) => params.row.dispatch_qty || 0
-      },
-      {
-        field: "returned_qty",
-        headerName: "Return Qty",
-        width: 20,
-        type: "number",
-        valueGetter: (params) => params.row.returned_qty || 0
-      },
-      {
-        field: "balance_qty",
-        headerName: "Balance",
-        width: 20,
-        type: "number",
-        valueGetter: (params) => params.row.balance_qty || 0
-      },
-
+      { field: "doc_type", headerName: "Document", width: 22 },
+      { field: "doc_no", headerName: "Doc No", width: 16 },
+      { field: "manual_no", headerName: "Manual No", width: 18 },
+      { field: "side", headerName: "Side", width: 14 },
+      { field: "pycd", headerName: "Party Code", width: 16 },
+      { field: "party", headerName: "Party", width: 40 },
+      { field: "pack_code", headerName: "Code", width: 16 },
+      { field: "pack_name", headerName: "Packing Material", width: 36 },
+      { field: "how", headerName: "Movement", width: 30 },
+      { field: "godown", headerName: "Godown", width: 22 },
+      { field: "opening", headerName: "Opening", width: 16, type: "number", showTotal: true },
+      { field: "added", headerName: "Out / Received", width: 18, type: "number", showTotal: true },
+      { field: "returned", headerName: "Returned", width: 16, type: "number", showTotal: true },
+      { field: "balance", headerName: "Balance", width: 16, type: "number", showTotal: true },
+      { field: "with_whom", headerName: "Held", width: 20 },
+      { field: "oldest_out", headerName: "Oldest Out Since", width: 20, type: "date" },
+      { field: "days_out", headerName: "Days Out", width: 14, type: "number" },
     ],
 
+    // Wide-report layout (rule 15). Balance rows drill to their Movements;
+    // movement rows carry tran_id + tran_code and open their voucher.
+    layout: (filters) =>
+      String(filters?.view?.value ?? filters?.view ?? "balance") === "movements"
+        ? {
+            pinned: ["dated", "doc_no"],
+            views: [
+              {
+                id: "movements",
+                label: "Movements",
+                fields: ["dated", "doc_type", "doc_no", "manual_no", "side", "party", "pack_name", "how", "godown", "added", "returned", "balance"],
+              },
+              { id: "all", label: "All columns" },
+            ],
+            defaultView: "movements",
+            card: {
+              title: (r) => r.party || "",
+              subtitle: (r) => [r.doc_type, r.doc_no, r.pack_name, r.how].filter(Boolean).join(" · "),
+              figures: ["added", "returned", "balance"],
+            },
+          }
+        : {
+            pinned: ["party", "pack_name"],
+            views: [
+              {
+                id: "balance",
+                label: "Balance",
+                fields: ["side", "pycd", "party", "pack_code", "pack_name", "opening", "added", "returned", "balance", "with_whom", "oldest_out", "days_out"],
+              },
+              { id: "all", label: "All columns" },
+            ],
+            defaultView: "balance",
+            rowGroupBy: "side",
+            card: {
+              title: (r) => r.party || "",
+              subtitle: (r) => [r.side, r.pack_name, r.days_out != null && `${r.days_out} days out`].filter(Boolean).join(" · "),
+              figures: ["balance", "added", "returned", "days_out"],
+            },
+          },
+    drill: [
+      {
+        label: "Open movements",
+        when: (row) => row.pack_itcd != null && row.side_key != null,
+        href: (row, filters) => {
+          const p = new URLSearchParams();
+          p.set("view", "movements");
+          p.set("side", row.side_key);
+          if (row.pycd != null) p.set("party", String(row.pycd));
+          p.set("item", String(row.pack_itcd));
+          if (filters?.dateFrom) p.set("dateFrom", String(filters.dateFrom));
+          if (filters?.dateTo) p.set("dateTo", String(filters.dateTo));
+          return `/accounting/reports/returnablePacking?${p.toString()}`;
+        },
+      },
+    ],
 
     summaryFields: [
-      { field: "total_transactions", label: "Total Transactions", type: "number" },
-      { field: "total_dispatches", label: "Total Dispatches", type: "number" },
-      { field: "total_returns", label: "Total Returns", type: "number" },
-      { field: "total_dispatched_qty", label: "Total Dispatched Qty", type: "number" },
-      { field: "total_returned_qty", label: "Total Returned Qty", type: "number" },
-      { field: "net_outstanding_qty", label: "Net Outstanding Qty", type: "number" },
+      { field: "with_customers", label: "Drums with customers", type: "number" },
+      { field: "with_us", label: "Vendors' drums with us", type: "number" },
+      { field: "parties_owing", label: "Customers holding drums", type: "number" },
+      { field: "oldest_days", label: "Oldest out (days)", type: "number" },
     ],
 
-    exportOptions: {
-      pdf: true,
-      excel: true,
-      csv: false,
-    },
+    exportOptions: { pdf: true, excel: true, csv: false },
   },
   monthlyStock: {
     title: "Monthly Stock Report",
@@ -15738,6 +15818,9 @@ REPORT_CONFIG.exbondReport = {
 // employees the person may see. Defaults and range limits (a year of days,
 // three years of months) are enforced there too.
 const HR_FILTERS = {
+  day: () => [
+    { name: "day", label: "Date", type: "date", required: true, default: new Date() },
+  ],
   month: () => [
     { name: "month", label: "Month", type: "select", options: hrMonthOptions(), default: hrMonthOptions()[0], required: true },
   ],

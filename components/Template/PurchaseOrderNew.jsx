@@ -1,7 +1,11 @@
 import { jsPDF } from "jspdf";
+import { orderPdfFromArgs } from "./OrderLetterhead";
+import { featureAsync } from "@/lib/features/client";
 import { companyShortName } from "@/lib/companyName";
 
-export const generatePurchaseOrderPDF = async (
+// The standard layout — printed while Settings → Features "Print Purchase / Sale
+// Orders on the letterhead" (documents.orderLetterhead) is off.
+export const generateImportPurchaseOrderPDF = async (
   orderData,
   session = null,
   currencyData = null,
@@ -472,3 +476,8 @@ export const generatePurchaseOrderPDF = async (
 
   return doc;
 };
+
+// Every print button calls this: the letterhead (components/Template/OrderLetterhead.js)
+// when documents.orderLetterhead is on, else the standard layout. Same call shapes.
+export const generatePurchaseOrderPDF = async (...args) =>
+  (await featureAsync("documents.orderLetterhead")) ? orderPdfFromArgs("purchase", args) : generateImportPurchaseOrderPDF(...args);

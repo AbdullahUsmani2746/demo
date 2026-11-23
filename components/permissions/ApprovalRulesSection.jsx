@@ -7,11 +7,14 @@ import { useRoles } from "@/hooks/useRoles";
 //   · message to the requester · active
 // e.g. Material Issue · "Production #" is empty → the approver (a person or a role).
 // Engine: lib/approvals/rules.js + conditions.js; requests: /dashboard/approvals.
+// "Approve in steps": the entry goes from step to step (any form) and the last
+// step posts it — lib/approvals/docChains.js. Step editor shared with the HR chains.
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import Select from "react-select";
 import { toast } from "sonner";
-import { Plus, Trash2, Save, X, Loader2, Workflow, Pencil, Inbox } from "lucide-react";
+import { Plus, Trash2, Save, X, Loader2, Workflow, Pencil, Inbox, GitBranch, ChevronRight } from "lucide-react";
+import { StepEditor, blankStep } from "@/components/permissions/HrChainsSection";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -24,7 +27,7 @@ import { CONDITION_OPS, describeConditions } from "@/lib/approvals/conditions";
 
 const INP = "h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:bg-muted/60 disabled:text-muted-foreground";
 const LABEL = "text-[11px] font-bold uppercase tracking-wider text-primary";
-const blank = { name: "", doc_type: "", match: "all", applies_on: "create", mode: "hold", conditions: [{ field: "", op: "empty", value: "" }], approver_users: [], approver_roles: [], message: "", is_active: true };
+const blank = { name: "", doc_type: "", match: "all", applies_on: "create", mode: "hold", conditions: [{ field: "", op: "empty", value: "" }], approver_users: [], approver_roles: [], steps: [], watchers: [], message: "", is_active: true };
 const MATCH = [
   { value: "all", label: "ALL of these are true" },
   { value: "any", label: "ANY of these is true" },
@@ -46,7 +49,31 @@ function Pick({ options, value, onChange, ariaLabel }) {
 }
 
 function RuleEditor({ meta, rule, onClose, onSaved }) {
-  const [r, setR] = useState(() => ({ ...blank, ...(rule || {}), conditions: rule?.conditions?.length ? rule.conditions : blank.conditions }));
+  const [r, setR] = useState(() => ({
+    ...blank,
+    ...(rule || {}),
+    conditions: rule?.conditions?.length ? rule.conditions : blank.conditions,
+    steps: (Array.isArray(rule?.steps) ? rule.steps : []).map((s) => ({ ...blankStep(0), ...s })),
+    watchers: Array.isArray(rule?.watchers) ? rule.watchers : [],
+  }));
+  const inSteps = (r.mode || "hold") === "hold" && r.steps.length > 0;
+  const setStep = (i, st) => set({ steps: r.steps.map((y, j) => (j === i ? st : y)) });
+  const moveStep = (i, d) => {
+    const steps = [...r.steps];
+    [steps[i], steps[i + d]] = [steps[i + d], steps[i]];
+    set({ steps });
+  };
+  const toggleSteps = (on) =>
+    set(
+      on
+        ? {
+            steps: [
+              { ...blankStep(1), label: "Review", users: r.approver_users, roles: r.approver_roles },
+              { ...blankStep(2), label: "Final approval" },
+            ],
+          }
+        : { steps: [], watchers: [] },
+    );
   const [saving, setSaving] = useState(false);
   const form = meta.forms.find((f) => f.key === r.doc_type);
   const fields = form?.fields ?? [];
@@ -58,7 +85,7 @@ function RuleEditor({ meta, rule, onClose, onSaved }) {
   async function save() {
     setSaving(true);
     try {
-      const body = { ...r, conditions: r.conditions.filter((c) => c.field) };
+      const body = { ...r, conditions: r.conditions.filter((c) => c.field), steps: inSteps ? r.steps : [] };
       if (r.id) await axios.put("/api/approvals/rules", body);
       else await axios.post("/api/approvals/rules", body);
       toast.success("Rule saved — it applies to new entries from now on.");
@@ -164,6 +191,53 @@ function RuleEditor({ meta, rule, onClose, onSaved }) {
           </p>
         </div>
 
+        {(r.mode || "hold") === "hold" && (
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-background p-3 text-sm">
+            <Switch checked={inSteps} onCheckedChange={toggleSteps} className="mt-0.5" />
+            <span>
+              <span className="flex items-center gap-1.5 font-semibold"><GitBranch className="h-4 w-4 text-primary" /> Approve in steps</span>
+              <span className="block text-xs text-muted-foreground">
+                The entry goes from one step to the next (e.g. Accounts review → Manager → CEO). It is posted only after the last step
+                approves; anyone on a step can reject it. Entries already waiting keep the steps they started with.
+              </span>
+            </span>
+          </label>
+        )}
+
+        {inSteps ? (
+          <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
+            <div className={LABEL}>Steps — in order (the last one posts the entry)</div>
+            {r.steps.map((st, i) => (
+              <StepEditor
+                key={st.id}
+                step={st}
+                index={i}
+                count={r.steps.length}
+                meta={{ users: meta.users, roles: meta.roles }}
+                payAllowed={false}
+                showFinal={false}
+                managerLabel="Reporting manager of the person who saved it"
+                onChange={(x) => setStep(i, x)}
+                onMove={(d) => moveStep(i, d)}
+                onRemove={() => set({ steps: r.steps.filter((_, j) => j !== i) })}
+              />
+            ))}
+            <Button type="button" variant="outline" size="sm" className="h-8 gap-1 bg-background text-xs" onClick={() => set({ steps: [...r.steps, blankStep(r.steps.length + 1)] })}>
+              <Plus className="h-3.5 w-3.5" /> Add step
+            </Button>
+            <label className="block space-y-1">
+              <span className={LABEL}>Watchers — told at every step (optional)</span>
+              <SearchSelect
+                multi
+                width="100%"
+                placeholder="Search people…"
+                value={r.watchers}
+                options={meta.users.map((u) => ({ value: u.id, label: `${u.name} · ${roleLabel(u.role)}` }))}
+                onChange={(v) => set({ watchers: v ?? [] })}
+              />
+            </label>
+          </div>
+        ) : (
         <div className="grid gap-3 md:grid-cols-2">
           <label className="space-y-1">
             <span className={LABEL}>Approvers — people</span>
@@ -196,6 +270,7 @@ function RuleEditor({ meta, rule, onClose, onSaved }) {
             </div>
           </div>
         </div>
+        )}
 
         <label className="block space-y-1">
           <span className={LABEL}>Message to the person saving (optional)</span>
@@ -242,6 +317,11 @@ export default function ApprovalRulesSection() {
   }, []);
 
   const userName = useMemo(() => new Map((meta?.users ?? []).map((u) => [u.id, u.name])), [meta]);
+  const stepWho = (st) => [
+    ...(st.users || []).map((id) => userName.get(id) || id),
+    ...(st.roles || []).map((x) => `${roleLabel(x)} role`),
+    ...(st.manager ? ["reporting manager"] : []),
+  ];
 
   async function remove(rule) {
     try {
@@ -281,7 +361,7 @@ export default function ApprovalRulesSection() {
               <span className="rounded-full bg-primary/10 px-2.5 text-xs font-bold text-primary">{meta.rules.length}</span>
             </h3>
             <p className="text-xs text-muted-foreground">
-              A new entry matching a rule is held — nothing posted — until one of its approvers approves it on{" "}
+              A new entry matching a rule is held — nothing posted — until its approvers (one, or step by step) approve it on{" "}
               <a href="/dashboard/approvals" className="text-primary underline">Approvals</a>.
             </p>
           </div>
@@ -343,8 +423,24 @@ export default function ApprovalRulesSection() {
                     {describeConditions(rule, form?.fields ?? [])}
                   </p>
                   <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span className="text-muted-foreground">Approved by:</span>
-                    {who.map((w) => <span key={w} className="rounded-full bg-muted px-2 py-0.5 font-medium">{w}</span>)}
+                    {rule.steps?.length ? (
+                      <>
+                        <span className="inline-flex items-center gap-1 text-muted-foreground"><GitBranch className="h-3 w-3" /> In steps:</span>
+                        {rule.steps.map((st, i) => (
+                          <span key={st.id ?? i} className="inline-flex items-center gap-1">
+                            <span className="rounded-full bg-muted px-2 py-0.5 font-medium" title={stepWho(st).join(", ")}>
+                              {i + 1}. {st.label}
+                            </span>
+                            {i < rule.steps.length - 1 && <ChevronRight className="h-3 w-3 text-muted-foreground" />}
+                          </span>
+                        ))}
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-muted-foreground">Approved by:</span>
+                        {who.map((w) => <span key={w} className="rounded-full bg-muted px-2 py-0.5 font-medium">{w}</span>)}
+                      </>
+                    )}
                     <span className={`rounded-full px-2 py-0.5 font-semibold ${rule.is_active ? "bg-[#edf2ee] text-[#2f5139]" : "bg-muted text-muted-foreground"}`}>
                       {rule.is_active ? "On" : "Off"}
                     </span>

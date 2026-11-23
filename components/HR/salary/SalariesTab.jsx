@@ -29,6 +29,39 @@ export default function SalariesTab({ meta }) {
   const [q, setQ] = useState("");
   const [revise, setRevise] = useState(null);
   const [history, setHistory] = useState(null);
+  const [taxBusy, setTaxBusy] = useState(null);
+
+  // Income tax per employee: By slabs (default) / Not deducted.
+  async function setTaxMode(x, mode) {
+    if (mode === "NONE" && !window.confirm(`Stop deducting income tax for ${x.employee.name}? Payroll follows it from the next compute.`)) return;
+    setTaxBusy(x.employee.id);
+    try {
+      const r = await api("/api/hr/salary/tax", { method: "PUT", body: { employee_id: x.employee.id, mode } });
+      toast.success(r.message);
+      qc.invalidateQueries({ queryKey: ["hr-salaries"] });
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setTaxBusy(null);
+    }
+  }
+  const TaxCell = ({ x }) =>
+    canRevise ? (
+      <NativeSelect
+        aria-label={`Income tax for ${x.employee.name}`}
+        value={x.tax_mode || "SLAB"}
+        disabled={taxBusy === x.employee.id}
+        onChange={(e) => setTaxMode(x, e.target.value)}
+        className={cn("h-8 text-xs", x.tax_mode === "NONE" && "border-[#c9a65a] bg-[#f5f0e6] text-[#5f4b1f] font-semibold")}
+      >
+        <option value="SLAB">By slabs</option>
+        <option value="NONE">Not deducted</option>
+      </NativeSelect>
+    ) : x.tax_mode === "NONE" ? (
+      <Chip tone="warn">Not deducted</Chip>
+    ) : (
+      <span className="text-xs text-muted-foreground">By slabs</span>
+    );
   useEffect(() => {
     const t = setTimeout(() => setQ(search.trim()), 300);
     return () => clearTimeout(t);
@@ -115,6 +148,10 @@ export default function SalariesTab({ meta }) {
                   <Hourglass className="h-3 w-3 shrink-0" />Revision #S-{x.pending.id} from {x.pending.effective_from}: {fmtMoney(x.pending.totals.gross)} waiting
                 </p>
               )}
+              <div className="mt-3 flex items-center justify-between gap-2 text-xs">
+                <span className="text-muted-foreground">Income tax</span>
+                <TaxCell x={x} />
+              </div>
               <div className="mt-3 flex gap-2">
                 <Button size="sm" variant="outline" className="h-9 flex-1" onClick={() => setHistory(x.employee)}><History className="h-4 w-4 mr-1.5" />History</Button>
                 {canRevise && !x.pending && (
@@ -146,11 +183,12 @@ export default function SalariesTab({ meta }) {
                 <th className={cn(TH, "text-right")}>Gross</th>
                 <th className={cn(TH, "text-right")}>Net</th>
                 <th className={TH}>Since</th>
+                <th className={TH}>Income tax</th>
                 <th className={TH}><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
-              {isLoading && [...Array(8)].map((_, i) => <tr key={i}><td colSpan={8} className="px-4 py-3"><Skeleton className="h-7" /></td></tr>)}
+              {isLoading && [...Array(8)].map((_, i) => <tr key={i}><td colSpan={9} className="px-4 py-3"><Skeleton className="h-7" /></td></tr>)}
               {!isLoading && rows.map((x) => {
                 const t = x.current?.totals;
                 return (
@@ -168,6 +206,7 @@ export default function SalariesTab({ meta }) {
                     ) : (
                       <td colSpan={6} className="px-4 py-2.5"><Chip tone="warn">No salary set</Chip></td>
                     )}
+                    <td className="px-4 py-2.5"><TaxCell x={x} /></td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       {x.pending && (
                         <span className="mr-2 inline-flex items-center gap-1 rounded-full bg-[#f5f0e6] px-2 py-0.5 text-xs font-semibold text-[#5f4b1f]" title={`Revision #S-${x.pending.id} from ${x.pending.effective_from}: gross ${fmtMoney(x.pending.totals.gross)}`}>
@@ -192,7 +231,7 @@ export default function SalariesTab({ meta }) {
                   <td className="px-4 py-2.5 text-right tabular-nums text-red-800">{totals.ded ? `−${fmtMoney(totals.ded)}` : "—"}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-primary">{fmtMoney(totals.gross)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{fmtMoney(totals.net)}</td>
-                  <td className="px-4 py-2.5" colSpan={2} />
+                  <td className="px-4 py-2.5" colSpan={3} />
                 </tr>
               </tfoot>
             )}
