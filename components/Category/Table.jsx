@@ -117,7 +117,6 @@ import { generateUnifiedPDF } from "../Template/UnifiedReport";
 import { generateSalesOrderPDF } from "../Template/SalesOrder";
 import { toast } from "sonner";
 import ManualNoCell from "./ManualNoCell";
-import { useFeatures } from "@/hooks/useFeatures";
 import { generateDispatchNotePDF } from "../Template/Dispatch";
 import { generateDeliveryNotePDF } from "../Template/DeliveryNote";
 import { generateRequisitionNotePDF } from "../Template/RequistNote";
