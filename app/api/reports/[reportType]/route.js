@@ -3,7 +3,7 @@ import prisma from "@/lib/prisma";
 import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { checkPeriodLock } from "@/lib/periodLock";
 import { getOpening, getOpeningRates, getLatestOpeningPeriod, openingQtySql, openingQtyByGodownSql } from "@/lib/openingStock";
-import { REPORT_CONFIG, ENTERED_BY_REPORTS } from "@/components/Reports/config";
+import { REPORT_CONFIG, ENTERED_BY_REPORTS, reportDay, reportMonths } from "@/components/Reports/config";
 import { attachEnteredBy } from "@/lib/audit/enteredBy";
 import { getAccount, requireAccount, getAccountGroup, accountSettingError } from "@/lib/accounts/accountSettings";
 import { distributorFileCodes } from "@/lib/reports/distributorFiles";
@@ -48,6 +48,7 @@ import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingAppro
 import { getPosReport } from "@/lib/reports/pos";
 import { getReturnablePackingReport as getReturnablePackingBalances, returnablePackingSummary } from "@/lib/reports/returnablePacking";
 import { attachServices, serviceCategoryColumns, servicesByItem } from "@/lib/service/landedCost";
+import { linkedIssuesFor } from "@/lib/items/processLink";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
@@ -971,7 +972,17 @@ export async function GET(request, { params }) {
         summary = calculateStockActivityViewSummary(data);
         break;
       case "stockActivityWithRate":
-        data = await getStockActivityWithRateReport(filters);
+        // The screen only: an in-process item's rate takes in its production
+        // item's production (inProcessRate). Month-end opening (lib/
+        // openingStockGenerate.js) and COGS call without it — unchanged.
+        // "Purchase amounts" filter (amountBasis): gross (default) = before
+        // sales tax; net = with it, as the Purchase report's Net Amount and the
+        // old ERP — screen only, like inProcessRate (openings / COGS: gross).
+        data = await getStockActivityWithRateReport({
+          ...filters,
+          inProcessRate: true,
+          withTax: String((filters.amountBasis && typeof filters.amountBasis === "object" ? filters.amountBasis.value : filters.amountBasis) || "").toLowerCase() === "net",
+        });
         summary = calculateStockActivityWithRateSummary(data);
         break;
 
@@ -1155,6 +1166,9 @@ export async function GET(request, { params }) {
         data = trialBalanceAccountRows(flatData);
         break;
       }
+      case "monthlyBalanceSheet":
+        ({ data, summary } = await getMonthlyBalanceSheetReport(filters));
+        break;
       case "profitLoss": {
         const flatData = await getProfitLossReport(filters);
         summary = calculateTrialBalancePeriodSummary(flatData);
@@ -6451,6 +6465,230 @@ async function getTrialBalanceSheetReport(filters) {
   }));
 }
 
+// ── Monthly Balance Sheet ────────────────────────────────────────────────────
+// (Profit and Loss month on month is getProfitLossMonthlyReport further down.)
+// Ported from arcc (commit 555d86c8) onto SMS's chart: MBSCD (1 Assets,
+// 2 Liabilities, 3 Owner's Equity, 4 Income, 5 Expenses) › BSCD › MACNO ›
+// ACNO, with the same tran_codes and Dr / Cr rule as getTrialBalanceSheetReport
+// / getProfitLossReport, so the figures agree with those reports. One column
+// per month of the period (m_YYYY_MM, reportMonths in
+// components/Reports/config.js). Rows go out as a row_type stream
+// (header › accounts › total per tree level) read by the report's
+// layout.groupRows; the last row (net_row) is the Accumulated Profit / (Loss)
+// or the Profit / (Loss).
+
+// A filter date (local-midnight Date from the route, or a string) →
+// "YYYY-MM-DD" of the day the user picked, or the fallback.
+function reportYmd(value, fallback) {
+  const d = reportDay(value);
+  if (!d) return fallback;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Debit / credit of every account under the given main groups (MBSCD), summed
+// per "bucket": the month (YYYY_MM), or "OPEN" for everything before
+// openingBefore.
+async function getMonthlyAccountMovements({ mbscds, dateFrom, dateTo, openingBefore = null, accountIds = [] }) {
+  const bucketSql = openingBefore
+    ? Prisma.sql`CASE WHEN tm.dated < ${openingBefore}::date THEN 'OPEN' ELSE to_char(tm.dated, 'YYYY_MM') END`
+    : Prisma.sql`to_char(tm.dated, 'YYYY_MM')`;
+
+  const results = await prisma.$queryRaw`
+    WITH txn AS (
+      SELECT
+        t.acno,
+        a.acname,
+        a.macno,
+        m.macname,
+        m.bscd,
+        mb.mbscd,
+        mb."mbscdDetail",
+        b."bscdDetail",
+        ${bucketSql} AS bucket,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.damt,0)
+          ELSE 0
+        END AS debit_amount,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.camt,0)
+          ELSE 0
+        END AS credit_amount
+
+      FROM "Transactions" t
+      INNER JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
+      INNER JOIN "acno" a ON t.acno = a.acno
+      INNER JOIN "MACNO" m ON a.macno = m.macno
+      INNER JOIN "BSCD" b ON m.bscd = b.bscd
+      INNER JOIN "MBSCD" mb ON b.mbscd = mb.mbscd
+
+      WHERE tm.tran_code IN (1,2,3,4,5,6,9,10,12,21)
+        AND tm.dated <= ${dateTo}::date
+        ${dateFrom ? Prisma.sql`AND tm.dated >= ${dateFrom}::date` : Prisma.empty}
+        AND mb.mbscd IN (${Prisma.join(mbscds)})
+        ${accountIds.length ? Prisma.sql`AND t.acno IN (${Prisma.join(accountIds)})` : Prisma.empty}
+    )
+    SELECT
+      acno,
+      macno,
+      mbscd,
+      bscd,
+      "mbscdDetail",
+      "bscdDetail",
+      acname AS account,
+      macname AS macaccount,
+      bucket,
+      SUM(debit_amount)::float8 AS debit,
+      SUM(credit_amount)::float8 AS credit
+    FROM txn
+    GROUP BY acno, acname, macno, macname, bscd, mbscd, "mbscdDetail", "bscdDetail", bucket
+  `;
+
+  // One row per account, its buckets side by side
+  const byAccount = new Map();
+  for (const r of results) {
+    const acno = Number(r.acno);
+    let row = byAccount.get(acno);
+    if (!row) {
+      row = {
+        mbscd: r.mbscd ?? "",
+        mbscdName: r.mbscdDetail ?? "",
+        bscd: r.bscd ?? "",
+        bscdName: r.bscdDetail ?? "",
+        macno: r.macno != null ? Number(r.macno) : "",
+        macaccount: r.macaccount ?? "",
+        acno,
+        account: r.account ?? "",
+        debit: 0,
+        credit: 0,
+        buckets: {},
+      };
+      byAccount.set(acno, row);
+    }
+    const debit = Number(r.debit) || 0;
+    const credit = Number(r.credit) || 0;
+    row.debit += debit;
+    row.credit += credit;
+    row.buckets[r.bucket] = (row.buckets[r.bucket] || 0) + (debit - credit);
+  }
+
+  // Tree order: main group › sub group › main account › account name
+  const code = (v) => parseFloat(v) || 0;
+  return [...byAccount.values()]
+    .filter((r) => r.debit !== 0 || r.credit !== 0)
+    .sort(
+      (a, b) =>
+        code(a.mbscd) - code(b.mbscd) ||
+        code(a.bscd) - code(b.bscd) ||
+        code(a.macno) - code(b.macno) ||
+        String(a.account).localeCompare(String(b.account)),
+    );
+}
+
+// Sorted account rows → row_type stream for layout.groupRows. Total rows
+// carry no figures (the viewer sums the accounts). netRow { label, plus,
+// minus }: last row = Σ main groups in plus − Σ those in minus.
+function buildMonthlyAccountTreeRows(accounts, fields, netRow) {
+  const label = (no, name) => [no, name].filter((v) => v !== "" && v != null).join(" ");
+  const net = Object.fromEntries(fields.map((f) => [f, 0]));
+  const rows = [];
+  let mbKey = null;
+  let bsKey = null;
+  let macKey = null;
+
+  const closeMac = () => { if (macKey !== null) rows.push({ row_type: "macno_total" }); macKey = null; };
+  const closeBs = () => { closeMac(); if (bsKey !== null) rows.push({ row_type: "bscd_total" }); bsKey = null; };
+  const closeMb = () => { closeBs(); if (mbKey !== null) rows.push({ row_type: "mbscd_total" }); mbKey = null; };
+
+  for (const acc of accounts) {
+    const mb = String(acc.mbscd);
+    const bs = `${mb}/${acc.bscd}`;
+    const mac = `${bs}/${acc.macno}`;
+    if (mb !== mbKey) {
+      closeMb();
+      rows.push({ row_type: "mbscd_header", label: label(acc.mbscd, acc.mbscdName) });
+      mbKey = mb;
+    }
+    if (bs !== bsKey) {
+      closeBs();
+      rows.push({ row_type: "bscd_header", label: label(acc.bscd, acc.bscdName) });
+      bsKey = bs;
+    }
+    if (mac !== macKey) {
+      closeMac();
+      rows.push({ row_type: "macno_header", label: label(acc.macno, acc.macaccount) });
+      macKey = mac;
+    }
+
+    const line = {
+      row_type: "account_row",
+      acno: acc.acno,
+      account: acc.account,
+      mbscdName: acc.mbscdName,
+      bscdName: acc.bscdName,
+      macaccount: acc.macaccount,
+    };
+    fields.forEach((f) => { line[f] = acc[f] || 0; });
+    rows.push(line);
+
+    const mbNo = Number(acc.mbscd);
+    const sign = netRow?.plus?.includes(mbNo) ? 1 : netRow?.minus?.includes(mbNo) ? -1 : 0;
+    fields.forEach((f) => { net[f] += sign * (acc[f] || 0); });
+  }
+  closeMb();
+
+  if (netRow && rows.length) {
+    const line = { row_type: "net_row", account: netRow.label };
+    // Round to paisa and drop −0 so the row never shows "-0.00"
+    fields.forEach((f) => { line[f] = Math.round(net[f] * 100) / 100 || 0; });
+    rows.push(line);
+  }
+  return rows;
+}
+
+// Monthly Balance Sheet: each month column = the account's closing balance
+// (Dr − Cr) at that month end = opening (before From Date) + the months so
+// far. Liabilities (2) and Equity (3) × −1 so they read positive.
+async function getMonthlyBalanceSheetReport(filters) {
+  const today = reportYmd(new Date(), "");
+  const dateFrom = reportYmd(filters.dateFrom, `${today.slice(0, 4)}-01-01`);
+  const dateTo = reportYmd(filters.dateTo, today);
+  const months = reportMonths({ dateFrom, dateTo }).map((m) => m.field);
+
+  const accounts = await getMonthlyAccountMovements({ mbscds: [1, 2, 3], dateFrom: null, dateTo, openingBefore: dateFrom });
+  accounts.forEach((acc) => {
+    let running = acc.buckets.OPEN || 0;
+    months.forEach((f) => {
+      running += acc.buckets[f.slice(2)] || 0;
+      acc[f] = [2, 3].includes(Number(acc.mbscd)) ? 0 - running : running;
+    });
+  });
+
+  const total_debit = accounts.reduce((s, r) => s + r.debit, 0);
+  const total_credit = accounts.reduce((s, r) => s + r.credit, 0);
+  const summary = {
+    total_accounts: accounts.length,
+    total_debit,
+    total_credit,
+    diff: Number((total_debit - total_credit).toFixed(2)),
+  };
+  const data = buildMonthlyAccountTreeRows(accounts, months, {
+    label: "ACCUMULATED PROFIT / (LOSS)",
+    plus: [1],
+    minus: [2, 3],
+  });
+  return { data, summary };
+}
+
 async function getProfitLossReport(filters) {
   let { dateFrom, dateTo } = filters;
 
@@ -10499,6 +10737,11 @@ function calculateMonthlyStockValuationSummary(data) {
 export async function getStockActivityWithRateReport(filters = {}) {
   try {
     const { dateFrom, dateTo, product, category, godown, viewMode } = filters;
+    const inProcessRate = filters.inProcessRate === true;
+    // Purchases, purchase returns and sale returns at their Net Amount (gross +
+    // sales tax, the Purchase report's "Net Amount") — the report screen only.
+    // Month-end opening (lib/openingStockGenerate.js) and COGS call without it.
+    const withTax = filters.withTax === true;
 
     // Month/year derived from dateFrom — used for opening stock lookup
     const reportDate = dateFrom ? new Date(dateFrom) : new Date();
@@ -10591,10 +10834,12 @@ export async function getStockActivityWithRateReport(filters = {}) {
         -- Purchases (tran_code=4), sub_tran_id=1 lines only
         COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN t.qty              ELSE 0 END), 0) AS purchase_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN COALESCE(t.damt,0) ELSE 0 END), 0) AS purchase_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN COALESCE(t.st_amount,0) ELSE 0 END), 0) AS purchase_tax_amount,
 
         -- Purchase Returns (9)
         COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN t.qty              ELSE 0 END), 0) AS purchase_ret_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN COALESCE(t.camt,0) ELSE 0 END), 0) AS purchase_ret_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN COALESCE(t.st_amount,0) ELSE 0 END), 0) AS purchase_ret_tax_amount,
 
         -- Sales (6)
         COALESCE(SUM(CASE WHEN tm.tran_code = 6  THEN t.qty                      ELSE 0 END), 0) AS sale_qty,
@@ -10603,6 +10848,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
         -- Sale Returns (10)
         COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN t.qty                      ELSE 0 END), 0) AS sale_ret_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN COALESCE(t.damt,0)         ELSE 0 END), 0) AS sale_ret_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN COALESCE(t.st_amount,0)    ELSE 0 END), 0) AS sale_ret_tax_amount,
 
         -- POS (5)
         COALESCE(SUM(CASE WHEN tm.tran_code = 5  THEN t.qty                      ELSE 0 END), 0) AS pos_qty,
@@ -10680,6 +10926,17 @@ export async function getStockActivityWithRateReport(filters = {}) {
       }
     }
 
+
+    // ── 4b. In-process items (Item.plant_id — lib/items/processLink.js) ──────
+    // e.g. 172 ETHYL ACETATE – IN PROCESS shows the materials issued for
+    // making 16 ETHYL ACETATE (PRODUCTION) — by process order, or the old
+    // ERP's PAY_CODE — as "Linked production": qty, and cost at each
+    // material's issue rate (worked out after step 5). Separate columns, never
+    // in its stock or the report totals; it goes into its blended rate. The
+    // report screen only (inProcessRate) — month-end opening and COGS: none.
+    const linkedProduction = inProcessRate
+      ? await linkedIssuesFor(prisma, { itcds: allRows.map((r) => r.product_code), dateFrom, dateTo, godown })
+      : new Map();
 
     // ── 2.5. Batch-fetch period purchase avg for produced items without PCE ──
     // For items with T8 receipts but no ProductionCostEntry, we fall back to:
@@ -10805,6 +11062,23 @@ export async function getStockActivityWithRateReport(filters = {}) {
         (f) => getStockActivityWithRateReport({ ...f, _priorDepth: priorDepth + 1 }),
       )
       : new Map();
+    // ── 4c. Net Amount (with sales tax) on the screen ─────────────────────────
+    // Without withTax the amounts stay gross (before tax) — unchanged for the
+    // month-end opening and COGS. Every rate below follows these amounts.
+    if (withTax) {
+      for (const r of allRows) {
+        r.purchase_amount = Number(r.purchase_amount || 0) + Number(r.purchase_tax_amount || 0);
+        r.purchase_ret_amount = Number(r.purchase_ret_amount || 0) + Number(r.purchase_ret_tax_amount || 0);
+        r.sale_ret_amount = Number(r.sale_ret_amount || 0) + Number(r.sale_ret_tax_amount || 0);
+      }
+    } else {
+      // Gross: the tax columns stay empty (hidden on the screen).
+      for (const r of allRows) {
+        delete r.purchase_tax_amount;
+        delete r.purchase_ret_tax_amount;
+        delete r.sale_ret_tax_amount;
+      }
+    }
 
     // ── 5. Enrich: derive all rates and computed values ───────────────────────
     // Categories that carry CC this month: finished goods, plus semi-finished
@@ -10813,7 +11087,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
     // inputs is tracked through every stage (lib/costing/ccRates.js).
     const ccCategoryIds = await ccCategoryIdsFor(month, year);
     const ccComponents = (await isBlendedCosting()) ? await getCcComponents({ month, year }) : null;
-    const enrichedResults = allRows.map(item => {
+    const enrichRow = (item) => {
       const os = openingStockMap.get(Number(item.product_code))
         ?? { opening_qty: 0, opening_rate: 0, opening_value: 0 };
 
@@ -10900,6 +11174,14 @@ export async function getStockActivityWithRateReport(filters = {}) {
       const purchase_landed_amount = Number(item.purchase_amount || 0) + purchase_services_amount;
       const purchase_landed_rate = Number(item.purchase_qty || 0) > 0 ? purchase_landed_amount / Number(item.purchase_qty) : 0;
 
+      // ── Linked production (in-process item ← its production item) ─────────
+      const lp = linkedProduction.get(Number(item.product_code));
+      const linked_production_qty = lp?.qty || 0;
+      const linked_production_rate = lp?.rate || 0;
+      const linked_production_amount = lp?.amount || 0;
+      // In the rate only on the screen, and only once it has a cost (step 5b).
+      const linked_in_rate = inProcessRate && linked_production_qty > 0 && linked_production_amount > 0;
+
       // ── RM production rate: PCE → opening_rate → purchase_avg → 0 ──────────
       const net_purchase_value = Number(item.purchase_amount || 0) - Number(item.purchase_ret_amount || 0);
       const raw_production_rate = productionCostMap.get(Number(item.product_code)) || 0;
@@ -10918,13 +11200,15 @@ export async function getStockActivityWithRateReport(filters = {}) {
         + Number(item.purchase_qty || 0)
         - Number(item.purchase_ret_qty || 0)
         + production_qty
-        + prior_ret_qty;
+        + prior_ret_qty
+        + (linked_in_rate ? linked_production_qty : 0);
       const total_value_for_rate = opening_value
         + Number(item.purchase_amount || 0)
         + purchase_services_amount
         - Number(item.purchase_ret_amount || 0)
         + production_value
-        + prior_ret_cost_value;
+        + prior_ret_cost_value
+        + (linked_in_rate ? linked_production_amount : 0);
       const avg_rate_after_purchase = total_qty_for_rate > 0
         ? total_value_for_rate / total_qty_for_rate
         : 0;
@@ -11014,6 +11298,13 @@ export async function getStockActivityWithRateReport(filters = {}) {
         material_production_rate,
         material_production_amount,
         production_cost_source,          // 'pce' | 'opening_rate' | 'weighted_avg' | 'no_cost'
+        ...(lp ? {
+          linked_production_item: lp.plant_item,
+          linked_production_qty,
+          linked_production_rate,
+          linked_production_amount,
+          linked_in_rate,
+        } : {}),
         transfer_in_rate,
         transfer_in_amount,
         transfer_out_rate,
@@ -11055,7 +11346,28 @@ export async function getStockActivityWithRateReport(filters = {}) {
       // Read by getCostOfGoodsSoldReport; not enumerable, so never in the JSON.
       Object.defineProperty(row, "landedRateByCat", { value: landedRateByCat, enumerable: false });
       return row;
-    });
+    };
+    let enrichedResults = allRows.map(enrichRow);
+
+    // ── 5b. Cost of the linked issues: each material at its issue rate ───────
+    // (this report's Issue Rate for that material — from this run, or a run
+    // for just that material when the filters left it out), then the
+    // in-process rows are worked out again with that cost in their rate.
+    if (linkedProduction.size) {
+      const issueRate = new Map(enrichedResults.map((r) => [Number(r.product_code), Number(r.material_issuance_rate) || 0]));
+      const materials = [...new Set([...linkedProduction.values()].flatMap((l) => [...l.byMaterial.keys()]))];
+      for (const m of materials.filter((m) => !issueRate.has(m))) {
+        const [one] = await getStockActivityWithRateReport({ dateFrom, dateTo, godown, product: String(m), withTax });
+        issueRate.set(m, Number(one?.material_issuance_rate) || 0);
+      }
+      for (const l of linkedProduction.values()) {
+        l.amount = [...l.byMaterial].reduce((s, [m, q]) => s + q * (issueRate.get(m) || 0), 0);
+        l.rate = l.qty ? l.amount / l.qty : 0;
+      }
+      enrichedResults = allRows.map((item, i) =>
+        linkedProduction.has(Number(item.product_code)) ? enrichRow(item) : enrichedResults[i],
+      );
+    }
 
 
     const visibleResults = enrichedResults.sort((a, b) =>

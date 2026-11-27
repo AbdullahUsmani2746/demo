@@ -219,6 +219,7 @@ export default function ItemForm() {
     b: "",
     packing_material_code: "",
     packing_returnable: false,
+    plant_id: "",
     code: "",
     ink_type: null,
     lamination: null,
@@ -303,6 +304,19 @@ export default function ItemForm() {
     }
   }, [qualityData, id]);
 
+  // "In-process stock of": any item except this one and items that are
+  // themselves in-process stock of another (one level — lib/items/processLink.js).
+  const productionItemOptions = useMemo(
+    () =>
+      packingMaterials
+        .filter((it) => String(it.itcd) !== String(id ?? ""))
+        .map((it) => ({
+          value: String(it.itcd),
+          label: `${it.item} (${it.code || it.itcd})`,
+        })),
+    [packingMaterials, id],
+  );
+
   useEffect(() => {
     if (itemData && id) {
       setFormData(prev => {
@@ -331,6 +345,7 @@ export default function ItemForm() {
           code: itemData.code || "",
           packing_material_code: itemData.packing_material_code ? String(itemData.packing_material_code) : "",
           packing_returnable: itemData.packing_returnable === true,
+          plant_id: itemData.plant_id ? String(itemData.plant_id) : "",
           valid_from: itemData.valid_from ? new Date(itemData.valid_from).toISOString().split("T")[0] : todayStr(),
           valid_to: itemData.valid_to ? new Date(itemData.valid_to).toISOString().split("T")[0] : validToStr(),
           color: itemData.color || null,
@@ -491,6 +506,8 @@ export default function ItemForm() {
         alternate_id: data.alternate_id && String(data.alternate_id).trim() ? parseInt(String(data.alternate_id)) : null,
         packing_material_code: data.packing_material_code ? parseInt(data.packing_material_code) : undefined,
         packing_returnable: features.on("documents.returnablePacking") ? data.packing_returnable === true : undefined,
+        // In-process stock of (lib/items/processLink.js) — blank clears the link
+        plant_id: data.plant_id ? parseInt(data.plant_id) : null,
         valid_from: data.valid_from ? new Date(data.valid_from).toISOString() : null,
         valid_to: data.valid_to ? new Date(data.valid_to).toISOString() : null,
         wastage_percentage: data.wastage_percentage ? parseFloat(data.wastage_percentage) : null,
@@ -935,6 +952,22 @@ export default function ItemForm() {
                       : "Search packing material…"
                   }
                   emptyMessage="No packing materials available"
+                />
+              </Field>
+
+              <Field
+                label="In-process stock of"
+                hint="Only for an in-process item: the production item whose output gives its rate (Stock Activity With Rate). Leave blank for other items."
+                wide
+              >
+                <SearchableSelect
+                  inputId="plant_id"
+                  value={formData?.plant_id}
+                  onChange={(value) => handleSelectChange("plant_id", value ?? "")}
+                  options={productionItemOptions}
+                  placeholder="Search the production item…"
+                  emptyMessage="No items"
+                  isClearable
                 />
               </Field>
 

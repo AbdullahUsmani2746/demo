@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
 import { recordScopeError } from "@/lib/auth/documentScope";
 import { feature } from "@/lib/features/server";
+import { plantIdOf, processLinkError } from "@/lib/items/processLink";
 
 export async function GET(request, { params }) {
     try {
@@ -46,6 +47,13 @@ export const PUT = guard("setup.items.manage", async (request, { session }) => {
         const scopeError = await itemScopeError(session, stored.ic_id, data.ic_id ?? stored.ic_id);
         if (scopeError) {
             return NextResponse.json({ error: `${scopeError} This item's category is not one of them.` }, { status: 403 });
+        }
+
+        // In-process stock of (Item.plant_id) — lib/items/processLink.js
+        if ("plant_id" in data) {
+            data.plant_id = plantIdOf(data.plant_id);
+            const linkError = await processLinkError(prisma, parseInt(data.itcd), data.plant_id);
+            if (linkError) return NextResponse.json({ error: linkError }, { status: 400 });
         }
 
         const inkCode = data.code?.trim();
