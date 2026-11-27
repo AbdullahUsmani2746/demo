@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { openingSql } from "@/lib/openingStock";
 import { NextResponse } from "next/server";
@@ -121,7 +122,7 @@ export async function GET(request) {
         FULL OUTER JOIN production_rates prr ON prr.itcd = br.itcd
       )
       SELECT
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer AS plan_id,
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer AS plan_id,
         t.itcd,
         i.item AS item_name,
         i.code AS item_code,
@@ -139,7 +140,7 @@ export async function GET(request) {
         AND t.itcd IS NOT NULL
         AND t.qty > 0
       GROUP BY
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer,
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer,
         t.itcd, i.item, i.code,
         COALESCE(fr.avg_rate, 0)
     `;

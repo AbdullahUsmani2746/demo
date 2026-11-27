@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { openingSql } from "@/lib/openingStock";
 import { Prisma } from "@prisma/client";
@@ -121,7 +122,7 @@ export async function GET(request) {
         tm.dated,
         tm.rmk,
         tm.rmk1,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         tm.godown,
         g.godown AS godown_name,
         t.id AS line_id,
@@ -148,17 +149,17 @@ export async function GET(request) {
         AND t.qty > 0
         AND (
           -- No PO reference at all
-          NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '') IS NULL
+          NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '') IS NULL
           -- Has a PO reference pointing to a Posted plan
           OR EXISTS (
             SELECT 1 FROM "productionPlanMaster" ppm2
-            WHERE ppm2.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer
+            WHERE ppm2.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer
               AND ppm2.status = 'Posted'
           )
           -- Has a PO reference but no matching plan exists (orphaned/stale reference)
           OR NOT EXISTS (
             SELECT 1 FROM "productionPlanMaster" ppm2
-            WHERE ppm2.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer
+            WHERE ppm2.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer
           )
         )
         ${itemFilter ? Prisma.sql`AND t.itcd = ${itemFilter}` : Prisma.empty}

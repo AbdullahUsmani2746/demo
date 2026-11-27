@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { voucherHref } from "@/lib/vouchers/voucherLink";
+import { poRefOf } from "@/lib/manufacturing/processOrderRef";
 import {
   LabHeader, LabCard, LabStat, LabEmpty, Chip, CODE_CHIP, TH, TD, NUM, TOTAL_ROW,
   TABS_SCROLL, DIALOG, DIALOG_HEAD, DIALOG_BODY, DIALOG_FOOT,
@@ -113,7 +114,7 @@ const TransactionDetailsModal = ({ transaction, code, onClose }) => {
                 <DialogDescription className="text-xs">
                   ID: <span className={CODE_CHIP}>{transaction.tran_id}</span> · Date:{" "}
                   {new Date(transaction.dated).toLocaleDateString()}
-                  {transaction.rmk5 ? <> · Process order {transaction.rmk5}</> : null}
+                  {poRefOf(transaction) ? <> · Process order {poRefOf(transaction)}</> : null}
                 </DialogDescription>
               </div>
             </div>
@@ -303,11 +304,11 @@ const MaterialDataViewer = () => {
       const issueData = issueRes.data.data || [];
       const inputData = inputRes.data.data || [];
 
-      // Merge data based on production number (rmk5)
+      // Merge issue + production by process order (lib/manufacturing/processOrderRef.js)
       const productionMap = new Map();
 
       issueData.forEach((issue) => {
-        const prodNo = issue.rmk5;
+        const prodNo = poRefOf(issue);
         if (prodNo) {
           if (!productionMap.has(prodNo)) {
             productionMap.set(prodNo, {
@@ -321,7 +322,7 @@ const MaterialDataViewer = () => {
       });
 
       inputData.forEach((input) => {
-        const prodNo = input.rmk5;
+        const prodNo = poRefOf(input);
         if (prodNo && productionMap.has(prodNo)) {
           const existing = productionMap.get(prodNo);
           existing.input = input;
@@ -497,7 +498,7 @@ const MaterialDataViewer = () => {
                   <td className={`${TD} whitespace-nowrap tabular-nums`} data-label="Date">{formatDate(transaction.dated)}</td>
                   <td className={TD} data-label="Tran ID"><span className={CODE_CHIP}>{transaction.tran_id}</span></td>
                   <td className={TD} data-label="Process order #">
-                    {transaction.rmk5 ? <span className="font-mono text-[12.5px]">{transaction.rmk5}</span> : <span className="text-muted-foreground">—</span>}
+                    {poRefOf(transaction) ? <span className="font-mono text-[12.5px]">{poRefOf(transaction)}</span> : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className={TD} data-label="Warehouse">
                     <span className="inline-flex items-center gap-1.5">

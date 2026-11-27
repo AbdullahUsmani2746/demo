@@ -1,3 +1,5 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
+import { poWhere } from "@/lib/manufacturing/processOrderRef";
 import prisma from "@/lib/prisma";
 import { getOpeningOne, openingSql } from "@/lib/openingStock";
 import { Prisma } from "@prisma/client";
@@ -425,7 +427,7 @@ async function getActualIssuances(planId, month, year, ccInclusive = false) {
     WHERE tm.tran_code = 7
       AND tm.dated >= ${dateFrom}
       AND tm.dated <= ${dateTo}
-      AND tm.rmk5 = ${String(planId)}
+      AND ${poRefSql("tm")} = ${String(planId)}
       AND t.sub_tran_id = 1
       AND t.qty > 0
     GROUP BY t.itcd, i.item, i.code, i.unit, COALESCE(fr.avg_rate, 0)
@@ -596,7 +598,7 @@ export async function GET(request) {
         i.unit,
         COALESCE(SUM(t.qty), 0)                                                 AS receipt_qty,
         MIN(tm.tran_id)                                                         AS first_tran_id,
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer AS plan_id_raw,
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer AS plan_id_raw,
         MIN(tm.dated)                                                           AS first_date,
         MAX(tm.dated)                                                           AS last_date,
         COUNT(DISTINCT tm.tran_id)                                              AS tran_count
@@ -609,7 +611,7 @@ export async function GET(request) {
         AND t.sub_tran_id = 1
         AND t.qty         > 0
       GROUP BY t.itcd, i.item, i.code, i.unit,
-               NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer
+               NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer
       ORDER BY i.item ASC, plan_id_raw ASC NULLS LAST
     `;
 
@@ -806,7 +808,7 @@ async function getActualProductionQty(planId, month, year) {
     WHERE tm.tran_code = 8
       AND tm.dated >= ${startDate}
       AND tm.dated <= ${endDate}
-      AND tm.rmk5 = ${String(planId)}
+      AND ${poRefSql("tm")} = ${String(planId)}
       AND t.sub_tran_id = 1
       AND t.qty > 0
   `;
@@ -841,7 +843,7 @@ async function costOnePlan(plan, month, year, calculatedBy, itemType, ccRatePerU
 const t8M2MCheck = await prisma.transactionsMaster.findFirst({
   where: {
     tran_code: 8,
-    rmk5: String(plan.id),
+    ...poWhere(plan.id),
     rmk4: "M2M",
   },
   select: { tran_id: true },
@@ -1043,12 +1045,12 @@ async function costOrphanItems(month, year, calculatedBy, ccRatePerUnit = 0) {
       AND t.sub_tran_id = 1
       AND t.qty         > 0
       AND (
-        tm.rmk5 IS NULL
-        OR TRIM(tm.rmk5) = ''
-        OR REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') = ''
+        ${poRefSql("tm")} IS NULL
+        OR TRIM(${poRefSql("tm")}) = ''
+        OR REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') = ''
         OR NOT EXISTS (
           SELECT 1 FROM "productionPlanMaster" p
-          WHERE p.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g'), '')::integer
+          WHERE p.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer
             AND p.status = 'Posted'
         )
       )
@@ -1075,12 +1077,12 @@ async function costOrphanItems(month, year, calculatedBy, ccRatePerUnit = 0) {
       AND t.sub_tran_id = 1
       AND t.qty         > 0
       AND (
-        tm.rmk5 IS NULL
-        OR TRIM(tm.rmk5) = ''
-        OR REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') = ''
+        ${poRefSql("tm")} IS NULL
+        OR TRIM(${poRefSql("tm")}) = ''
+        OR REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') = ''
         OR NOT EXISTS (
           SELECT 1 FROM "productionPlanMaster" p
-          WHERE p.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g'), '')::integer
+          WHERE p.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer
             AND p.status = 'Posted'
         )
       )
@@ -1257,12 +1259,12 @@ async function costOrphanT7Items(month, year, startDate, endDate, calculatedBy) 
       AND t.sub_tran_id = 1
       AND t.qty         > 0
       AND (
-        tm.rmk5 IS NULL
-        OR TRIM(tm.rmk5) = ''
+        ${poRefSql("tm")} IS NULL
+        OR TRIM(${poRefSql("tm")}) = ''
         OR NOT EXISTS (
           SELECT 1 FROM "productionPlanMaster" p
-          WHERE REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') != ''
-            AND p.id::text = REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g')
+          WHERE REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') != ''
+            AND p.id::text = REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g')
         )
       )
     GROUP BY t.itcd, i.item, i.code, i.unit
@@ -1284,12 +1286,12 @@ async function costOrphanT7Items(month, year, startDate, endDate, calculatedBy) 
       AND t.qty         > 0
       AND t.itcd        = ANY(${itcds}::int[])
       AND (
-        tm.rmk5 IS NULL
-        OR TRIM(tm.rmk5) = ''
+        ${poRefSql("tm")} IS NULL
+        OR TRIM(${poRefSql("tm")}) = ''
         OR NOT EXISTS (
           SELECT 1 FROM "productionPlanMaster" p
-          WHERE REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') != ''
-            AND p.id::text = REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g')
+          WHERE REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') != ''
+            AND p.id::text = REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g')
         )
       )
     GROUP BY t.itcd
@@ -1419,7 +1421,7 @@ export const POST = guard("costing.manage", async (request) => {
       // Plans with no production receipt are skipped — they have nothing to cost.
       const t8LinkedRows = await prisma.$queryRaw`
         SELECT DISTINCT
-          NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer AS plan_id
+          NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer AS plan_id
         FROM "TRANSACTIONS_MASTER" tm
         JOIN "Transactions" t ON t.tran_id = tm.tran_id
         WHERE tm.tran_code  = 8
@@ -1427,7 +1429,7 @@ export const POST = guard("costing.manage", async (request) => {
           AND tm.dated     <= ${endDate}
           AND t.sub_tran_id = 1
           AND t.qty         > 0
-          AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'') IS NOT NULL
+          AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'') IS NOT NULL
       `;
       const linkedPlanIds = t8LinkedRows.map(r => Number(r.plan_id)).filter(Boolean);
       const allPlans = linkedPlanIds.length > 0

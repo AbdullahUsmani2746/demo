@@ -21,8 +21,10 @@ import {
   CheckCircle,
   FileText,
   X,
+  FilterX,
 } from "lucide-react";
 import { useProductionPlans } from "@/hooks/useProduction";
+import SearchableSelect from "@/components/ui/searchable-select";
 import ProcessOrderForm from "./ProcessOrderForm";
 import { planForOutput } from "./processOrderModel";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -96,6 +98,10 @@ const ProductionTab = () => {
   const [filters, setFilters] = useState({
     search: "",
     status: "",
+    type: "",
+    item: "",
+    dateFrom: "",
+    dateTo: "",
     page: 1,
     limit: 10,
     sortBy: "id",
@@ -150,6 +156,25 @@ const ProductionTab = () => {
   const handleFilterChange = useCallback((status) => {
     setFilters((prev) => ({ ...prev, status, page: 1 }));
   }, []);
+
+  // Any list filter (status, type, item, order date) — not the search box
+  const setFilter = useCallback((name, value) => {
+    setFilters((prev) => ({ ...prev, [name]: value ?? "", page: 1 }));
+  }, []);
+  const activeFilters = ["status", "type", "item", "dateFrom", "dateTo"].filter((k) => filters[k]).length;
+  const clearFilters = useCallback(() => {
+    setFilters((prev) => ({ ...prev, status: "", type: "", item: "", dateFrom: "", dateTo: "", page: 1 }));
+  }, []);
+
+  // Production item picker: every item, code first
+  const itemOptions = useMemo(
+    () =>
+      (items || []).map((it) => ({
+        value: String(it.itcd),
+        label: `${it.code || it.itcd} — ${it.item || ""}`,
+      })),
+    [items],
+  );
 
   const handleSort = useCallback((field) => {
     setFilters((prev) => ({
@@ -723,6 +748,68 @@ const ProductionTab = () => {
           </select>
 
           <select
+            value={filters.type}
+            onChange={(e) => setFilter("type", e.target.value)}
+            aria-label="Filter by type"
+            className={cn(SELECT, "min-w-[9.5rem] flex-1 sm:flex-none")}
+          >
+            <option value="">All types</option>
+            <option value="new">New Production</option>
+            <option value="sf">SF to FG</option>
+            <option value="reprocessing">Reprocessing</option>
+          </select>
+
+          <div className="min-w-[14rem] flex-1 sm:max-w-xs">
+            <SearchableSelect
+              inputId="po-filter-item"
+              value={filters.item}
+              onChange={(v) => setFilter("item", v)}
+              options={itemOptions}
+              placeholder="Any production item"
+              ariaLabel="Filter by production item"
+              emptyMessage="No item matches"
+            />
+          </div>
+
+          <div className="flex flex-1 items-center gap-1.5 sm:flex-none">
+            <label className={cn(SELECT, "flex min-w-0 flex-1 items-center gap-1.5 sm:w-[10.5rem] sm:flex-none")}>
+              <span className="text-xs text-muted-foreground">From</span>
+              <input
+                type="date"
+                value={filters.dateFrom}
+                max={filters.dateTo || undefined}
+                onChange={(e) => setFilter("dateFrom", e.target.value)}
+                aria-label="Order date from"
+                className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+              />
+            </label>
+            <label className={cn(SELECT, "flex min-w-0 flex-1 items-center gap-1.5 sm:w-[10.5rem] sm:flex-none")}>
+              <span className="text-xs text-muted-foreground">To</span>
+              <input
+                type="date"
+                value={filters.dateTo}
+                min={filters.dateFrom || undefined}
+                onChange={(e) => setFilter("dateTo", e.target.value)}
+                aria-label="Order date to"
+                className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+              />
+            </label>
+          </div>
+
+          {activeFilters > 0 && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              title="Clear the filters (search stays)"
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-sm text-muted-foreground transition hover:border-primary/40 hover:text-primary"
+            >
+              <FilterX className="h-4 w-4" />
+              Clear filters
+              <span className="rounded-full bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">{activeFilters}</span>
+            </button>
+          )}
+
+          <select
             value={filters.limit}
             onChange={(e) =>
               setFilters((prev) => ({
@@ -742,11 +829,11 @@ const ProductionTab = () => {
         </div>
 
         {!loading && tableData.length === 0 ? (
-          filters.search || filters.status ? (
+          filters.search || activeFilters > 0 ? (
             <EmptyState
               icon={Search}
               title="No process order matches"
-              description="Try another search word or clear the status filter."
+              description="Try another search word or clear the filters."
             />
           ) : (
             <EmptyState

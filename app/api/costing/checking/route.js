@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { getOpeningOne, getOpening, getLatestOpeningRates } from "@/lib/openingStock";
@@ -37,7 +38,7 @@ export async function GET(req) {
         tm.dated,
         tm.tran_code,
         tm.vr_no,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         t.qty,
         t.rate,
         t.damt,

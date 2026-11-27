@@ -49,6 +49,8 @@ import { getPosReport } from "@/lib/reports/pos";
 import { getReturnablePackingReport as getReturnablePackingBalances, returnablePackingSummary } from "@/lib/reports/returnablePacking";
 import { attachServices, serviceCategoryColumns, servicesByItem } from "@/lib/service/landedCost";
 import { linkedIssuesFor } from "@/lib/items/processLink";
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
+import { poRefOf, poWhere } from "@/lib/manufacturing/processOrderRef";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
@@ -9263,7 +9265,8 @@ async function getMaterialProductionReport(filters) {
   const whereTransactions = {};
 
   if (filters.processOrder) {
-    where.rmk5 = parseInt(filters.processOrder);
+    // Process order ref (lib/manufacturing/processOrderRef.js)
+    Object.assign(where, poWhere(parseInt(filters.processOrder)));
   }
 
   if (filters.salesOrder) {
@@ -9303,9 +9306,9 @@ async function getMaterialProductionReport(filters) {
       let batchNo = t.rmk3;
 
       // Get production plan details if process order exists
-      if (t.rmk5) {
+      if (poRefOf(t)) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
-          where: { id: parseInt(t.rmk5) },
+          where: { id: parseInt(poRefOf(t)) || -1 },
           include: {
             item: true,
           },
@@ -9339,7 +9342,7 @@ async function getMaterialProductionReport(filters) {
         productionPlan,
         production_item: productionItem,
         batch_no: batchNo,
-        process_order_no: t.rmk5,
+        process_order_no: poRefOf(t),
         sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         actual_yield_qty: totalQty,
         total_amount: totalAmount,
@@ -9374,7 +9377,8 @@ async function getMaterialIssuanceReport(filters) {
   const whereTransactions = {};
 
   if (filters.processOrder) {
-    where.rmk5 = parseInt(filters.processOrder);
+    // Process order ref (lib/manufacturing/processOrderRef.js)
+    Object.assign(where, poWhere(parseInt(filters.processOrder)));
   }
 
   if (filters.salesOrder) {
@@ -9414,12 +9418,13 @@ async function getMaterialIssuanceReport(filters) {
       }
 
       // Get production plan details if process order exists
-      // rmk5 is a process order id only when numeric — a direct issue carries
-      // "CLEANING" / "LAB QC" there (Direct Material Issuance Cost), which made
-      // parseInt NaN and the whole report fail.
-      if (/^\d+$/.test(String(t.rmk5 ?? "").trim())) {
+      // The process order (lib/manufacturing/processOrderRef.js) is an id only
+      // when numeric — a direct issue carries "CLEANING" / "LAB QC" in rmk5
+      // (Direct Material Issuance Cost), which made parseInt NaN.
+      const poRef = poRefOf(t);
+      if (/^\d+$/.test(String(poRef ?? "").trim())) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
-          where: { id: parseInt(t.rmk5, 10) },
+          where: { id: parseInt(poRef, 10) },
         });
       }
 
@@ -9431,7 +9436,7 @@ async function getMaterialIssuanceReport(filters) {
         productionPlan,
         issued_items: issuedItems,
         issued_item: issuedItems[0] || null, // First item for main view
-        process_order_no: t.rmk5,
+        process_order_no: poRefOf(t),
         sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         issued_qty: totalQty,
         total_amount: totalAmount,
@@ -9961,7 +9966,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t2
            JOIN "TRANSACTIONS_MASTER" tm2 ON t2.tran_id = tm2.tran_id
            WHERE tm2.tran_code = 7 
-             AND CAST(tm2.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+             AND ${poRefSql("tm2")} = CAST(ppm.id AS TEXT)
              ${item ? Prisma.sql`AND t2.itcd = ${parseInt(item)}` : Prisma.empty}) AS material_issued_qty,
           
           -- Material Cost from Issuance
@@ -9974,7 +9979,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t2
            JOIN "TRANSACTIONS_MASTER" tm2 ON t2.tran_id = tm2.tran_id
            WHERE tm2.tran_code = 7 
-             AND CAST(tm2.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+             AND ${poRefSql("tm2")} = CAST(ppm.id AS TEXT)
              ${item ? Prisma.sql`AND t2.itcd = ${parseInt(item)}` : Prisma.empty}) AS material_cost,
            
           -- Finished Goods Produced (tran_code 8)
@@ -9982,7 +9987,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t3
            JOIN "TRANSACTIONS_MASTER" tm3 ON t3.tran_id = tm3.tran_id
            WHERE tm3.tran_code = 8 
-             AND CAST(tm3.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)) AS finished_produced_qty,
+             AND ${poRefSql("tm3")} = CAST(ppm.id AS TEXT)) AS finished_produced_qty,
              
           -- Finished Goods Value
           (SELECT COALESCE(SUM(
@@ -9994,7 +9999,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t3
            JOIN "TRANSACTIONS_MASTER" tm3 ON t3.tran_id = tm3.tran_id
            WHERE tm3.tran_code = 8 
-             AND CAST(tm3.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)) AS finished_value,
+             AND ${poRefSql("tm3")} = CAST(ppm.id AS TEXT)) AS finished_value,
              
           -- BOM Reference
           bm.id AS bom_id,
@@ -10019,7 +10024,7 @@ async function getBatchCostingReport(filters = {}) {
               SELECT 1 FROM "Transactions" t 
               JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
               WHERE tm.tran_code = 7 
-                AND CAST(tm.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+                AND ${poRefSql("tm")} = CAST(ppm.id AS TEXT)
                 AND t.itcd = ${parseInt(item)}
             ))` : Prisma.empty}
       )
@@ -10928,9 +10933,8 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
 
     // ── 4b. In-process items (Item.plant_id — lib/items/processLink.js) ──────
-    // e.g. 172 ETHYL ACETATE – IN PROCESS shows the materials issued for
-    // making 16 ETHYL ACETATE (PRODUCTION) — by process order, or the old
-    // ERP's PAY_CODE — as "Linked production": qty, and cost at each
+    // An in-process item shows the materials issued for making its
+    // production item (by process order) as "Linked production": qty, and cost at each
     // material's issue rate (worked out after step 5). Separate columns, never
     // in its stock or the report totals; it goes into its blended rate. The
     // report screen only (inProcessRate) — month-end opening and COGS: none.

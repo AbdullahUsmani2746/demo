@@ -1315,6 +1315,8 @@ model TransactionsMaster {
   city                  String?                @db.VarChar(100)
   // Dispatch "Route" — the way the vehicle goes (prisma/sql/2026-11-15_dispatch_route.sql)
   route                 String?                @db.VarChar(150)
+  // Process order (productionPlanMaster.id) this issue / production belongs to — read through lib/manufacturing/processOrderRef.js (falls back to rmk5)
+  process_order_id      Int?
   lc_no                 String?
   bond_id               Int?
   created_at            DateTime?              @default(now())
@@ -1360,6 +1362,7 @@ model TransactionsMaster {
   @@index([user_id])
   @@index([invoice_no])
   @@index([invoice_series])
+  @@index([process_order_id])
   @@index([godown])
   @@index([godown2])
   @@index([po_no])
