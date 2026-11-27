@@ -12683,6 +12683,12 @@ export const REPORT_CONFIG = {
         { field: "purchase_ret_tax_amount", headerName: "Pur Ret Tax (incl.)", width: 14, type: "currency", cellClass: "text-right" },
         // ── Production Output (tran_code=8) ──────────────────────────────────
         { field: "material_production_qty", headerName: "Prod Qty", width: 12, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
+        // Production split: Materials + Plant expenses = Prod Rate / Prod Amt.
+        // Plant expenses = the cost entries' cc_cost; display only, the cost is unchanged.
+        { field: "production_materials_rate", headerName: "Materials Rate", width: 12, type: "currency", cellClass: "text-right" },
+        { field: "production_materials_amount", headerName: "Materials Amt", width: 15, type: "currency", cellClass: "text-right" },
+        { field: "production_plant_rate", headerName: "Plant Exp Rate", width: 12, type: "currency", cellClass: "text-right" },
+        { field: "production_plant_amount", headerName: "Plant Exp Amt", width: 15, type: "currency", cellClass: "text-right" },
         { field: "material_production_rate", headerName: "Prod Rate", width: 12, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "material_production_amount", headerName: "Prod Amt", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         // ── Linked production: an in-process item (Item setup → "In-process
@@ -12740,6 +12746,8 @@ export const REPORT_CONFIG = {
         purchase_landed_rate: ["purchase_landed_amount", "purchase_qty"],
         purchase_ret_rate: ["purchase_ret_amount", "purchase_ret_qty"],
         material_production_rate: ["material_production_amount", "material_production_qty"],
+        production_materials_rate: ["production_materials_amount", "material_production_qty"],
+        production_plant_rate: ["production_plant_amount", "material_production_qty"],
         linked_production_rate: ["linked_production_amount", "linked_production_qty"],
         sale_cost_rate: ["sale_cost_amount", "sale_qty"],
         sale_ret_rate: ["sale_ret_amount", "sale_ret_qty"],
@@ -12767,7 +12775,7 @@ export const REPORT_CONFIG = {
         G("open", "Opening", "opening_stock", "opening_rate", "opening_value"),
         { id: "pur", label: "Purchase", fields: ["purchase_qty", "purchase_rate", "purchase_amount", "purchase_tax_amount", "purchase_services_amount", "purchase_landed_rate", "purchase_landed_amount"], foldTo: "purchase_landed_amount" },
         { id: "purret", label: "Purchase return", fields: ["purchase_ret_qty", "purchase_ret_rate", "purchase_ret_amount", "purchase_ret_tax_amount"], foldTo: "purchase_ret_amount" },
-        G("prod", "Production", "material_production_qty", "material_production_rate", "material_production_amount"),
+        { id: "prod", label: "Production", fields: ["material_production_qty", "production_materials_rate", "production_materials_amount", "production_plant_rate", "production_plant_amount", "material_production_rate", "material_production_amount"], foldTo: "material_production_amount" },
         // In-process items only (costing.inProcessLink): issues for its production item
         { id: "linked", label: "Linked production", fields: ["linked_production_item", "linked_production_qty", "linked_production_rate", "linked_production_amount"], foldTo: "linked_production_qty" },
         { id: "blend", label: "Blended", fields: ["total_cost_rate"], foldTo: "total_cost_rate" },
@@ -12784,8 +12792,15 @@ export const REPORT_CONFIG = {
       const LINKED = { 0: ["linked_production_item", "linked_production_qty"], 1: ["linked_production_rate"], 2: ["linked_production_amount"] };
       // Tax inside the amounts (Purchase amounts: Net) — shown in the Values view.
       const TAX = new Set(["purchase_tax_amount", "purchase_ret_tax_amount", "sale_ret_tax_amount"]);
+      // Production: Materials + Plant expenses + total, by role.
+      const PROD = {
+        0: ["material_production_qty"],
+        1: ["production_materials_rate", "production_plant_rate", "material_production_rate"],
+        2: ["production_materials_amount", "production_plant_amount", "material_production_amount"],
+      };
       const pick = (n) => groups.flatMap((g) => {
         if (g.id === "linked") return LINKED[n];
+        if (g.id === "prod") return PROD[n];
         const own = g.fields.filter((f) => !TAX.has(f));
         const tax = n === 2 ? g.fields.filter((f) => TAX.has(f)) : [];
         if (own.length === 3) return [own[n], ...tax];

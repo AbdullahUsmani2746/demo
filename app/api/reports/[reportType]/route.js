@@ -10875,7 +10875,13 @@ export async function getStockActivityWithRateReport(filters = {}) {
           THEN SUM(COALESCE(pce.cost_per_unit, 0) * pce.qty_costed)
                / SUM(pce.qty_costed)
           ELSE 0
-        END AS production_cost_per_unit
+        END AS production_cost_per_unit,
+        -- the plant expenses (overhead) inside that cost, per unit
+        CASE
+          WHEN SUM(pce.qty_costed) > 0
+          THEN SUM(COALESCE(pce.cc_cost, 0)) / SUM(pce.qty_costed)
+          ELSE 0
+        END AS production_cc_per_unit
       FROM "ProductionCostEntry" pce
       WHERE 
       pce.qty_costed > 0
@@ -10890,6 +10896,10 @@ export async function getStockActivityWithRateReport(filters = {}) {
     // Map: itcd → weighted avg RM cost per unit
     const productionCostMap = new Map(
       productionCostRaw.map(r => [Number(r.finished_id), Number(r.production_cost_per_unit) || 0])
+    );
+    // Map: itcd → plant expenses per unit inside that cost (Production split)
+    const productionCcMap = new Map(
+      productionCostRaw.map(r => [Number(r.finished_id), Number(r.production_cc_per_unit) || 0])
     );
 
 
@@ -11171,7 +11181,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
     let taxDeltaOf = new Map();
     if (withTax) {
       if (product || category || godown) {
-        const whole = await getStockActivityWithRateReport({ dateFrom, dateTo, withTax: true });
+        const whole = await getStockActivityWithRateReport({ dateFrom, dateTo, withTax: true, inProcessRate });
         productionTaxOf = whole.productionTax || new Map();
         taxDeltaOf = whole.taxDeltas || new Map();
       } else {
@@ -11200,13 +11210,20 @@ export async function getStockActivityWithRateReport(filters = {}) {
           if (!usesOf.has(k)) usesOf.set(k, []);
           usesOf.get(k).push({ m: Number(u.material_id), q: Number(u.qty) || 0 });
         }
-        // A few passes settle the chain (materials → product → product made from it …)
+        // A few passes settle the chain (materials → product → product made from it …).
+        // An in-process item (Item setup "In-process stock of") also carries the
+        // tax inside the materials issued for its production item, as its blended
+        // rate takes that linked production in (screen only) — so a product made
+        // from the in-process item gets that tax too.
         for (let pass = 0; pass < 6; pass++) {
           const next = new Map();
           for (const [id, q] of qtyForRate) {
             const prodTax = (usesOf.get(id) || []).reduce((a, u) => a + u.q * (taxDeltaOf.get(u.m) || 0), 0);
             productionTaxOf.set(id, prodTax);
-            next.set(id, q > 0 ? (ownTax.get(id) + prodTax) / q : 0);
+            const lp = linkedProduction.get(id);
+            const linkedTax = lp ? [...lp.byMaterial].reduce((a, [m, mq]) => a + mq * (taxDeltaOf.get(Number(m)) || 0), 0) : 0;
+            const qq = q + (lp && linkedTax ? lp.qty : 0);
+            next.set(id, qq > 0 ? (ownTax.get(id) + prodTax + linkedTax) / qq : 0);
           }
           taxDeltaOf = next;
         }
@@ -11371,6 +11388,14 @@ export async function getStockActivityWithRateReport(filters = {}) {
       // ── Re-valued amounts at authoritative cost rates ───────────────────────
       const material_production_rate = effective_production_rate;
       const material_production_amount = production_qty * material_production_rate;
+      // Production split (display): Materials + Plant expenses = Prod Rate.
+      // Materials = production cost without its plant expenses (cost entries'
+      // cc_cost); the cost itself is unchanged.
+      const production_plant_rate = production_qty > 0 && raw_production_rate > 0
+        ? (productionCcMap.get(Number(item.product_code)) || 0) : 0;
+      const production_plant_amount = production_qty * production_plant_rate;
+      const production_materials_rate = material_production_rate - production_plant_rate;
+      const production_materials_amount = material_production_amount - production_plant_amount;
 
       // Source label for UI — tells the frontend where production rate came from
       const production_cost_source = raw_production_rate > 0 ? 'pce'
@@ -11446,6 +11471,10 @@ export async function getStockActivityWithRateReport(filters = {}) {
         material_issuance_amount,
         material_production_rate,
         material_production_amount,
+        production_materials_rate,
+        production_materials_amount,
+        production_plant_rate,
+        production_plant_amount,
         production_cost_source,          // 'pce' | 'opening_rate' | 'weighted_avg' | 'no_cost'
         ...(lp ? {
           linked_production_item: lp.plant_item,
