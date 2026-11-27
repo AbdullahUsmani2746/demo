@@ -7,6 +7,7 @@ import { runSubAccountsAndRmc } from "./features/subAccountsRmc.mjs";
 import { runProduction } from "./features/production.mjs";
 import { runFixedAssets } from "./features/fixedAssets.mjs";
 import { runHrPayroll } from "./features/hrPayroll.mjs";
+import { runHrSmsPort } from "./features/hrSmsPort.mjs";
 import { runSalesDispatch } from "./features/salesDispatch.mjs";
 import { runPlanLab } from "./features/planLab.mjs";
 import { runAccountingPort } from "./features/accounting.mjs";
@@ -203,6 +204,7 @@ try {
   await runProduction({ admin, viewer, set, check, prisma });
   await runFixedAssets({ admin, viewer, set, check, prisma });
   await runHrPayroll({ admin, viewer, set, check, prisma });
+  await runHrSmsPort({ admin, viewer, set, check, prisma });
 
   // Sale Order / Dispatch switches + trial line billing (scripts/demo/features/salesDispatch.mjs)
   await runSalesDispatch({ admin, viewer, set, vr, check, prisma });

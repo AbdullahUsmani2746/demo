@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PAYMENT_METHOD_VALUES } from "@/lib/hr/paymentMethods";
 
 // Shared with the UI (admin Employee Setup + self-service profile page) so
 // the dropdown options and the enum values stay in sync.
@@ -59,7 +60,9 @@ export const employeeSchema = z.object({
   branchId: z.coerce.number().int().optional().nullable(),
   managerId: z.coerce.number().int().optional().nullable(),
 
-  paymentMethod: z.enum(["CASH", "DIRECT_DEPOSIT", "CHEQUE"]),
+  paymentMethod: z.enum(PAYMENT_METHOD_VALUES),
+  paidThroughId: z.coerce.number().int().positive().optional().nullable(),
+  extraDepartmentIds: z.array(z.coerce.number().int().positive()).max(50).optional(),
   bankId: z.coerce.number().int().optional().nullable(),
   bank_bracnhId: z.coerce.number().int().optional().nullable(),
   accountName: z.string().max(25).optional().nullable(),
@@ -101,8 +104,15 @@ export const employeeAccessSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
+// "Through a person" needs the person, and it is never the employee themself.
+const employeeRules = employeeSchema.superRefine((v, ctx) => {
+  if (v.paymentMethod !== "THROUGH_PERSON") return;
+  if (!v.paidThroughId) ctx.addIssue({ code: "custom", path: ["paidThroughId"], message: "Choose who the salary is handed to" });
+  else if (v.id != null && Number(v.id) === Number(v.paidThroughId)) ctx.addIssue({ code: "custom", path: ["paidThroughId"], message: "Choose someone other than the employee" });
+});
+
 export function validateEmployee(data) {
-  return employeeSchema.safeParse(data);
+  return employeeRules.safeParse(data);
 }
 
 export function validateEmployeeAccess(data) {

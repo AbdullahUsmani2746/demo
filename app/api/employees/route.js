@@ -7,6 +7,8 @@ import { setAuditActor } from "@/lib/audit/context";
 import { validateEmployee, validateEmployeeAccess } from "@/validators/employee.validator";
 import {
     EMPLOYEE_INCLUDE,
+    syncExtraDepartments,
+    employeeFeatureCheck,
     attachLinkedUser,
     canManageEmployees,
     canAdministerEmployeeAccess,
@@ -18,6 +20,7 @@ import {
     validationErrorBody,
 } from "@/lib/employees";
 import { guard } from "@/lib/auth/route";
+import { inDepartments } from "@/lib/hr/access";
 import { assignableLevels, checkRoleChange, roleAssignErrorResponse, saveExtraRoles } from "@/lib/auth/roleAssign";
 
 export async function GET(req) {
@@ -65,7 +68,8 @@ export async function GET(req) {
             });
         }
         if (status && status !== "all") and.push({ status });
-        if (departmentId && departmentId !== "all") and.push({ departmentId: Number(departmentId) });
+        // Main or "also works in" department (lib/hr/access.js inDepartments).
+        if (departmentId && departmentId !== "all") and.push(await inDepartments([Number(departmentId)]));
         if (hasLogin === "yes" || hasLogin === "no") {
             const ids = await linkedEmployeeIds(prisma);
             and.push(hasLogin === "yes" ? { id: { in: ids } } : { id: { notIn: ids } });
@@ -112,6 +116,9 @@ export const POST = guard("employee.manage", async (req) => {
         if (!parsedEmployee.success) {
             return NextResponse.json(validationErrorBody(parsedEmployee.error), { status: 400 });
         }
+
+        const featureCheck = await employeeFeatureCheck(parsedEmployee.data);
+        if (featureCheck.error) return NextResponse.json({ error: featureCheck.error }, { status: 400 });
 
         const parsedAccess = validateEmployeeAccess(body);
         if (!parsedAccess.success) {
@@ -175,6 +182,10 @@ export const POST = guard("employee.manage", async (req) => {
                 data: { id: nextId, ...buildEmployeeData(parsedEmployee.data, { isCreate: true }) },
                 include: EMPLOYEE_INCLUDE,
             });
+            if (featureCheck.extraDepartments && parsedEmployee.data.extraDepartmentIds?.length) {
+                await syncExtraDepartments(tx, created.id, parsedEmployee.data.extraDepartmentIds, parsedEmployee.data.departmentId);
+                created.extraDepartments = await tx.employeeDepartment.findMany({ where: { employee_id: created.id }, select: EMPLOYEE_INCLUDE.extraDepartments.select });
+            }
 
             if (access.grantAccess) {
                 const username = requestedUsername || String(created.id);

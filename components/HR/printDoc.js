@@ -51,12 +51,44 @@ const STYLE = `
   @page{size:A4;margin:14mm}
 `;
 
-/** Open `body` (HTML, already escaped) in a print window. */
-export function printDocument({ title, body }) {
+/**
+ * A full-page letterhead picture behind the text (repeated on every printed
+ * page) and the text kept inside its margins: the repeating table header /
+ * footer rows hold the room of the letterhead's own header and footer.
+ * letterhead = { url, top, bottom, left, right } (mm) — lib/hr/letters/letterhead.js.
+ */
+function onLetterhead(body, lh) {
+  const n = (v) => Math.max(0, Number(v) || 0);
+  return {
+    style: `
+      @page{size:A4;margin:0}
+      html,body{margin:0;padding:0}
+      body{padding:0!important}
+      .lh-bg{position:fixed;top:0;left:0;width:210mm;height:297mm;z-index:-1;object-fit:fill}
+      .lh-page{width:210mm;margin:0 auto;border-collapse:collapse}
+      .lh-page>thead td,.lh-page>tfoot td,.lh-page>tbody>tr>td.lh-body{border:0;padding:0}
+      .lh-page>tbody>tr>td.lh-body{padding:0 ${n(lh.right)}mm 0 ${n(lh.left)}mm}
+      .lh-page .doc{max-width:none}
+      @media screen{body{background:#eee}.lh-page{background:#fff;min-height:297mm;position:relative}.lh-bg{position:absolute;left:50%;transform:translateX(-50%)}}
+    `,
+    html: `<img class="lh-bg" src="${esc(lh.url)}" alt="">
+      <table class="lh-page"><thead><tr><td style="height:${n(lh.top)}mm"></td></tr></thead>
+      <tfoot><tr><td style="height:${n(lh.bottom)}mm"></td></tr></tfoot>
+      <tbody><tr><td class="lh-body"><div class="doc">${body}</div></td></tr></tbody></table>`,
+  };
+}
+
+/**
+ * Open `body` (HTML, already escaped) in a print window. With `letterhead`
+ * the page is printed on it (onLetterhead) instead of the plain margins.
+ */
+export function printDocument({ title, body, letterhead = null }) {
   const w = window.open("", "_blank");
   if (!w) throw new Error("The browser blocked the print window — allow pop-ups for this site.");
+  const lh = letterhead?.url ? onLetterhead(body, letterhead) : null;
   w.document.open();
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style></head><body><div class="doc">${body}</div><script>window.onload=function(){setTimeout(function(){window.print()},250)}</script></body></html>`);
+  // onload waits for the letterhead picture, so it is on the page when printed.
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}${lh ? lh.style : ""}</style></head><body>${lh ? lh.html : `<div class="doc">${body}</div>`}<script>window.onload=function(){setTimeout(function(){window.print()},250)}</script></body></html>`);
   w.document.close();
 }
 

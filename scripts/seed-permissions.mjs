@@ -178,6 +178,9 @@ const SPECIAL = [
   ["hr.settlement.post", "HR", "Post full & final settlements to accounts, pay and reverse them (posts vouchers)"],
   // Feature hr.pfLoans (prisma/sql/2026-11-21_hr_pf_loans.sql)
   ["hr.pfloan.approve", "HR", "Approve or reject provident fund loans and withdrawals"],
+  // HR letters (prisma/sql/2026-11-27_hr_letters.sql)
+  ["hr.letters.issue", "HR", "Issue HR letters (appointment, probation, confirmation, warning, termination), print them and upload the signed copy"],
+  ["hr.letters.templates", "HR", "Change the wording of the HR letters"],
   ["audit.view", "Administration", "Open the Audit Trail (who changed what, when — every table)"],
   // Feature "vouchers.subAccounts" (app/api/sub-accounts). Adding one from a
   // voucher line is also open to whoever creates receipts / payments / journals.

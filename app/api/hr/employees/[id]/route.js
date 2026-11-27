@@ -5,7 +5,7 @@
 // and only for an employee inside the person's departments.
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { assertEmployeesInScope, hrRights, HR_TEAM_PERMS } from "@/lib/hr/access";
+import { assertEmployeesInScope, employeeName, hrRights, HR_TEAM_PERMS } from "@/lib/hr/access";
 import { hrRoute, intParam } from "@/lib/hr/route";
 import { assignmentOn, employeeLite, EMPLOYEE_SELECT, loadContext, resolveDay, shiftLite, summaryShift } from "@/lib/hr/attendance/sheet";
 import { monthSummary } from "@/lib/hr/attendance/rules";
@@ -31,6 +31,7 @@ export const GET = hrRoute(HR_TEAM_PERMS, async (req, { session, params }) => {
       gender: true, dob: true, phoneNumber: true, emailAddress: true, cnicNumber: true, eobiNo: true,
       paymentMethod: true, accountNumber: true, bankTitle: true, accountName: true,
       bank: { select: { name: true } },
+      paidThrough: { select: { id: true, firstName: true, middleName: true, surname: true } },
       costCenter: { select: { ccname: true } },
       manager: { select: { manager: true } },
       user: { select: { username: true, email: true, role: true, isActive: true } },
@@ -55,7 +56,10 @@ export const GET = hrRoute(HR_TEAM_PERMS, async (req, { session, params }) => {
       manager: emp.manager?.manager ?? null,
       // Bank details only to someone who sees pay.
       bank: rights.salaryView || rights.payrollView
-        ? { method: emp.paymentMethod, bank: emp.bank?.name ?? null, account: emp.accountNumber, title: emp.bankTitle || emp.accountName }
+        ? {
+            method: emp.paymentMethod, bank: emp.bank?.name ?? null, account: emp.accountNumber, title: emp.bankTitle || emp.accountName,
+            through: emp.paymentMethod === "THROUGH_PERSON" && emp.paidThrough ? { id: emp.paidThrough.id, name: employeeName(emp.paidThrough) } : null,
+          }
         : null,
       login: emp.user ? { username: emp.user.username || emp.user.email, role: emp.user.role, active: emp.user.isActive } : null,
     },

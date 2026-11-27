@@ -15884,6 +15884,8 @@ Object.entries(HR_REPORTS).forEach(([key, def]) => {
       { field: "period", label: "Period" },
       { field: "rows", label: "Rows", type: "number" },
     ],
+    // The standard Excel / PDF of the wide engine (current view or everything).
+    exportOptions: { pdf: true, excel: true, csv: false },
   };
 });
 

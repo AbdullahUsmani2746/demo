@@ -1,3 +1,4 @@
+import { PAYMENT_METHODS } from "@/lib/hr/paymentMethods";
 // config/entityConfig.js
 
 const entityConfig = {
@@ -1462,11 +1463,8 @@ const entityConfig = {
         name: "paymentMethod",
         label: "Payment Method",
         fieldType: "select",
-        options: [
-          { value: "CASH", label: "CASH" },
-          { value: "DIRECT_DEPOSIT", label: "DIRECT_DEPOSIT" },
-          { value: "CHEQUE", label: "CHEQUE" },
-        ],
+        // "Through a person" needs the person — chosen on the Employee screen.
+        options: PAYMENT_METHODS.filter((m) => m.value !== "THROUGH_PERSON"),
         required: true,
       },
       {

@@ -23,7 +23,8 @@ import { Card, CodeChip, DIALOG, DIALOG_FOOTER, Fig, TFOOT } from "@/components/
 const WHO = [
   { key: "all", label: "Everyone not paid yet", test: () => true },
   { key: "cash", label: "Paid in cash", test: (p) => p.data.bank?.method === "CASH" },
-  { key: "bank", label: "Bank transfer / cheque", test: (p) => p.data.bank?.method && p.data.bank.method !== "CASH" },
+  { key: "bank", label: "Bank transfer / cheque", test: (p) => ["DIRECT_DEPOSIT", "CHEQUE"].includes(p.data.bank?.method) },
+  { key: "through", label: "Handed through a person", test: (p) => p.data.bank?.method === "THROUGH_PERSON" },
   { key: "pick", label: "Choose people…", test: () => true },
 ];
 
@@ -39,6 +40,8 @@ export function PayDialog({ open, onClose, runId, run, slips, paidBy, today }) {
 
   const unpaid = useMemo(() => slips.filter((p) => !paidBy[p.employee.id] && p.net > 0), [slips, paidBy]);
   const rule = WHO.find((w) => w.key === who);
+  // "Handed through a person" only when someone on this payroll is paid that way (feature hr.paidThroughPerson).
+  const whoOptions = WHO.filter((w) => w.key !== "through" || slips.some((p) => p.data.bank?.method === "THROUGH_PERSON"));
   const chosen = who === "pick" ? unpaid.filter((p) => picked.has(p.employee.id)) : unpaid.filter((p) => !p.hold && rule.test(p));
   const total = chosen.reduce((s, p) => s + p.net, 0);
   const held = unpaid.filter((p) => p.hold).length;
@@ -72,7 +75,7 @@ export function PayDialog({ open, onClose, runId, run, slips, paidBy, today }) {
           <div className="space-y-1.5">
             <Label className="text-xs text-muted-foreground">Who</Label>
             <div className="grid grid-cols-2 gap-2">
-              {WHO.map((w) => (
+              {whoOptions.map((w) => (
                 <button
                   key={w.key}
                   type="button"

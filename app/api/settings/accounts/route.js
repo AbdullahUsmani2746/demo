@@ -17,6 +17,7 @@ import {
   invalidateAccountSettings,
 } from "@/lib/accounts/accountSettings";
 import { ACCOUNT_SETTING_SECTIONS, CATEGORY_ACCOUNT_COLUMNS } from "@/lib/accounts/accountSettingDefs";
+import { feature } from "@/lib/features/server";
 
 const CATEGORY_KEYS = CATEGORY_ACCOUNT_COLUMNS.map((c) => c.key);
 const ints = (list) => (list || []).map(Number).filter(Number.isFinite);
@@ -62,11 +63,15 @@ async function buildPayload() {
   const macname = Object.fromEntries(mains.map((m) => [m.macno, m.macname]));
   const acRef = (acno) => ({ acno, acname: acname[acno] ?? null, missing: acname[acno] == null });
 
-  const settings = ACCOUNT_SETTING_DEFS.map((def) => {
+  // Direct / Indirect payroll rows (variantOf) only while Settings → Features
+  // hr.payrollAccountsByCategory is on — off, nothing reads them.
+  const byCategory = await feature("hr.payrollAccountsByCategory");
+  const settings = ACCOUNT_SETTING_DEFS.filter((def) => byCategory || !def.variantOf).map((def) => {
     const row = byKey[def.key];
     const base = {
       key: def.key, kind: def.kind, section: def.section, label: def.label, help: def.help,
       usedBy: def.usedBy, postings: def.postings || [], required: def.required,
+      variantOf: def.variantOf ?? null, salaryCategory: def.salaryCategory ?? null,
       stored: !!row, updated_by: row?.updated_by ?? null, updated_at: row?.updated_at ?? null,
     };
     if (def.kind === "ACCOUNT") {
@@ -134,10 +139,15 @@ export const PUT = guard("settings.manage", async (request, { session }) => {
 
   const errors = {};
   const updates = [];
+  const byCategory = await feature("hr.payrollAccountsByCategory");
   for (const item of list) {
     const def = ACCOUNT_SETTING_BY_KEY[item?.key];
     if (!def) {
       errors[item?.key ?? "?"] = "Unknown setting";
+      continue;
+    }
+    if (def.variantOf && !byCategory) {
+      errors[def.key] = "Payroll accounts by Direct / Indirect are switched off (Settings → Features)";
       continue;
     }
     if (def.kind === "ACCOUNT") {

@@ -1591,6 +1591,23 @@ model CostCenter {
   @@index([ccname])
 }
 
+/// An employee's "also works in" departments (Employee → Job). The main
+/// department (Employee.departmentId) keeps payroll, salary cost, reports and
+/// the approval chain; these count for HR scope and HR screen department
+/// filters (lib/hr/access.js) — prisma/sql/2026-11-27_employee_extra_departments.sql
+model EmployeeDepartment {
+  id            Int        @id @default(autoincrement())
+  employee_id   Int
+  department_id Int
+  created_at    DateTime   @default(now())
+  employee      Employee   @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  department    Department @relation(fields: [department_id], references: [id], onDelete: Cascade)
+
+  @@unique([employee_id, department_id])
+  @@index([department_id])
+  @@map("employee_departments")
+}
+
 model Department {
   id               Int               @id @default(autoincrement())
   dept_name        String?           @db.VarChar(100)
@@ -1601,6 +1618,7 @@ model Department {
   Manager          Manager[]
   user             User[]
   scopes           DepartmentScope[]
+  extraEmployees   EmployeeDepartment[]
 
   @@index([company_id])
   @@index([dept_name])
@@ -1699,6 +1717,10 @@ model Employee {
   managerId               Int?
   company_id              Int
   paymentMethod           PaymentMethod
+  /// THROUGH_PERSON: the employee the salary is handed to (lib/hr/paymentMethods.js) — prisma/sql/2026-11-27_employee_paid_through.sql
+  paidThroughId           Int?                  @map("paid_through_id")
+  paidThrough             Employee?             @relation("EmployeePaidThrough", fields: [paidThroughId], references: [id], onDelete: SetNull)
+  paysSalaryOf            Employee[]            @relation("EmployeePaidThrough")
   bankId                  Int?
   bank_bracnhId           Int?
   accountName             String?               @db.VarChar(25)
@@ -1769,6 +1791,8 @@ model Employee {
   allowances              Allowance[]           @relation("AllowanceToEmployee")
   deductions              Deduction[]           @relation("DeductionToEmployee")
   leaves                  Leave[]               @relation("EmployeeToLeave")
+  /// "Also works in" departments (the main one is departmentId) — lib/employees.js
+  extraDepartments        EmployeeDepartment[]
   hrShiftAssignments      HrShiftAssignment[]
   hrAttendance            HrAttendance[]
   hrLeaveBalances         HrLeaveBalance[]
@@ -1779,6 +1803,7 @@ model Employee {
   hrPayslips              HrPayslip[]
   hrSeparations           HrSeparation[]
   hrSettlements           HrSettlement[]
+  hrLetters               HrLetter[]
 
   @@index([company_id])
   @@index([designationId])
@@ -2638,6 +2663,7 @@ enum PaymentMethod {
   CASH
   DIRECT_DEPOSIT
   CHEQUE
+  THROUGH_PERSON
 }
 
 enum PayType {
@@ -3225,6 +3251,7 @@ model HrLoan {
   disbursement_ref    String?          @db.VarChar(60) // cheque / transfer reference
   disburse_tran_id    Int? // the Payment voucher that paid it out (lib/hr/vouchers.js)
   disburse_acno       Int? // cash / bank account it was paid from
+  staff_acno          Int? // staff account it was paid out to (Dr) — repayments / recoveries credit it (prisma/sql/2026-11-27_payroll_salary_category_accounts.sql)
   requested_by        String           @db.VarChar(50)
   requested_at        DateTime         @default(now())
   decided_by          String?          @db.VarChar(50)
@@ -3731,4 +3758,30 @@ model PosHeldBill {
 
   @@index([user_id])
   @@map("pos_held_bills")
+}
+
+/// An HR letter given to an employee — appointment, probation, confirmation,
+/// warning, termination (lib/hr/letters/*, prisma/sql/2026-11-27_hr_letters.sql).
+/// subject / body are the text as issued (the template rendered once), so a
+/// later change of the wording never changes a letter already given.
+model HrLetter {
+  id           Int       @id @default(autoincrement())
+  employee_id  Int
+  kind         String    @db.VarChar(20) // APPOINTMENT | PROBATION | CONFIRMATION | WARNING | TERMINATION
+  dated        DateTime  @db.Date
+  ref_no       String    @db.VarChar(40)
+  details      Json      @default("{}") // what was entered on the Issue-letter form
+  subject      String    @db.VarChar(200)
+  body         String
+  signed_url   String? // the signed copy, scanned and uploaded
+  signed_at    DateTime?
+  signed_by    String?   @db.VarChar(50)
+  issued_by    String    @db.VarChar(50)
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @default(now()) @updatedAt
+  employee     Employee  @relation(fields: [employee_id], references: [id], onDelete: Restrict)
+
+  @@index([employee_id])
+  @@index([kind])
+  @@map("hr_letters")
 }
