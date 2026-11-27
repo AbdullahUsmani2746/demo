@@ -1,3 +1,4 @@
+import { PAYMENT_METHODS } from "@/lib/hr/paymentMethods";
 // config/entityConfig.js
 
 const entityConfig = {
@@ -216,6 +217,18 @@ const entityConfig = {
         required: true,
         sortable: true,
         uppercase: true
+      },
+      {
+        name: "gets_plant_expenses",
+        label: "Gets plant expenses",
+        fieldType: "checkbox",
+        checkboxLabel: "Costing: every item of this group shares the month's plant expenses when made on a process order",
+        trueLabel: "Yes",
+        falseLabel: "No",
+        defaultValue: false,
+        // read by the "item" costing engine only (lib/costing/plantExpenseProducts.js)
+        feature: "costing.engine",
+        featureValue: "item",
       },
       {
         relation: "ProductMasterCategories",
@@ -1462,11 +1475,8 @@ const entityConfig = {
         name: "paymentMethod",
         label: "Payment Method",
         fieldType: "select",
-        options: [
-          { value: "CASH", label: "CASH" },
-          { value: "DIRECT_DEPOSIT", label: "DIRECT_DEPOSIT" },
-          { value: "CHEQUE", label: "CHEQUE" },
-        ],
+        // "Through a person" needs the person — chosen on the Employee screen.
+        options: PAYMENT_METHODS.filter((m) => m.value !== "THROUGH_PERSON"),
         required: true,
       },
       {

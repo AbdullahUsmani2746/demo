@@ -205,6 +205,7 @@ export const PATCH = guard("fgTransfer.create", async (req) => {
           req_no:     parseInt(tran_id),
           rmk:        `FG Transfer from Production Floor - Req #${tran_id}${tag}`,
           rmk5:       existing.plan_id ? String(existing.plan_id) : null,
+          process_order_id: existing.plan_id ? Number(existing.plan_id) : null,
           user_id:    session.user.id,
         },
       });

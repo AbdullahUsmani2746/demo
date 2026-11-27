@@ -32,9 +32,14 @@ import {
 import { cn } from "@/lib/utils";
 import { useEmployeeLookups } from "./useEmployeeLookups";
 import EmployeeDocumentsPanel from "./EmployeeDocumentsPanel";
+import EmployeeLetters from "@/components/HR/letters/EmployeeLetters";
 import { BLOOD_GROUPS } from "@/validators/employee.validator";
+import EmployeePicker from "@/components/HR/EmployeePicker";
+import SearchSelect from "@/components/bi/SearchSelect";
+import { PAYMENT_METHODS, PAYMENT_METHOD_VALUES } from "@/lib/hr/paymentMethods";
 import { useRoles } from "@/hooks/useRoles";
 import { usePermissions } from "@/hooks/usePermissions";
+import { useFeatures } from "@/hooks/useFeatures";
 import EmployeeLoginPanel from "./EmployeeLoginPanel";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +83,9 @@ const baseFormSchema = z.object({
   branchId: optionalId,
   managerId: optionalId,
 
-  paymentMethod: z.enum(["CASH", "DIRECT_DEPOSIT", "CHEQUE"]),
+  paymentMethod: z.enum(PAYMENT_METHOD_VALUES),
+  paidThroughId: optionalId,
+  extraDepartmentIds: z.array(z.coerce.number()).optional(),
   bankId: optionalId,
   bank_bracnhId: optionalId,
   accountName: z.string().trim().max(25, "Max 25 characters").optional().nullable(),
@@ -146,9 +153,9 @@ function buildFormSchema(hasExistingUser) {
 
 const SECTIONS = [
   { value: "personal", label: "Personal", icon: User, fields: ["id", "firstName", "middleName", "surname", "dob", "gender", "cnicNumber", "bloodGroup", "qualification", "status"] },
-  { value: "job", label: "Job", icon: Briefcase, fields: ["departmentId", "designationId", "workLocationId", "branchId", "employeetypeId", "employeecatId", "salaryCategory", "managerId", "costCenterId", "hireDate", "dor"] },
+  { value: "job", label: "Job", icon: Briefcase, fields: ["departmentId", "extraDepartmentIds", "designationId", "workLocationId", "branchId", "employeetypeId", "employeecatId", "salaryCategory", "managerId", "costCenterId", "hireDate", "dor"] },
   { value: "contact", label: "Contact", icon: Phone, fields: ["phoneNumber", "emailAddress", "cityId", "residentialAddress", "emergencyContactName", "emergencyContactPhone", "nextOfKinName", "nextOfKinRelation", "nextOfKinPhone"] },
-  { value: "pay", label: "Pay & Bank", icon: Wallet, fields: ["paymentMethod", "payType", "payFrequency", "rate", "bankId", "bank_bracnhId", "accountName", "accountNumber"] },
+  { value: "pay", label: "Pay & Bank", icon: Wallet, fields: ["paymentMethod", "paidThroughId", "payType", "payFrequency", "rate", "bankId", "bank_bracnhId", "accountName", "accountNumber"] },
   { value: "login", label: "Login & Roles", icon: ShieldCheck, fields: ["username", "email", "role", "password", "confirmPassword"] },
   { value: "documents", label: "Documents", icon: FileText, fields: [] },
 ];
@@ -185,6 +192,8 @@ function employeeToFormValues(employee) {
     branchId: e.branchId ?? null,
     managerId: e.managerId ?? null,
     paymentMethod: e.paymentMethod || "CASH",
+    paidThroughId: e.paidThroughId ?? null,
+    extraDepartmentIds: (e.extraDepartments ?? []).map((d) => d.department_id),
     bankId: e.bankId ?? null,
     bank_bracnhId: e.bank_bracnhId ?? null,
     accountName: e.accountName || "",
@@ -408,6 +417,7 @@ export default function EmployeeFormModal({
   // staff / self-service roles only (the API enforces it — lib/auth/roleAssign.js).
   const { activeRoles: catalogue, roleName } = useRoles();
   const { can, fullAccess } = usePermissions();
+  const features = useFeatures();
   const existingUser = employee?.user || null;
   const activeRoles = catalogue.filter(
     (r) =>
@@ -420,6 +430,7 @@ export default function EmployeeFormModal({
   const [changingPassword, setChangingPassword] = useState(false);
   const [documents, setDocuments] = useState(null);
   const [nextId, setNextId] = useState(null);
+  const [paidThroughName, setPaidThroughName] = useState("");
   const { data: lookups, isLoading: lookupsLoading, isError: lookupsError } = useEmployeeLookups(open);
 
   const schema = useMemo(() => buildFormSchema(hasExistingUser), [hasExistingUser]);
@@ -441,6 +452,8 @@ export default function EmployeeFormModal({
   useEffect(() => {
     if (!open) return;
     reset(employeeToFormValues(employee));
+    const pt = employee?.paidThrough;
+    setPaidThroughName(pt ? [pt.firstName, pt.middleName, pt.surname].filter(Boolean).join(" ") : "");
     setSection("personal");
     setShowPassword(false);
     setChangingPassword(false);
@@ -477,6 +490,7 @@ export default function EmployeeFormModal({
   const grantAccess = watch("grantAccess");
   const bankId = watch("bankId");
   const paymentMethod = watch("paymentMethod");
+  const mainDepartmentId = Number(watch("departmentId")) || null;
   const watchedId = watch("id");
   const firstName = watch("firstName");
   const surname = watch("surname");
@@ -881,6 +895,29 @@ export default function EmployeeFormModal({
               <SectionTitle title="Job" description="Where the employee works and reports." />
               <div className={GRID}>
                 <LookupSelect control={control} name="departmentId" label="Department" options={lookups?.departments} labelKey="dept_name" required error={errors.departmentId} loading={lookupsLoading} />
+                {/* Settings → Features: hr.extraDepartments */}
+                {features.on("hr.extraDepartments") && (
+                <div className="space-y-1.5 sm:col-span-2">
+                  <span className="text-sm font-medium">Also works in</span>
+                  <Controller
+                    control={control}
+                    name="extraDepartmentIds"
+                    render={({ field }) => (
+                      <SearchSelect
+                        multi
+                        width="100%"
+                        placeholder="Other departments (optional)"
+                        value={(field.value ?? []).filter((d) => d !== mainDepartmentId)}
+                        options={(lookups?.departments ?? []).filter((d) => d.id !== mainDepartmentId).map((d) => ({ value: d.id, label: d.dept_name }))}
+                        onChange={(v) => field.onChange((v ?? []).map(Number))}
+                      />
+                    )}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    HR of those departments see this employee too. Payroll, salary cost, reports and the approval chain stay on the main department.
+                  </p>
+                </div>
+                )}
                 <LookupSelect control={control} name="designationId" label="Designation" options={lookups?.designations} labelKey="desg_name" required error={errors.designationId} loading={lookupsLoading} />
                 <LookupSelect control={control} name="costCenterId" label="Cost center" options={lookups?.costCenters} labelKey="ccname" valueKey="ccno" required error={errors.costCenterId} loading={lookupsLoading} />
                 <LookupSelect control={control} name="managerId" label="Reports to (manager)" options={lookups?.managers} labelKey="manager" error={errors.managerId} loading={lookupsLoading} />
@@ -955,13 +992,33 @@ export default function EmployeeFormModal({
                   label="Payment method"
                   required
                   error={errors.paymentMethod}
-                  options={[
-                    { value: "CASH", label: "Cash" },
-                    { value: "DIRECT_DEPOSIT", label: "Direct deposit (bank)" },
-                    { value: "CHEQUE", label: "Cheque" },
-                  ]}
+                  // "Through a person": Settings → Features hr.paidThroughPerson (an employee already set to it keeps it)
+                  options={PAYMENT_METHODS.filter((m) => m.value !== "THROUGH_PERSON" || features.on("hr.paidThroughPerson") || employee?.paymentMethod === "THROUGH_PERSON")}
                 />
               </div>
+              {paymentMethod === "THROUGH_PERSON" && (
+                <div className="mt-4 max-w-md space-y-1.5">
+                  <span className="text-sm font-medium">
+                    Salary handed to <span className="text-destructive">*</span>
+                  </span>
+                  <Controller
+                    control={control}
+                    name="paidThroughId"
+                    render={({ field }) => (
+                      <EmployeePicker
+                        value={field.value ? { id: field.value, name: paidThroughName || `Employee #${field.value}` } : null}
+                        onChange={(emp) => {
+                          setPaidThroughName(emp?.name ?? "");
+                          field.onChange(emp?.id ?? null);
+                        }}
+                        placeholder="Who receives it and pays this employee"
+                      />
+                    )}
+                  />
+                  {errors.paidThroughId && <p className="text-xs font-medium text-destructive">{errors.paidThroughId.message}</p>}
+                  <p className="text-xs text-muted-foreground">For the record: payroll, the salary payment voucher and the bank files show it went through this person.</p>
+                </div>
+              )}
 
               <h4 className="mt-7 mb-3 text-sm font-bold uppercase tracking-wide text-muted-foreground">Bank account</h4>
               {paymentMethod === "DIRECT_DEPOSIT" && (
@@ -1002,16 +1059,20 @@ export default function EmployeeFormModal({
             </section>
 
             <section hidden={section !== "documents"}>
-              <SectionTitle title="Documents" description="Photograph, CNIC and certificates. Uploads save immediately." />
+              <SectionTitle title="Documents" description="Photograph, CNIC, certificates and HR letters. Uploads save immediately." />
               {isEdit ? (
-                <EmployeeDocumentsPanel
-                  employeeId={employee.id}
-                  documents={documents}
-                  onChange={(next) => {
-                    setDocuments(next);
-                    onDocumentsChange?.(next);
-                  }}
-                />
+                <div className="space-y-4">
+                  <EmployeeDocumentsPanel
+                    employeeId={employee.id}
+                    documents={documents}
+                    onChange={(next) => {
+                      setDocuments(next);
+                      onDocumentsChange?.(next);
+                    }}
+                  />
+                  {/* HR letters: issue, print, signed copy (Settings → Features hr.letters; hidden without hr.letters rights) */}
+                  {features.on("hr.letters") && <EmployeeLetters employee={employee} />}
+                </div>
               ) : (
                 <div className="rounded-xl border-2 border-dashed p-8 text-center text-sm text-muted-foreground">
                   Save the employee first, then open it again to upload documents.

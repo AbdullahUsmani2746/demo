@@ -11,7 +11,7 @@ import prisma from "@/lib/prisma";
 import { employeeFilter, employeeName, hrRights, HR_PERMS, sessionEmployeeId } from "@/lib/hr/access";
 import { loanActor } from "@/lib/hr/loans/access";
 import { hrRoute, jsonBody } from "@/lib/hr/route";
-import { activate, loanData, logEvent, thisMonth } from "@/lib/hr/loans/service";
+import { activate, loanData, logEvent, overPolicyLimit, thisMonth } from "@/lib/hr/loans/service";
 import { dueInMonth, isRefundable, LOAN_KINDS, LOAN_STATUS, loanApprovalType, outstandingOf, recoveredTotal } from "@/lib/hr/loans/schedule";
 import { fmtMoney } from "@/lib/hr/salary/calc";
 import { createHrRequest, mayPayOut, payersOf } from "@/lib/hr/approvals";
@@ -108,6 +108,8 @@ export const POST = hrRoute([HR_PERMS.loanApply, HR_PERMS.loanManage], async (re
     session,
     chain,
     employeeId: who.employeeId,
+    // Steps that apply only above an amount / over the HR limit (e.g. CEO).
+    context: chain ? { amount: d.amount, overLimit: await overPolicyLimit({ employee_id: who.employeeId, kind: d.kind, amount: d.amount }) } : {},
   });
   await prisma.hrLoan.update({ where: { id: loan.id }, data: { approval_request_id: request.id } });
   return NextResponse.json({ id: loan.id, status: "pending", message: `#A-${loan.id} sent for approval — ${what}.` }, { status: 201 });

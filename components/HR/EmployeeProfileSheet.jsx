@@ -20,6 +20,7 @@ import { fmtDays } from "@/lib/hr/leave/policy";
 import { fmtMoney } from "@/lib/hr/salary/calc";
 import { daysBetween, fmtMinutes } from "@/lib/hr/time";
 import { api, CHIP, EmployeeCell, fmtMonth, HR_TABS_LIST, HR_TABS_TRIGGER, ShiftChip } from "@/components/HR/shared";
+import { paidByText } from "@/lib/hr/paymentMethods";
 
 const LEAVE_TONE = { approved: CHIP.ok, pending: CHIP.warn, rejected: CHIP.bad, cancelled: CHIP.muted };
 
@@ -111,7 +112,7 @@ export default function EmployeeProfileSheet({ employee, onClose, onEdit }) {
                   ["EOBI no.", e.eobi_no],
                   ["Machine id", e.attendanceId || `${e.id} (emp no)`],
                   ["System login", e.login ? `${e.login.username} · ${roleLabel(e.login.role)}${e.login.active ? "" : " (disabled)"}` : "None"],
-                  ...(e.bank ? [["Salary paid by", [e.bank.method, e.bank.bank, e.bank.account].filter(Boolean).join(" · ")]] : []),
+                  ...(e.bank ? [["Salary paid by", paidByText(e.bank)]] : []),
                 ]} />
               </TabsContent>
               {data.attendance && (

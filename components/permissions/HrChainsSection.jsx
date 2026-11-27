@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/bi/SearchSelect";
 import { roleLabel } from "@/lib/auth/roleNames";
+import { describeWhen } from "@/lib/hr/chainWhen";
 
 const LABEL = "text-[11px] font-bold uppercase tracking-wider text-primary";
 const INPUT =
@@ -33,7 +34,7 @@ const blankChain = () => ({
 // Shared with the approval rules (ApprovalRulesSection — "Approve in steps").
 export function StepEditor({
   step, index, count, meta, payAllowed, onChange, onMove, onRemove,
-  showFinal = true, managerLabel = "The employee's reporting manager",
+  showFinal = true, managerLabel = "The employee's reporting manager", conditions = false,
 }) {
   const set = (patch) => onChange({ ...step, ...patch });
   return (
@@ -121,6 +122,56 @@ export function StepEditor({
           </label>
         )}
       </div>
+
+      {conditions && step.type === "approve" && (
+        <StepCondition when={step.when} onChange={(when) => set({ when })} />
+      )}
+    </div>
+  );
+}
+
+// Advance / loan chains: a step needed only above an amount or over the HR
+// limit (lib/hr/chainWhen.js) — e.g. "CEO approval above 100,000".
+function StepCondition({ when, onChange }) {
+  const on = Boolean(when);
+  const w = when ?? { minAmount: null, overLimit: false };
+  return (
+    <div className="space-y-2 rounded-lg border border-dashed border-border bg-muted/30 p-2.5 text-sm">
+      <label className="flex items-center gap-2 font-medium">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => onChange(e.target.checked ? { minAmount: null, overLimit: true } : null)}
+          className="h-4 w-4 accent-[#800000]"
+        />
+        Needed only for large amounts (e.g. CEO approval)
+      </label>
+      {on && (
+        <div className="space-y-2 pl-6">
+          <label className="flex flex-wrap items-center gap-2">
+            <span>When the amount is above</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              inputMode="decimal"
+              aria-label="Amount above"
+              value={w.minAmount ?? ""}
+              onChange={(e) => onChange({ ...w, minAmount: e.target.value === "" ? null : Number(e.target.value) })}
+              placeholder="e.g. 100000"
+              className={`${INPUT} w-36`}
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={Boolean(w.overLimit)} onChange={(e) => onChange({ ...w, overLimit: e.target.checked })} className="h-4 w-4 accent-[#800000]" />
+            Or when it is over the HR advance / loan limit (HR → Rules)
+          </label>
+          <p className="text-[11px] text-muted-foreground">
+            Either one brings the step in. Otherwise the request skips it — if it was the final approval, the approve step before it becomes final.
+            {!w.minAmount && !w.overLimit ? " Set an amount or tick the limit, or untick this box." : ""}
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -226,6 +277,7 @@ function ChainEditor({ initial, meta, onSaved, onCancel }) {
             count={c.steps.length}
             meta={meta}
             payAllowed={Boolean(type?.pay)}
+            conditions={Boolean(type?.conditions)}
             onChange={(v) => setStep(i, v)}
             onMove={(d) => move(i, d)}
             onRemove={() => set({ steps: c.steps.filter((_, j) => j !== i) })}
@@ -324,6 +376,7 @@ function ChainCard({ chain, meta, onEdit, onDelete }) {
                 {who(s)}
                 {s.pickNext ? " · chooses next" : ""}
               </p>
+              {s.when && <p className="mt-0.5 text-[11px] font-medium text-amber-700">{describeWhen(s.when)}</p>}
             </div>
             {i < steps.length - 1 && <ChevronRight className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />}
           </li>

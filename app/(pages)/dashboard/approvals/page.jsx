@@ -309,6 +309,7 @@ function ChainProgress({ chain }) {
               <p className="mt-0.5 break-words pl-6 text-[11px] text-slate-600">
                 {s.state === "current" && s.now?.length ? `With ${s.now.join(" or ")}` : s.who.map((w) => (w.startsWith("role:") ? `everyone in ${w.slice(5)}` : w)).join(" / ")}
               </p>
+              {s.when && <p className="mt-0.5 pl-6 text-[11px] font-medium text-amber-700">{s.when} — this request needs it</p>}
               {s.acted?.map((a, j) => (
                 <p key={j} className="mt-1 break-words pl-6 text-[11px] text-slate-700">
                   <span className="font-semibold">{ACTED[a.action] ?? a.action}</span> by {a.by} · {when(a.at)}
@@ -320,6 +321,11 @@ function ChainProgress({ chain }) {
           );
         })}
       </ol>
+      {chain.skipped?.length > 0 && (
+        <p className="mt-2 break-words text-[11px] text-slate-500">
+          Not needed for this request: {chain.skipped.map((k) => `${k.label}${k.why ? ` (${k.why.replace(/^Only when /, "only when ")})` : ""}`).join(" · ")}
+        </p>
+      )}
     </section>
   );
 }

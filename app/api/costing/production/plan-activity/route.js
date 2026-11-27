@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { openingSql } from "@/lib/openingStock";
 import { NextResponse } from "next/server";
@@ -51,7 +52,7 @@ export async function GET(request) {
       WHERE tm.tran_code = 8
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-        AND tm.rmk5 = ${String(planId)}
+        AND ${poRefSql("tm")} = ${String(planId)}
         AND t.sub_tran_id = 1
         AND t.qty > 0
       GROUP BY tm.vr_no, tm.dated
@@ -142,7 +143,7 @@ export async function GET(request) {
       WHERE tm.tran_code = 7
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-        AND tm.rmk5 = ${String(planId)}
+        AND ${poRefSql("tm")} = ${String(planId)}
         AND t.sub_tran_id = 1
         AND t.qty  > 0
       GROUP BY t.itcd, i.item, i.code, i.unit, COALESCE(fr.avg_rate, 0)
@@ -166,7 +167,7 @@ export async function GET(request) {
     if (plan?.finished_id) {
       const freqRows = await prisma.$queryRaw`
         SELECT
-          NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer AS plan_id,
+          NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer AS plan_id,
           tm.vr_no,
           tm.dated,
           SUM(t.qty) AS qty
@@ -178,7 +179,7 @@ export async function GET(request) {
           AND t.itcd = ${plan.finished_id}
           AND t.sub_tran_id = 1
           AND t.qty > 0
-        GROUP BY NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer, tm.vr_no, tm.dated
+        GROUP BY NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer, tm.vr_no, tm.dated
         ORDER BY tm.dated ASC
       `;
 

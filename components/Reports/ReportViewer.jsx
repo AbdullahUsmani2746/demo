@@ -198,6 +198,12 @@ const ReportViewer = ({ reportType }) => {
   const [currentFileName, setCurrentFileName] = useState("");
   const [currentDoc, setCurrentDoc] = useState(null);
   const [showPdfOrientationModal, setShowPdfOrientationModal] = useState(false);
+  // Which PDF the orientation dialog is for: "classic" (exportToPDF) or "view" (wide current view)
+  const [pdfOrientationFor, setPdfOrientationFor] = useState("classic");
+  const askPdfOrientation = (target) => {
+    setPdfOrientationFor(target);
+    setShowPdfOrientationModal(true);
+  };
 
   const PrintPreviewModal = ({ isOpen, onClose, pdfUrl, title, onDownload }) => {
     return (
@@ -802,6 +808,22 @@ const ReportViewer = ({ reportType }) => {
       }
     }
   }, [reportType, filters.godownWise, reportData?.config?.columns]);
+
+  // Reports with a services breakdown (config.services — GRN, dispatch,
+  // purchase, sale …): the API sends one column per service used plus the
+  // totals (lib/service/landedCost.js); they go after the view's own columns,
+  // under a "Services" band (components/Reports/layout.js).
+  // Reports with config.apiExtraColumns (Stock Activity With Rate, COGS: one
+  // column per service category) get the API's columns as sent — each names
+  // its band and position (`extra: { id, label, before }`).
+  const serviceColumns = useMemo(() => {
+    if (config?.apiExtraColumns) return reportData?.config?.extraColumns || [];
+    if (!config?.services) return [];
+    return (reportData?.config?.extraColumns || []).map((c) => ({
+      ...c,
+      extra: { id: "services", label: "Services", foldTo: "services_amount" },
+    }));
+  }, [config?.services, config?.apiExtraColumns, reportData?.config?.extraColumns]);
 
   // Reports whose columns depend on the data (config.apiColumns, e.g. HR
   // Leave taken: one column per leave type used) take the API's column list.
@@ -3612,8 +3634,8 @@ const ReportViewer = ({ reportType }) => {
       ? config.getColumns(filters)
       : config.columns || [];
 
-    return [...baseColumns, ...dynamicColumns];
-  }, [config, dynamicColumns, filters, reportType, apiColumns, parameterColumns]);
+    return [...baseColumns, ...dynamicColumns, ...serviceColumns];
+  }, [config, dynamicColumns, serviceColumns, filters, reportType, apiColumns, parameterColumns]);
 
   // + the item Code / Category / Sub Category a report lacks (itemColumns.js)
   const itemSourceRows = Array.isArray(reportData?.allData) ? allData : data;
@@ -4006,7 +4028,7 @@ const ReportViewer = ({ reportType }) => {
     !wideModel?.groupRows &&
     (config.layout === "nested" || !!config.detailColumns || reportType === "bom" || reportType === "processOrderReconciliation");
   const ownPdf = reportType === "bom" || reportType === "processOrderReconciliation";
-  const handleWideExport = async (kind, mode = "view") => {
+  const handleWideExport = async (kind, mode = "view", orientation) => {
     const model = wideRef.current?.getExportModel?.(mode);
     if (!model) return;
     setIsExporting(true);
@@ -4019,6 +4041,8 @@ const ReportViewer = ({ reportType }) => {
         generatedAt: format(new Date(), "dd MMM yyyy, HH:mm"),
         filters: activeFilterList(),
         fileBase: `${config.title}_${mode === "all" ? "All" : "View"}_${stamp}`,
+        orientation,
+        fitToWidth: !!config.pdfFitWidth,
       };
       if (kind === "excel") {
         await exportWideExcel(model, meta);
@@ -4286,18 +4310,18 @@ const ReportViewer = ({ reportType }) => {
                   ))}
                   {config.exportOptions?.pdf && (isWideMode ? (
                     <>
-                      <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => handleWideExport("pdf", "view")}>
+                      <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => askPdfOrientation("view")}>
                         <FileTextIcon className="w-4 h-4 mr-2 text-red-600" />PDF — current view
                       </DropdownMenuItem>
                       {hasClassicExport && (
-                        <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => (ownPdf ? handleExport("pdf") : setShowPdfOrientationModal(true))}>
+                        <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => (ownPdf ? handleExport("pdf") : askPdfOrientation("classic"))}>
                           <FileTextIcon className="w-4 h-4 mr-2 text-red-600" />
                           {reportType === "bom" ? "PDF — BOM sheets" : reportType === "processOrderReconciliation" ? "PDF — reconciliation format" : "PDF — classic (with details)"}
                         </DropdownMenuItem>
                       )}
                     </>
                   ) : (
-                    <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => setShowPdfOrientationModal(true)}>
+                    <DropdownMenuItem className="min-h-10" disabled={!canExport} onSelect={() => askPdfOrientation("classic")}>
                       <FileTextIcon className="w-4 h-4 mr-2 text-red-600" />PDF
                     </DropdownMenuItem>
                   ))}
@@ -4385,14 +4409,14 @@ const ReportViewer = ({ reportType }) => {
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuItem onSelect={() => handleWideExport("pdf", "view")}>PDF — current view</DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => (ownPdf ? handleExport("pdf") : setShowPdfOrientationModal(true))}>
+                    <DropdownMenuItem onSelect={() => askPdfOrientation("view")}>PDF — current view</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => (ownPdf ? handleExport("pdf") : askPdfOrientation("classic"))}>
                       {reportType === "bom" ? "PDF — BOM sheets" : reportType === "processOrderReconciliation" ? "PDF — reconciliation format" : "PDF — classic (with details)"}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               ) : (
-                <button onClick={() => handleWideExport("pdf", "view")} disabled={isExporting || data.length === 0}
+                <button onClick={() => askPdfOrientation("view")} disabled={isExporting || data.length === 0}
                   title="Export PDF (current view)"
                   className="h-7 w-7 flex items-center justify-center rounded hover:bg-white/15 disabled:opacity-30 transition-colors">
                   <FileTextIcon className="w-4 h-4 text-red-400" />
@@ -4408,7 +4432,7 @@ const ReportViewer = ({ reportType }) => {
               </button>
             )}
             {!isWideMode && config.exportOptions?.pdf && (
-              <button onClick={() => setShowPdfOrientationModal(true)} disabled={isExporting || data.length === 0}
+              <button onClick={() => askPdfOrientation("classic")} disabled={isExporting || data.length === 0}
                 title="Export PDF"
                 className="h-7 w-7 flex items-center justify-center rounded hover:bg-white/15 disabled:opacity-30 transition-colors">
                 <FileTextIcon className="w-4 h-4 text-red-400" />
@@ -4644,7 +4668,8 @@ const ReportViewer = ({ reportType }) => {
                 className="flex flex-col items-center justify-center p-5 h-auto gap-3 border-2 border-slate-200 hover:border-primary hover:bg-primary/5 transition-all rounded-xl"
                 onClick={() => {
                   setShowPdfOrientationModal(false);
-                  exportToPDF("portrait");
+                  if (pdfOrientationFor === "view") handleWideExport("pdf", "view", "portrait");
+                  else exportToPDF("portrait");
                 }}
               >
                 <div className="w-9 h-12 border-2 border-slate-500 rounded flex items-center justify-center bg-white shadow-sm">
@@ -4661,7 +4686,8 @@ const ReportViewer = ({ reportType }) => {
                 className="flex flex-col items-center justify-center p-5 h-auto gap-3 border-2 border-slate-200 hover:border-primary hover:bg-primary/5 transition-all rounded-xl"
                 onClick={() => {
                   setShowPdfOrientationModal(false);
-                  exportToPDF("landscape");
+                  if (pdfOrientationFor === "view") handleWideExport("pdf", "view", "landscape");
+                  else exportToPDF("landscape");
                 }}
               >
                 <div className="w-12 h-9 border-2 border-slate-500 rounded flex items-center justify-center bg-white shadow-sm">

@@ -46,6 +46,7 @@ export const GET = hrRoute([HR_PERMS.bankFile], async (req, { params, session })
             bank: { select: { id: true, name: true } },
             bankBranch: { select: { name: true, branch_code: true } },
             department: { select: { dept_name: true } },
+            paidThrough: { select: { id: true, firstName: true, middleName: true, surname: true } },
           },
         },
       },
@@ -77,10 +78,17 @@ export const GET = hrRoute([HR_PERMS.bankFile], async (req, { params, session })
   const cash = [];
   const cheque = [];
   const missing = [];
+  const through = new Map(); // "Through a person": one list per person it is handed to
   for (const p of slips) {
     const r = row(p);
     if (p.employee.paymentMethod === "CASH") cash.push(r);
     else if (p.employee.paymentMethod === "CHEQUE") cheque.push(r);
+    else if (p.employee.paymentMethod === "THROUGH_PERSON") {
+      const t = p.employee.paidThrough;
+      const k = t?.id ?? 0;
+      if (!through.has(k)) through.set(k, { id: k || null, name: t ? employeeName(t) : "Person not chosen", rows: [] });
+      through.get(k).rows.push(r);
+    }
     else if (!p.employee.bankId || !String(p.employee.accountNumber ?? "").trim()) missing.push({ ...r, problem: !p.employee.bankId ? "No bank on the employee" : "No account number" });
     else {
       const k = p.employee.bankId;
@@ -98,6 +106,7 @@ export const GET = hrRoute([HR_PERMS.bankFile], async (req, { params, session })
     banks: [...banks.values()].sort((a, b) => a.bank.localeCompare(b.bank)),
     cash: { rows: cash, total: total(cash) },
     cheque: { rows: cheque, total: total(cheque) },
+    through: [...through.values()].map((t) => ({ ...t, total: total(t.rows) })).sort((a, b) => a.name.localeCompare(b.name)),
     missing: { rows: missing, total: total(missing) },
   });
 });

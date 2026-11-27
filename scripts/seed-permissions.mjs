@@ -178,6 +178,9 @@ const SPECIAL = [
   ["hr.settlement.post", "HR", "Post full & final settlements to accounts, pay and reverse them (posts vouchers)"],
   // Feature hr.pfLoans (prisma/sql/2026-11-21_hr_pf_loans.sql)
   ["hr.pfloan.approve", "HR", "Approve or reject provident fund loans and withdrawals"],
+  // HR letters (prisma/sql/2026-11-27_hr_letters.sql)
+  ["hr.letters.issue", "HR", "Issue HR letters (appointment, probation, confirmation, warning, termination), print them and upload the signed copy"],
+  ["hr.letters.templates", "HR", "Change the wording of the HR letters"],
   ["audit.view", "Administration", "Open the Audit Trail (who changed what, when — every table)"],
   // Feature "vouchers.subAccounts" (app/api/sub-accounts). Adding one from a
   // voucher line is also open to whoever creates receipts / payments / journals.
@@ -266,8 +269,8 @@ function reportCategory(reportType) {
     stock: ["stock", "stockActivity", "stockActivityView", "stockLedger", "stockMetrics", "tradingMargin", "monthlyStock", "monthlyStockValuation", "stockActivityWithRate", "stockWithCost", "fgstock", "fgdailystock"],
     production: ["productionCosting", "materialProduction", "materialIssuance", "directMaterialIssuanceCost", "bom", "qc", "orderQc", "qcParameters", "batchCosting", "batchBalance", "batchLedger", "processOrderReconciliation", "processOrderTiming", "pendingReport", "productionPlanning", "costOfGoodsManufactured", "masterSample", "rmc", "dailyProduction", "monthWiseRMMovingAverage", "rmCosting"],
     sales: ["sale", "saleOrder", "isoTimeline", "saleOrderToDispatch", "saleReturn", "posTransactions", "posDailySales", "posSalesByItem", "posSalesByPayment", "posSalesByCashier", "posReturns", "customerAging", "salesPerformanceWeekly", "dispatch", "dispatchReturn", "dailyDispatch", "salesOrderBalance", "salesTeamMis", "customerMargin", "costOfSales", "customerFile", "ilfile", "pcfile", "prfile"],
-    purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn", "grnReturn", "purchaseOrderBalance", "materialprocurement", "materialprocurementenquiry", "importedMaterialStock", "importedMaterialinTransit", "importedMaterialDeals", "costOfGoodsSold", "exbondReport", "purchasingfile"],
-    financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "trialBalancePeriod", "trialBalanceSheet", "profitLoss", "accountsActivity", "payment", "receipt", "journal", "cbBook", "fundsFlow", "fundsPosition", "checksInHand", "profitLossMonthly", "withHoldingTax", "digitalInvoice"],
+    purchase: ["purchase", "purchaseOrder", "purchaseReturn", "grn", "grnReturn", "purchaseOrderBalance", "materialprocurement", "materialprocurementenquiry", "importedMaterialStock", "importedMaterialinTransit", "importedMaterialDeals", "costOfGoodsSold", "dataChecking", "exbondReport", "purchasingfile"],
+    financial: ["accountLedger", "accountLedgerSummary", "trialBalance", "trialBalancePeriod", "trialBalanceSheet", "monthlyBalanceSheet", "profitLoss", "accountsActivity", "payment", "receipt", "journal", "cbBook", "fundsFlow", "fundsPosition", "checksInHand", "profitLossMonthly", "withHoldingTax", "digitalInvoice"],
     service: ["serviceOrder", "serviceEntry", "serviceInvoice"],
     fixedAssets: ["fixedAssetRegister", "fixedAssetMovement", "fixedAssetSchedule", "fixedAssetDisposals"],
   };

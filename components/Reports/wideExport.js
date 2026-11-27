@@ -250,14 +250,19 @@ function findGroupStart(items, sub) {
 
 // ── PDF ─────────────────────────────────────────────────────────────────────
 const MIN_PT = 7;
+const FIT_MIN_PT = 5.5; // smallest font when a report fits all columns on one page width
 
 export async function exportWidePdf(model, meta) {
   const { jsPDF } = await import("jspdf");
   const { default: autoTable } = await import("jspdf-autotable");
   const cols = model.columns;
   const n = cols.length;
-  const format = n > 16 ? "a3" : "a4";
-  const orientation = n > 10 ? "landscape" : "portrait";
+  // A report that fits all columns on one page width always prints on A4.
+  const format = meta.fitToWidth ? "a4" : (n > 16 ? "a3" : "a4");
+  // The user picks it in the orientation dialog; without a choice, wide tables go landscape.
+  const orientation = meta.orientation === "portrait" || meta.orientation === "landscape"
+    ? meta.orientation
+    : (n > 10 ? "landscape" : "portrait");
   const doc = new jsPDF({ orientation, unit: "mm", format, putOnlyUsedFonts: true });
   const pageW = doc.internal.pageSize.getWidth();
   const margin = 8;
@@ -288,13 +293,18 @@ export async function exportWidePdf(model, meta) {
 
   const all = cols.map((_, i) => i);
   let pt = 8;
-  if (!fitsAt(8, all)) pt = fitsAt(7.5, all) ? 7.5 : MIN_PT;
+  if (meta.fitToWidth) {
+    // Report asks for every column on one page width (config `pdfFitWidth`):
+    // shrink the font down to FIT_MIN_PT; past that the columns are squeezed
+    // to the page and long text wraps inside its cell — never split into parts.
+    pt = [8, 7.5, 7, 6.5, 6, 5.5].find((p) => fitsAt(p, all)) ?? FIT_MIN_PT;
+  } else if (!fitsAt(8, all)) pt = fitsAt(7.5, all) ? 7.5 : MIN_PT;
 
   // Column sets: everything if it fits, else pinned + as many as fit, repeated.
   const pinnedIdx = all.slice(0, model.pinnedCount);
   const rest = all.slice(model.pinnedCount);
   const sets = [];
-  if (fitsAt(pt, all)) sets.push(all);
+  if (meta.fitToWidth || fitsAt(pt, all)) sets.push(all);
   else {
     let cur = [];
     rest.forEach((i) => {

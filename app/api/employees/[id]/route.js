@@ -7,6 +7,8 @@ import { setAuditActor } from "@/lib/audit/context";
 import { validateEmployee, validateEmployeeAccess } from "@/validators/employee.validator";
 import {
     EMPLOYEE_INCLUDE,
+    syncExtraDepartments,
+    employeeFeatureCheck,
     attachLinkedUser,
     findLinkedUser,
     canManageEmployees,
@@ -62,10 +64,13 @@ export const PUT = guard("employee.manage", async (req, { params }) => {
 
         const body = await req.json();
 
-        const parsedEmployee = validateEmployee(body);
+        const parsedEmployee = validateEmployee({ ...body, id: employeeId });
         if (!parsedEmployee.success) {
             return NextResponse.json(validationErrorBody(parsedEmployee.error), { status: 400 });
         }
+
+        const featureCheck = await employeeFeatureCheck(parsedEmployee.data, existing);
+        if (featureCheck.error) return NextResponse.json({ error: featureCheck.error }, { status: 400 });
 
         const parsedAccess = validateEmployeeAccess(body);
         if (!parsedAccess.success) {
@@ -168,6 +173,10 @@ export const PUT = guard("employee.manage", async (req, { params }) => {
                 data: buildEmployeeData(parsedEmployee.data),
                 include: EMPLOYEE_INCLUDE,
             });
+            if (featureCheck.extraDepartments && parsedEmployee.data.extraDepartmentIds) {
+                await syncExtraDepartments(tx, employeeId, parsedEmployee.data.extraDepartmentIds, parsedEmployee.data.departmentId);
+                updated.extraDepartments = await tx.employeeDepartment.findMany({ where: { employee_id: employeeId }, select: EMPLOYEE_INCLUDE.extraDepartments.select });
+            }
 
             let loginId = null;
             if (userUpdate) loginId = (await tx.user.update({ ...userUpdate, select: { id: true } })).id;

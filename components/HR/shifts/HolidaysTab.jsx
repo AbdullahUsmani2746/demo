@@ -232,6 +232,7 @@ export function RulesTab({ meta }) {
         </ul>
       </Panel>
       <LoanRules meta={meta} />
+      <EmployeeNoRule meta={meta} canManage={canManage} />
       <Panel title="Who can do what" icon={KeyRound} bodyClassName="space-y-3 p-4 text-sm text-foreground/85 sm:p-5">
         <p>Rights are given per person or per role on <b>Admin → Permissions</b>, module <b>HR</b>: view, mark, approve, import / sync, manage machines, manage shifts, manage holidays.</p>
         <p>To limit someone to certain departments, use the <b>Departments (HR)</b> data limit on the same screen — they then see and mark only those employees, everywhere in HR.</p>
@@ -241,6 +242,43 @@ export function RulesTab({ meta }) {
         </div>
       </Panel>
     </div>
+  );
+}
+
+/** Where new employee numbers continue (lib/employees.js getNextEmployeeId). */
+function EmployeeNoRule({ meta, canManage }) {
+  const qc = useQueryClient();
+  const [end, setEnd] = useState(meta.settings.employeeNoSeriesEnd);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setEnd(meta.settings.employeeNoSeriesEnd), [meta.settings.employeeNoSeriesEnd]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await api("/api/hr/settings", { method: "PUT", body: { employeeNoSeriesEnd: Number(end) } });
+      toast.success(r.message);
+      qc.invalidateQueries({ queryKey: ["hr-meta"] });
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel title="Employee numbers" icon={ShieldCheck} bodyClassName="space-y-2 p-4 sm:p-5">
+      <Label htmlFor="rule-empno">New employee numbers stay below</Label>
+      <div className="flex gap-2">
+        <Input id="rule-empno" type="number" inputMode="numeric" min={0} value={end ?? ""} onChange={(e) => setEnd(e.target.value)} disabled={!canManage} className="w-36 tabular-nums" />
+        {canManage && (
+          <Button className={BRAND_BTN} onClick={save} disabled={busy || Number(end) === meta.settings.employeeNoSeriesEnd}>
+            {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}Save
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Add Employee suggests the highest number below this + 1, so the regular series (100s, 200s …) continues; numbers given above it do not
+        move it. 0 = no limit: the highest number + 1. The number can still be typed by hand.
+      </p>
+    </Panel>
   );
 }
 

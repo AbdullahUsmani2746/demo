@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { guard } from "@/lib/auth/route";
 import { recordScopeError } from "@/lib/auth/documentScope";
 import { feature } from "@/lib/features/server";
+import { plantIdOf, processLinkError } from "@/lib/items/processLink";
 
 export async function GET(request) {
   try {
@@ -171,6 +172,18 @@ export const POST = guard("setup.items.manage", async (request, { session }) => 
     // substrates for the same product). The ink code below is the identity
     // that must stay unique.
     const itemName = data.item?.trim();
+
+    // In-process stock of (Item.plant_id) — lib/items/processLink.js; only
+    // while Settings → Features "costing.inProcessLink" is on
+    if (await feature("costing.inProcessLink")) {
+      data.plant_id = plantIdOf(data.plant_id);
+      const linkError = await processLinkError(prisma, null, data.plant_id);
+      if (linkError) return NextResponse.json({ error: linkError }, { status: 400 });
+    } else {
+      delete data.plant_id;
+    }
+    // Costing "Gets plant expenses?" — only a true / false tick is stored
+    if (data.gets_plant_expenses !== undefined) data.gets_plant_expenses = data.gets_plant_expenses === true;
 
     const inkCode = data.code?.trim();
     if (inkCode) {

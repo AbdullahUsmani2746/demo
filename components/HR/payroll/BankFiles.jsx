@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Download, FileText, Landmark, Loader2, Plus, Printer, Trash2, ArrowUp, ArrowDown, Banknote, AlertTriangle } from "lucide-react";
+import { Download, FileText, Landmark, Loader2, Plus, Printer, Trash2, ArrowUp, ArrowDown, Banknote, AlertTriangle, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -151,6 +151,9 @@ export function BankFilesDialog({ runId, open, onClose }) {
             </div>
             {other("Paid in cash", data.cash, <Banknote className="h-4 w-4 text-primary" />)}
             {other("Paid by cheque", data.cheque, <FileText className="h-4 w-4 text-primary" />)}
+            {(data.through ?? []).map((t) => (
+              <div key={t.id ?? "none"}>{other(`Handed through ${t.name}`, t, <Users className="h-4 w-4 text-primary" />)}</div>
+            ))}
             {other("Bank transfer, but bank details missing", data.missing, <AlertTriangle className="h-4 w-4 text-red-700" />)}
           </div>
         )}

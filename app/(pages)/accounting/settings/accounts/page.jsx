@@ -445,7 +445,7 @@ export default function AccountSettingsPage() {
                           <div
                             key={s.key}
                             id={settingDomId(s.key)}
-                            className={`grid scroll-mt-28 gap-3 px-4 py-3.5 transition-shadow md:grid-cols-[1fr_minmax(280px,420px)] ${dirty ? "bg-primary/[0.04]" : ""}`}
+                            className={`grid scroll-mt-28 gap-3 py-3.5 pr-4 transition-shadow md:grid-cols-[1fr_minmax(280px,420px)] ${s.variantOf ? "border-l-4 border-l-primary/25 bg-muted/30 pl-6 md:pl-10" : "pl-4"} ${dirty ? "bg-primary/[0.04]" : ""}`}
                           >
                             <div className="min-w-0 space-y-1.5">
                               <div className="flex flex-wrap items-center gap-2">
@@ -454,6 +454,8 @@ export default function AccountSettingsPage() {
                                   <span className="inline-flex items-center gap-1 rounded-full bg-[#edf2ee] px-2 py-0.5 text-[11px] font-semibold text-[#2f5139]">
                                     <CheckCircle2 className="h-3 w-3" /> Set
                                   </span>
+                                ) : s.variantOf ? (
+                                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">Blank = default</span>
                                 ) : s.required ? (
                                   <span className="rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-semibold text-destructive">Required — not set</span>
                                 ) : (

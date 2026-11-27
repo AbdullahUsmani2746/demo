@@ -6,6 +6,7 @@ import { authOptions } from "@/lib/auth";
 import { setAuditActor } from "@/lib/audit/context";
 import { guardBy } from "@/lib/auth/route";
 import { setupScopeWhere, isScopedSetupEntity } from "@/lib/auth/documentScope";
+import { getCompany } from "@/lib/company";
 
 export async function GET(request, { params }) {
   try {
@@ -283,12 +284,16 @@ export const POST = guardBy(
 
     const body = await req.json();
 
-    if (body.ic_id) {
-      body.ic_id = parseInt(body.ic_id);
-    } else if (body.company || body.currency) {
-    } else if(body.is_active) {
-    } else {
-      body.company_id = 1;
+    if (body.ic_id) body.ic_id = parseInt(body.ic_id);
+    // An entity whose fields() take company_id gets this installation's own
+    // company (Settings → Company, lib/company.js) when the form sends none.
+    // (It used to be skipped whenever the body had ic_id or is_active, so a
+    // new service / godown — whose forms send "Active" — was saved with
+    // company_id NaN and refused.) fields() keeps only each entity's own
+    // columns, so entities without a company never see it.
+    if (body.company_id == null || body.company_id === "") {
+      const { id: companyId } = await getCompany();
+      if (companyId != null) body.company_id = companyId;
     }
 
 

@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { getOpeningOne, getOpening } from "@/lib/openingStock";
 import { NextResponse } from "next/server";
@@ -202,7 +203,7 @@ export async function GET(request) {
         i.code                                                             AS finished_code,
         i.unit,
         COALESCE(SUM(t.qty),              0)                               AS total_qty,
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer AS plan_id_raw,
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer AS plan_id_raw,
         MIN(tm.dated)                                                      AS first_date,
         MAX(tm.dated)                                                      AS last_date,
         COUNT(DISTINCT tm.tran_id)                                         AS tran_count
@@ -215,15 +216,15 @@ export async function GET(request) {
         AND t.sub_tran_id = 1
         AND t.qty > 0
         AND (
-          NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'') IS NULL
+          NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'') IS NULL
           OR EXISTS (
             SELECT 1 FROM "productionPlanMaster" ppm
-            WHERE ppm.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer
+            WHERE ppm.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer
               AND ppm.status = 'Posted'
           )
         )
       GROUP BY t.itcd, i.item, i.code, i.unit,
-               NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer
+               NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer
       ORDER BY i.item ASC
     `;
 
@@ -383,7 +384,7 @@ export const POST = guard("costing.manage", async (request) => {
       where: { id: parseInt(plan_id) },
       include: {
         item: { select: { itcd: true, item: true, code: true } },
-        costEntry: { include: { details: true } },
+        costEntries: { include: { details: true }, orderBy: { output_line: "asc" } },
       },
     });
 
@@ -418,7 +419,7 @@ export const POST = guard("costing.manage", async (request) => {
       WHERE  tm.tran_code = 8
         AND  tm.dated >= ${startDate}
         AND  tm.dated <= ${endDate}
-        AND  tm.rmk5 = ${String(plan_id)}
+        AND  ${poRefSql("tm")} = ${String(plan_id)}
         AND  t.sub_tran_id = 1
         AND  t.qty > 0
     `;
@@ -465,8 +466,9 @@ export const POST = guard("costing.manage", async (request) => {
       cost_per_unit: costPerUnit,
       missing_cost_items: missingCosts,
       raw_materials: rawMaterials,
-      already_costed: !!plan.costEntry,
-      cost_entry:   plan.costEntry || null,
+      already_costed: plan.costEntries.length > 0,
+      cost_entry:   plan.costEntries[0] || null, // line 1; cost_entries = every production item
+      cost_entries: plan.costEntries,
     });
   } catch (error) {
     console.error("BOM cost explosion error:", error);
