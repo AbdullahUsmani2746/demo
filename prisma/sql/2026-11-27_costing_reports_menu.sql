@@ -1,5 +1,5 @@
 -- =====================================================================
--- Top-level menu COSTING REPORTS with its reports (owner, 25 Nov 2026):
+-- Top-level menu COSTING REPORTS with its reports:
 --   STOCK ACTIVITY WITH RATE       /accounting/reports/stockActivityWithRate
 --   DATA CHECKING REPORT           /accounting/reports/dataChecking
 --   COST OF GOODS MANUFACTURED     /accounting/reports/costOfGoodsManufactured

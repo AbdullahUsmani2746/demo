@@ -46,8 +46,9 @@ export async function GET(request) {
       where: planWhere,
       include: {
         item: { select: { itcd: true, item: true, code: true, unit: true } },
-        costEntry: {
+        costEntries: {
           include: { details: true },
+          orderBy: { output_line: "asc" },
         },
       },
       orderBy: { dated: "desc" },
@@ -176,19 +177,28 @@ export async function GET(request) {
 
     for (const plan of plans) {
       const qty = plan.actual_yield || plan.qty || 0;
-      const isCosted = !!plan.costEntry;
+      // All production items of the order together (one entry per output line)
+      const entries = plan.costEntries || [];
+      const isCosted = entries.length > 0;
+      const entryDetails = entries.flatMap((e) => e.details || []);
+      const entryQty = entries.reduce((s, e) => s + (Number(e.qty_costed) || 0), 0);
+      const entryCost = entries.reduce((s, e) => s + (Number(e.total_cost) || 0), 0);
 
       // BOM expected materials (from saved ProductionCostDetail)
       const bomMaterials = new Map();
-      if (plan.costEntry?.details) {
-        for (const detail of plan.costEntry.details) {
+      if (entryDetails.length) {
+        for (const detail of entryDetails) {
+          // the same material on two production items of the order adds up
+          const prev = bomMaterials.get(detail.material_id);
+          const qty = (prev?.bom_expected_qty || 0) + (Number(detail.qty) || 0);
+          const cost = (prev?.bom_expected_cost || 0) + (Number(detail.total_cost) || 0);
           bomMaterials.set(detail.material_id, {
             itcd: detail.material_id,
             item_name: detail.material_name,
             item_code: detail.material_code || "",
-            bom_expected_qty: detail.qty,
-            unit_cost: detail.unit_cost,
-            bom_expected_cost: detail.total_cost,
+            bom_expected_qty: qty,
+            unit_cost: qty ? cost / qty : detail.unit_cost,
+            bom_expected_cost: cost,
           });
         }
       }
@@ -253,7 +263,7 @@ export async function GET(request) {
         dated: plan.dated,
         qty_produced: qty,
         is_costed: isCosted,
-        cost_per_unit: plan.costEntry?.cost_per_unit || 0,
+        cost_per_unit: entryQty ? entryCost / entryQty : 0,
         materials: materialVariances,
         bom_total_cost: bomTotalCost,
         actual_total_cost: actualTotalCost,

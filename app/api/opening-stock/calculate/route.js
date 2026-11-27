@@ -25,6 +25,7 @@ export const POST = guard("openingStock.calculate", async (request, { session })
       ...result,
     });
   } catch (error) {
+    if (error?.statusCode === 422) return NextResponse.json({ error: error.message }, { status: 422 });
     console.error("Opening stock calculate error:", error);
     return NextResponse.json({ error: "Failed to calculate opening stock" }, { status: 500 });
   }

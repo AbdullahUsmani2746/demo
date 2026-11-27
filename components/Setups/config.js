@@ -218,6 +218,18 @@ const entityConfig = {
         uppercase: true
       },
       {
+        name: "gets_plant_expenses",
+        label: "Gets plant expenses",
+        fieldType: "checkbox",
+        checkboxLabel: "Costing: every item of this group shares the month's plant expenses when made on a process order",
+        trueLabel: "Yes",
+        falseLabel: "No",
+        defaultValue: false,
+        // read by the "item" costing engine only (lib/costing/plantExpenseProducts.js)
+        feature: "costing.engine",
+        featureValue: "item",
+      },
+      {
         relation: "ProductMasterCategories",
         relationName: "sale_acno",
         name: "sale_acno",

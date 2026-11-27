@@ -49,7 +49,10 @@ export const PUT = guard("setup.items.manage", async (request, { session }) => {
             return NextResponse.json({ error: `${scopeError} This item's category is not one of them.` }, { status: 403 });
         }
 
-        // In-process stock of (Item.plant_id) — lib/items/processLink.js
+        // In-process stock of (Item.plant_id) — lib/items/processLink.js; while
+        // Settings → Features "costing.inProcessLink" is off the stored link is kept
+        if (!(await feature("costing.inProcessLink"))) delete data.plant_id;
+        if (data.gets_plant_expenses !== undefined) data.gets_plant_expenses = data.gets_plant_expenses === true;
         if ("plant_id" in data) {
             data.plant_id = plantIdOf(data.plant_id);
             const linkError = await processLinkError(prisma, parseInt(data.itcd), data.plant_id);

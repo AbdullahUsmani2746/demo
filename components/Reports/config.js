@@ -8048,6 +8048,9 @@ export const REPORT_CONFIG = {
       showHeader: true,
     },
     showSummary: true,
+    // PDF (current view): every column on one A4 page width — font shrinks,
+    // long text wraps; never split into column parts (wideExport.js).
+    pdfFitWidth: true,
     title: "Cash And Bank Books",
     description:
       "Every cash and bank account with its running balance — or pick the ones you want",
@@ -12616,8 +12619,8 @@ export const REPORT_CONFIG = {
         default: false,
       },
       // Purchases / purchase returns / sale returns before sales tax (Gross,
-      // the standard when the tax is claimed back) or with it (Net — as the
-      // old ERP and the Purchase report's Net Amount). Screen only; month-end
+      // the standard when the tax is claimed back) or with it (Net — as
+      // the Purchase report's Net Amount). Screen only; month-end
       // openings and COGS always use Gross.
       {
         name: "amountBasis",
@@ -12625,7 +12628,7 @@ export const REPORT_CONFIG = {
         type: "select",
         options: [
           { value: "gross", label: "Gross — without sales tax" },
-          { value: "net", label: "Net — with sales tax (as old ERP)" },
+          { value: "net", label: "Net — with sales tax" },
         ],
         default: { value: "gross", label: "Gross — without sales tax" },
         clearable: false,
@@ -12675,9 +12678,9 @@ export const REPORT_CONFIG = {
         { field: "material_production_rate", headerName: "Prod Rate", width: 12, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "material_production_amount", headerName: "Prod Amt", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         // ── Linked production: an in-process item (Item setup → "In-process
-        // stock of") shows its production item's production — e.g. 172 shows
-        // 16's. Not in its stock nor in Prod Qty, so nothing counts twice; in
-        // its Blended Rate when that production is costed (lib/items/processLink.js).
+        // stock of", Settings → Features "costing.inProcessLink") shows what was
+        // issued for its production item. Not in its stock nor in Prod Qty, so
+        // nothing counts twice; in its Blended Rate once costed (lib/items/processLink.js).
         { field: "linked_production_item", headerName: "Linked Item", width: 18, type: "text" },
         { field: "linked_production_qty", headerName: "Linked Prod Qty", width: 13, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "linked_production_rate", headerName: "Linked Prod Rate", width: 13, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
@@ -12757,7 +12760,7 @@ export const REPORT_CONFIG = {
         { id: "pur", label: "Purchase", fields: ["purchase_qty", "purchase_rate", "purchase_amount", "purchase_tax_amount", "purchase_services_amount", "purchase_landed_rate", "purchase_landed_amount"], foldTo: "purchase_landed_amount" },
         { id: "purret", label: "Purchase return", fields: ["purchase_ret_qty", "purchase_ret_rate", "purchase_ret_amount", "purchase_ret_tax_amount"], foldTo: "purchase_ret_amount" },
         G("prod", "Production", "material_production_qty", "material_production_rate", "material_production_amount"),
-        // In-process items only (172 ← 16): its production item's production
+        // In-process items only (costing.inProcessLink): issues for its production item
         { id: "linked", label: "Linked production", fields: ["linked_production_item", "linked_production_qty", "linked_production_rate", "linked_production_amount"], foldTo: "linked_production_qty" },
         { id: "blend", label: "Blended", fields: ["total_cost_rate"], foldTo: "total_cost_rate" },
         { id: "sale", label: "Sale", fields: ["sale_qty", "sale_cost_rate", "sale_services_amount", "sale_cost_amount"], foldTo: "sale_cost_amount" },
@@ -13518,6 +13521,20 @@ export const REPORT_CONFIG = {
         type: "checkbox",
         default: false,
       },
+      // Purchase amounts: Gross (the standard, what the journals post) or Net —
+      // with the purchase sales tax, also inside production, to match the old
+      // ERP. Display only (app/api/reports/[reportType]/route.js wantsNet).
+      {
+        name: "amountBasis",
+        label: "Purchase amounts",
+        type: "select",
+        options: [
+          { value: "gross", label: "Gross — without sales tax (standard)" },
+          { value: "net", label: "Net — with sales tax" },
+        ],
+        default: { value: "gross", label: "Gross — without sales tax (standard)" },
+        clearable: false,
+      },
     ],
 
     columns: [
@@ -13565,10 +13582,11 @@ export const REPORT_CONFIG = {
         width: 18,
         type: "currency",
       },
-      // Services of the dispatches / sale returns (freight out, weighing …) — lib/service/landedCost.js
+      // Services of the dispatches / sale returns (freight out, weighing …) — selling
+      // expenses (the standard): shown, NOT in Total Cost / gross profit — lib/service/landedCost.js
       {
         field: "services_cost_amount",
-        headerName: "Services",
+        headerName: "Selling Services (not in COGS)",
         width: 16,
         type: "currency",
       },
@@ -13795,6 +13813,20 @@ export const REPORT_CONFIG = {
         default: "",
         placeholder: "Filter by order number",
         clearable: true,
+      },
+      // Purchase amounts: Gross (the standard, what the journals post) or Net —
+      // with the purchase sales tax, also inside production, to match the old
+      // ERP. Display only (app/api/reports/[reportType]/route.js wantsNet).
+      {
+        name: "amountBasis",
+        label: "Purchase amounts",
+        type: "select",
+        options: [
+          { value: "gross", label: "Gross — without sales tax (standard)" },
+          { value: "net", label: "Net — with sales tax" },
+        ],
+        default: { value: "gross", label: "Gross — without sales tax (standard)" },
+        clearable: false,
       },
     ],
 
@@ -15984,7 +16016,7 @@ REPORT_CONFIG.exbondReport = {
 
 // ─── Data Checking Report ────────────────────────────────────────────────────
 // The Cost of Goods Sold report without its margin / gross-profit columns —
-// for checking quantities, rates and costs (owner, 25 Nov 2026). Same data
+// for checking quantities, rates and costs Same data
 // (the API serves it with getCostOfGoodsSoldReport), filters, service-category
 // columns and drill; no JV button. Built from the COGS entry so they never drift.
 {

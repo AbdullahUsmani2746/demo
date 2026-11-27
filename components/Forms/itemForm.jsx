@@ -220,6 +220,7 @@ export default function ItemForm() {
     packing_material_code: "",
     packing_returnable: false,
     plant_id: "",
+    gets_plant_expenses: false,
     code: "",
     ink_type: null,
     lamination: null,
@@ -346,6 +347,7 @@ export default function ItemForm() {
           packing_material_code: itemData.packing_material_code ? String(itemData.packing_material_code) : "",
           packing_returnable: itemData.packing_returnable === true,
           plant_id: itemData.plant_id ? String(itemData.plant_id) : "",
+          gets_plant_expenses: itemData.gets_plant_expenses === true,
           valid_from: itemData.valid_from ? new Date(itemData.valid_from).toISOString().split("T")[0] : todayStr(),
           valid_to: itemData.valid_to ? new Date(itemData.valid_to).toISOString().split("T")[0] : validToStr(),
           color: itemData.color || null,
@@ -377,6 +379,11 @@ export default function ItemForm() {
   // itself a packing material may carry a default packing (finished goods on
   // dispatch, raw materials on GRN) and a default "Packing Returnable?".
   const returnablePacking = features.on("documents.returnablePacking");
+  // Settings → Features "costing.inProcessLink": the "In-process stock of" link
+  const inProcessLink = features.on("costing.inProcessLink");
+  // "Gets plant expenses?" — read by the "item" costing engine while plant
+  // expenses are on (lib/costing/plantExpenseProducts.js)
+  const plantExpenseProducts = features.value("costing.engine") === "item" && features.on("costing.plantOverhead");
   const isPackingMaterialEnabled = React.useMemo(
     () =>
       returnablePacking
@@ -507,7 +514,9 @@ export default function ItemForm() {
         packing_material_code: data.packing_material_code ? parseInt(data.packing_material_code) : undefined,
         packing_returnable: features.on("documents.returnablePacking") ? data.packing_returnable === true : undefined,
         // In-process stock of (lib/items/processLink.js) — blank clears the link
-        plant_id: data.plant_id ? parseInt(data.plant_id) : null,
+        plant_id: inProcessLink ? (data.plant_id ? parseInt(data.plant_id) : null) : undefined,
+        // Costing → Production (engine "item"): while not in use the tick is not sent (the stored one is kept)
+        gets_plant_expenses: plantExpenseProducts ? data.gets_plant_expenses === true : undefined,
         valid_from: data.valid_from ? new Date(data.valid_from).toISOString() : null,
         valid_to: data.valid_to ? new Date(data.valid_to).toISOString() : null,
         wastage_percentage: data.wastage_percentage ? parseFloat(data.wastage_percentage) : null,
@@ -955,6 +964,7 @@ export default function ItemForm() {
                 />
               </Field>
 
+              {inProcessLink && (
               <Field
                 label="In-process stock of"
                 hint="Only for an in-process item: the production item whose output gives its rate (Stock Activity With Rate). Leave blank for other items."
@@ -970,6 +980,22 @@ export default function ItemForm() {
                   isClearable
                 />
               </Field>
+              )}
+
+              {plantExpenseProducts && (
+              <Field
+                label="Gets plant expenses?"
+                hint="Costing: this product shares the month's plant expenses (overhead) when made on a process order. Its category can be ticked too."
+              >
+                <label className="flex h-10 cursor-pointer items-center justify-between gap-3 rounded-lg border border-input bg-background px-3">
+                  <span className="text-sm text-muted-foreground">{formData.gets_plant_expenses ? "Yes" : "No"}</span>
+                  <Switch
+                    checked={formData.gets_plant_expenses === true}
+                    onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, gets_plant_expenses: checked }))}
+                  />
+                </label>
+              </Field>
+              )}
 
               {returnablePacking && (
                 <Field label="Packing Returnable?" hint="Pre-ticks Returnable on Dispatch / GRN lines">

@@ -384,7 +384,7 @@ export const POST = guard("costing.manage", async (request) => {
       where: { id: parseInt(plan_id) },
       include: {
         item: { select: { itcd: true, item: true, code: true } },
-        costEntry: { include: { details: true } },
+        costEntries: { include: { details: true }, orderBy: { output_line: "asc" } },
       },
     });
 
@@ -466,8 +466,9 @@ export const POST = guard("costing.manage", async (request) => {
       cost_per_unit: costPerUnit,
       missing_cost_items: missingCosts,
       raw_materials: rawMaterials,
-      already_costed: !!plan.costEntry,
-      cost_entry:   plan.costEntry || null,
+      already_costed: plan.costEntries.length > 0,
+      cost_entry:   plan.costEntries[0] || null, // line 1; cost_entries = every production item
+      cost_entries: plan.costEntries,
     });
   } catch (error) {
     console.error("BOM cost explosion error:", error);
