@@ -46,6 +46,8 @@ import {
   buildTransportEntries,
 } from "@/lib/ledger/autoEntryAccounts";
 import { isInvoicedMaster } from "@/lib/invoicing/kinds";
+import { InvoicingError } from "@/lib/invoicing/core";
+import { planInvoicedEdit, reinvoiceAfterEdit } from "@/lib/invoicing/reinvoice";
 import { closedGodownError } from "@/lib/godowns";
 import { documentScopeWhere, documentScopeError, recordScopeError } from "@/lib/auth/documentScope";
 import { checkStockForSave } from "@/lib/stock/checkStock";
@@ -68,6 +70,7 @@ import { approvalGate, runApprovedRequest } from "@/lib/approvals/rules";
 import { deletionCallAllowed } from "@/lib/approvals/deletions";
 import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { feature } from "@/lib/features/server";
+import { SERVICE_TANKER_OFFICIAL_FEATURE } from "@/lib/service/serviceInvoice";
 import { markGrnDirectRates } from "@/lib/grn/directRate";
 import { saleReturnLinkError } from "@/lib/saleReturns/dispatchLink";
 import { applyLineWht } from "@/lib/tax/lineWht";
@@ -213,6 +216,7 @@ export const GET = guardBy(
     { manual_no: like },
     { city: like },
     { route: like },
+    { tanker_no: like },
     ...(isNumericSearch
       ? [
           { tran_id: searchNumber },
@@ -397,6 +401,8 @@ const ALLOWED_MASTER_FIELDS = new Set([
   "city",
   // Dispatch "Route" — the way the vehicle goes.
   "route",
+  // Service Invoice "Tanker No".
+  "tanker_no",
   // Files on the document (URLs — uploaded first via /api/voucher/attachments).
   "attachments",
   // GRN / purchase return: the vendor's bill no and date. Normally entered on
@@ -420,6 +426,9 @@ const ALLOWED_LINE_FIELDS = new Set([
   // Receipt / payment / journal line Sub Account (feature "vouchers.subAccounts",
   // settled by applySubAccounts in lib/vouchers/subAccounts.js before mapping).
   "sub_account",
+  // Service Invoice line: Official / Unofficial parts of the amount, set by
+  // prepareServiceInvoice (lib/service/serviceInvoice.js) — record only.
+  "official_amount", "unofficial_amount",
   // Files on the line (URLs). A save recreates the lines, so they ride along.
   "attachments",
   // Dispatch line: TRIAL / RATE_NEG of its Sale Order line (orders.trialLineBilling).
@@ -673,6 +682,10 @@ function normalizeMaster(master, tran_code) {
   if ("route" in master) {
     master.route = tran_code === 6 ? String(master.route ?? "").trim().toUpperCase().slice(0, 150) || null : null;
   }
+  // Service Invoice Tanker No: only a Service Invoice keeps one; blank = none.
+  if ("tanker_no" in master) {
+    master.tanker_no = tran_code === 21 ? String(master.tanker_no ?? "").trim().toUpperCase().slice(0, 50) || null : null;
+  }
   if (master.pycd?.value === "") master.pycd = null;
   if (master?.acno?.acno) delete master.acno;
   master.attachments = cleanAttachments(master.attachments);
@@ -859,6 +872,9 @@ function mapLine(line, tran_id, tran_code, itemAccountMap, { deferred = false } 
   // Sub Account: receipt / payment / journal only (lib/vouchers/subAccounts.js)
   if (SUB_ACCOUNT_TRAN_CODES.has(tran_code)) base.sub_account = cleanSubAccount(line.sub_account);
   else delete base.sub_account;
+  // Official / Unofficial: Service Invoice lines only, set by prepareServiceInvoice.
+  delete base.official_amount;
+  delete base.unofficial_amount;
 
   delete base.type;
   base.attachments = cleanAttachments(line.attachments);
@@ -1694,12 +1710,17 @@ async function createVoucher(req, { params, actingSession = null, parsedBody = n
     // tax / Cr vendor) and linked to its GRNs / dispatches in one transaction
     // (lib/service/serviceInvoice.js). Everything is resolved before writing.
     if (SERVICE_POSTING_TYPES.has(type)) {
-      const serviceLines = await prepareServiceInvoice(lines);
+      // Settings → Features "documents.serviceTankerOfficial": off → no Tanker No,
+      // lines priced by qty × rate only.
+      const tankerOfficialOn = await feature(SERVICE_TANKER_OFFICIAL_FEATURE);
+      const serviceLines = await prepareServiceInvoice(lines, { allowParts: tankerOfficialOn });
       const serviceLinks = await prepareServiceLinks(master?.links);
       const serviceRefs = await serviceHeaderRefs(serviceLinks);
       const serviceAuto = await serviceInvoiceAutoEntries(serviceLines, cleanMaster, null);
       const serviceMaster = await prisma.$transaction(async (tx) => {
-        const created = await tx.transactionsMaster.create({ data: { ...addUserintoCleanMaster, ...serviceRefs } });
+        const created = await tx.transactionsMaster.create({
+          data: { ...addUserintoCleanMaster, ...serviceRefs, ...(tankerOfficialOn ? {} : { tanker_no: null }) },
+        });
         await tx.transactions.createMany({
           data: [
             ...serviceLines.map((line) => mapLine(line, created.tran_id, tran_code, {})),
@@ -1873,8 +1894,16 @@ export const PUT = guardBy(
       if (!stored) return NextResponse.json({ message: "Transaction not found" }, { status: 404 });
       const mismatchError = tranCodeMismatchError(stored, type);
       if (mismatchError) return NextResponse.json({ message: mismatchError }, { status: 422 });
-      const invoicedError = invoicedDocumentError(stored, type);
-      if (invoicedError) return NextResponse.json({ message: invoicedError }, { status: 422 });
+      // Invoiced: refused unless "Edit invoiced documents directly" is on and
+      // nothing is matched to the invoice (lib/invoicing/reinvoice.js).
+      if (invoicedDocumentError(stored, type)) {
+        try {
+          await planInvoicedEdit({ ...stored, tran_id: tranId });
+        } catch (e) {
+          if (e instanceof InvoicingError) return NextResponse.json({ message: e.message }, { status: 422 });
+          throw e;
+        }
+      }
       const storedScopeError =
         (await documentScopeError(ctx.session, tran_code, stored)) ||
         (await documentScopeError(ctx.session, tran_code, body.master, body.lines));
@@ -1986,11 +2015,14 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
 
     // An invoiced physical document is locked. This PUT deletes and recreates
     // every line including the sub_tran_id=3 auto entries, which would strip
-    // the pricing off a document that carries an invoice number.
-    const invoicedError = invoicedDocumentError(storedVoucher, type);
-    if (invoicedError) {
-      return NextResponse.json({ message: invoicedError }, { status: 422 });
-    }
+    // the pricing off a document that carries an invoice number — unless
+    // Settings → Features "Edit invoiced documents directly" is on: then the
+    // edit is followed, in the same transaction, by invoicing it again under
+    // its own number (lib/invoicing/reinvoice.js). planInvoicedEdit throws the
+    // reason (422) when it may not be edited.
+    const invoicedPlan = invoicedDocumentError(storedVoucher, type)
+      ? await planInvoicedEdit({ ...storedVoucher, tran_id: Number(tran_id) })
+      : null;
 
     delete master.orderDetails;
     if ([9, 10].includes(tran_code)) {
@@ -2180,9 +2212,18 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
     if (SERVICE_POSTING_TYPES.has(type)) {
       const kept = await prisma.transactions.findMany({
         where: { tran_id: Number(tran_id), service_id: { not: null } },
-        select: { service_id: true },
+        select: { service_id: true, official_amount: true, unofficial_amount: true },
       });
-      lines = await prepareServiceInvoice(lines, { keepServiceIds: new Set(kept.map((k) => k.service_id)) });
+      // Settings → Features "documents.serviceTankerOfficial": off → the Tanker No
+      // stays as stored, and Official / Unofficial are kept only on an invoice
+      // that was saved with them (switching off never drops what it had).
+      const tankerOfficialOn = await feature(SERVICE_TANKER_OFFICIAL_FEATURE);
+      if (!tankerOfficialOn) delete cleanMaster.tanker_no;
+      const hadParts = kept.some((k) => k.official_amount != null || k.unofficial_amount != null);
+      lines = await prepareServiceInvoice(lines, {
+        keepServiceIds: new Set(kept.map((k) => k.service_id)),
+        allowParts: tankerOfficialOn || hadParts,
+      });
       serviceLinks = await prepareServiceLinks(master?.links);
       Object.assign(cleanMaster, await serviceHeaderRefs(serviceLinks));
       serviceAuto = await serviceInvoiceAutoEntries(lines, cleanMaster, Number(tran_id));
@@ -2210,7 +2251,7 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
     // replaced, so the voucher's allocations are dropped first and rebuilt
     // from the new lines' invoice_no tags afterwards (see invoiceMatcher.js).
     const masterData = await prisma.$transaction(async (tx) => {
-      await lockNotInvoiced(tx, tran_id, type);
+      if (!invoicedPlan) await lockNotInvoiced(tx, tran_id, type);
       const updated = await tx.transactionsMaster.update({
         where: { tran_id: Number(tran_id) },
         data: cleanMaster,
@@ -2243,8 +2284,12 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
             });
         await syncDispatchBom(tx, updated, lockedPlan);
       }
+      // Invoiced document edited directly: invoice it again, same number.
+      if (invoicedPlan) {
+        warnings.push(await reinvoiceAfterEdit(tx, invoicedPlan, session));
+      }
       return updated;
-    }, DISPATCH_TYPES.has(type) || hasServiceWork(servicePlan) ? { timeout: 60_000, maxWait: 20_000 } : undefined);
+    }, DISPATCH_TYPES.has(type) || hasServiceWork(servicePlan) || invoicedPlan ? { timeout: 60_000, maxWait: 20_000 } : undefined);
 
 
     if (tran_code === 6) {
@@ -2262,6 +2307,10 @@ async function updateVoucher(req, { params, actingSession = null, parsedBody = n
     );
   } catch (error) {
     console.error("Error updating voucher:", error);
+    // Re-invoicing an edited invoiced document (lib/invoicing/reinvoice.js): its own status.
+    if (error instanceof InvoicingError) {
+      return NextResponse.json({ message: error.message }, { status: error.status });
+    }
     if (error?.status === 422) {
       return NextResponse.json({ message: error.message }, { status: 422 });
     }

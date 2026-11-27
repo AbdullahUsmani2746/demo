@@ -13,7 +13,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Paperclip } from "lucide-react";
+import { FilePenLine, Paperclip } from "lucide-react";
 import AttachmentViewer from "@/components/Attachments/AttachmentViewer";
 import { attachmentCountOf } from "@/components/Attachments/attachmentUtils";
 import VoucherModal from "./Modal"; // Adjust path as needed
@@ -117,6 +117,9 @@ import { generateUnifiedPDF } from "../Template/UnifiedReport";
 import { generateSalesOrderPDF } from "../Template/SalesOrder";
 import { toast } from "sonner";
 import ManualNoCell from "./ManualNoCell";
+import HeaderEditDialog from "./HeaderEditDialog";
+import { HEADER_EDIT_FEATURE, headerEditFields } from "@/lib/vouchers/headerEdit";
+import { INVOICED_EDIT_FEATURE, LEGACY_SERIES } from "@/lib/invoicing/kinds";
 import { generateDispatchNotePDF } from "../Template/Dispatch";
 import { generateDeliveryNotePDF } from "../Template/DeliveryNote";
 import { generateRequisitionNotePDF } from "../Template/RequistNote";
@@ -3444,14 +3447,15 @@ export default function VoucherTable({
   const { currency } = useCurrency();
   const { company } = useCompany();
 
-  const TABLE_FIELDS = VOUCHER_CONFIG[type]?.tableFields || [];
+  const features = useFeatures();
+  // A list column marked `feature: "<key>"` shows only while that switch is on.
+  const TABLE_FIELDS = (VOUCHER_CONFIG[type]?.tableFields || []).filter((f) => !f?.feature || features.on(f.feature));
   // A type whose config already lists a "Created By" (user_id / userid) field
   // shows entered_by there instead of getting a second column.
   const hasUserField = TABLE_FIELDS.some(isUserField);
 
   // React Query Client
   const queryClient = useQueryClient();
-  const features = useFeatures();
   // Manual DC / GRN No set from the list (PATCH /api/voucher/[type]/manual-no):
   // GRN, Dispatch Return, and Dispatch while "dispatch.extraFields" is on.
   const tranCodeOfType = VOUCHER_CONFIG[type]?.tran_code;
@@ -3492,6 +3496,8 @@ export default function VoucherTable({
   const [currentFileName, setCurrentFileName] = useState("");
   // Row whose attachments are open in the viewer.
   const [attachmentEntry, setAttachmentEntry] = useState(null);
+  // "Edit header" on an invoiced document (Settings → Features, lib/vouchers/headerEdit.js).
+  const [headerEntry, setHeaderEntry] = useState(null);
   const showAttachmentModal = !!attachmentEntry;
   // Vouchers whose form takes files: their rows can add files from here too.
   const takesAttachments = (VOUCHER_CONFIG[type]?.masterFields || []).some(
@@ -3722,8 +3728,18 @@ export default function VoucherTable({
   // Settings → Features "approvals.deletionRequests": off = the plain Delete
   // button for everyone (the server refuses it without the right).
   const { can: canPerm, loading: permLoading } = usePermissions();
-  const deletionRequestsOn = useFeatures().on("approvals.deletionRequests");
+  const deletionRequestsOn = features.on("approvals.deletionRequests");
   const mayDeleteNow = !deletionRequestsOn || canPerm(`${type}.delete`);
+  // Settings → Features "documents.invoicedEdit": the normal Edit opens on an
+  // invoiced row (the save invoices it again — lib/invoicing/reinvoice.js);
+  // imported old-system invoices stay locked. Delete still needs Reverse in Invoicing.
+  const invoicedEditOn = features.on(INVOICED_EDIT_FEATURE);
+  const editLockedFor = (entry) =>
+    !!VOUCHER_CONFIG[type]?.invoiceLock && isInvoicedDoc(entry) && (!invoicedEditOn || entry?.invoice_series === LEGACY_SERIES);
+  // "Edit header" on an invoiced row (Settings → Features documents.headerEdit)
+  // — not needed while the whole document can be edited.
+  const headerEditable =
+    !invoicedEditOn && features.on(HEADER_EDIT_FEATURE) && headerEditFields(VOUCHER_CONFIG[type]?.tran_code).length > 0 && canPerm(`${type}.update`);
   const requestDeleteMutation = useMutation({
     mutationFn: async ({ rowData, reason }) => {
       const isOrder = ["purchaseOrder", "purchaseOrderEdit", "saleOrder", "serviceOrder"].includes(type);
@@ -4556,7 +4572,7 @@ export default function VoucherTable({
     const statusInfo =
       documentStatus[id] ||
       (linkedView?.id === id && linkedView.status) || { status: "", allowEdit: true };
-    const invoiceLocked = !!cfg?.invoiceLock && isInvoicedDoc(entry);
+    const invoiceLocked = editLockedFor(entry);
     return {
       edit: cfg.allowEdit
         ? {
@@ -5239,9 +5255,11 @@ const orderTypes = [
                     };
                     const isLoading = statusLoading[id];
                     // Quantity-only documents are locked once invoiced: the
-                    // server refuses the edit until Invoicing unlocks them.
+                    // server refuses delete until Invoicing unlocks them, and
+                    // edit too unless "Edit invoiced documents directly" is on.
                     const invoiceLocked =
                       !!VOUCHER_CONFIG[type]?.invoiceLock && isInvoicedDoc(entry);
+                    const editLocked = editLockedFor(entry);
                     return (
                       <TableRow
                         key={idx}
@@ -5400,16 +5418,33 @@ const orderTypes = [
                                 e.stopPropagation();
                                 handleEditClick(entry, "edit");
                               }}
-                              disabled={!statusInfo.allowEdit || invoiceLocked}
+                              disabled={!statusInfo.allowEdit || editLocked}
                               title={
-                                invoiceLocked
+                                editLocked
                                   ? `Invoiced (${docInvoiceRef(entry)}) — unlock it in Invoicing first`
                                   : !statusInfo.allowEdit
                                     ? `${statusInfo.status} - Cannot Edit`
-                                    : "Edit"
+                                    : invoiceLocked
+                                      ? `Edit — invoice ${docInvoiceRef(entry)} is priced again on save`
+                                      : "Edit"
                               }
                             >
                               <Edit className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {/* Invoiced: only the header details (feature switch) */}
+                          {invoiceLocked && headerEditable && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-primary/70 hover:text-primary hover:bg-primary/10"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setHeaderEntry(entry);
+                              }}
+                              title="Edit header details (the invoice stays as it is)"
+                            >
+                              <FilePenLine className="h-4 w-4" />
                             </Button>
                           )}
                            {/* Clone Button — not where a numbered document must stay unique (allowClone: false) */}
@@ -5691,6 +5726,16 @@ const orderTypes = [
           editable={takesAttachments}
           onChange={() => queryClient.invalidateQueries({ queryKey: ["vouchers", type] })}
         />
+
+        {headerEntry && (
+          <HeaderEditDialog
+            type={type}
+            entry={headerEntry}
+            docLabel={`${VOUCHER_CONFIG[type]?.label || "Document"} ${headerEntry.grn_no ?? headerEntry.dispatch_no ?? headerEntry.vr_no ?? headerEntry.tran_id ?? ""}`}
+            onClose={() => setHeaderEntry(null)}
+            onSaved={() => queryClient.invalidateQueries({ queryKey: ["vouchers", type] })}
+          />
+        )}
       </div>
     </div>
   );

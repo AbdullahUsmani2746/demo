@@ -945,6 +945,7 @@ export default function InvoicingPage({ kind }) {
         />
 
         <UnlockDialog
+          kind={kind}
           cfg={cfg}
           row={unlockRow}
           reason={unlockReason}

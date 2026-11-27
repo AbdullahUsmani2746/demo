@@ -7915,8 +7915,16 @@ export const REPORT_CONFIG = {
       // Invoice / return items
       { field: "item_code", headerName: "Code", width: 20 },
       { field: "item_name", headerName: "Item", width: 30 },
+      // The invoiced GRN / dispatch / return's own number, and its packs
+      { field: "item_doc_no", headerName: "GRN / DC No", width: 16 },
+      { field: "item_manual_no", headerName: "Manual GRN / DC No", width: 18 },
+      { field: "item_no_of_pack", headerName: "No of Pack", width: 14, type: "number", showTotal: true },
+      { field: "item_packing", headerName: "Packing Material", width: 24 },
+      { field: "item_qty_per_pack", headerName: "Qty / Pack", width: 14, type: "number" },
+      { field: "item_qty", headerName: "Total Qty", width: 18, type: "number", showTotal: true },
       { field: "item_rate", headerName: "Rate", width: 18, type: "number" },
-      { field: "item_qty", headerName: "Qty", width: 18, type: "number", showTotal: true },
+      // Acknowledged qty the invoice was billed on (none entered = Qty)
+      { field: "item_ack_qty", headerName: "Ack Qty", width: 18, type: "number", showTotal: true },
       { field: "item_unit", headerName: "Unit", width: 12 },
       { field: "item_st", headerName: "Item ST", width: 18, type: "currency", showTotal: true },
       { field: "item_amount", headerName: "Amount", width: 22, type: "currency", showTotal: true },
@@ -7957,11 +7965,11 @@ export const REPORT_CONFIG = {
       groups: [
         { id: "doc", label: "Document", fields: ["slip_no", "detail_invoice_no", "rmk5", "tran_type", "narration", "user_name"] },
         { id: "acc", label: "Account", fields: ["acno", "acname", "against"] },
-        { id: "items", label: "Items", fields: ["item_code", "item_name", "item_rate", "item_qty", "item_unit", "item_st", "item_amount"], foldTo: "item_amount" },
+        { id: "items", label: "Items", fields: ["item_code", "item_name", "item_doc_no", "item_manual_no", "item_no_of_pack", "item_packing", "item_qty_per_pack", "item_qty", "item_rate", "item_ack_qty", "item_unit", "item_st", "item_amount"], foldTo: "item_qty" },
         { id: "amt", label: "Amounts", fields: ["st_amount", "debit", "credit", "balance"], foldTo: "balance" },
       ],
       views: [
-        { id: "standard", label: "Standard", fields: ["dated", "vr_no", "detail_invoice_no", "rmk5", "acno", "acname", "tran_type", "narration", "item_code", "item_name", "item_rate", "item_qty", "item_unit", "item_st", "item_amount", "st_amount", "debit", "credit", "balance"] },
+        { id: "standard", label: "Standard", fields: ["dated", "vr_no", "detail_invoice_no", "rmk5", "acno", "acname", "tran_type", "narration", "item_name", "item_doc_no", "item_manual_no", "item_no_of_pack", "item_packing", "item_qty_per_pack", "item_qty", "item_rate", "st_amount", "debit", "credit", "balance"] },
         { id: "all", label: "All columns" },
       ],
       card: {

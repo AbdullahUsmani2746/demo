@@ -1315,6 +1315,8 @@ model TransactionsMaster {
   city                  String?                @db.VarChar(100)
   // Dispatch "Route" — the way the vehicle goes (prisma/sql/2026-11-15_dispatch_route.sql)
   route                 String?                @db.VarChar(150)
+  // Service Invoice "Tanker No" (prisma/sql/2026-11-27_service_invoice_tanker_official.sql)
+  tanker_no             String?                @db.VarChar(50)
   lc_no                 String?
   bond_id               Int?
   created_at            DateTime?              @default(now())
@@ -1417,6 +1419,10 @@ model Transactions {
   batch_no              String?            @db.VarChar(250)
   returnable            Boolean?           @default(false)
   additional_tax_amount Float?
+  // Service Invoice line: the parts the user typed; Amount = their sum when given
+  // (lib/service/serviceInvoice.js). Record only — gross_amount / damt post.
+  official_amount       Float?
+  unofficial_amount     Float?
   asset_no              Int?               @unique
   tax_amount            Float?
   // Auto Material Issue / Production made by a dispatch: the dispatch line

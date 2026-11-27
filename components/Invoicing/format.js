@@ -151,7 +151,8 @@ export const rowTotals = (row, draft) => {
 /**
  * Issues that still stand once the draft is applied. NO_RATE is recomputed
  * here with the server's rule (rate ≤ 0 on a line with a billed qty, except on
- * a Free of Cost order — row.free_of_cost), so a typed rate or an ack of 0
+ * a Free of Cost order — row.free_of_cost — or when rate 0 is allowed —
+ * row.zero_rate_ok), so a typed rate or an ack of 0
  * clears it. An ack qty typed here replaces the server's ACK_INVALID check
  * for that line; a bad one (not a number, negative, above the qty) blocks.
  */
@@ -172,7 +173,9 @@ export const liveIssues = (row, draft) => {
       out.push({ type: "NO_DENSITY", line_id: l.line_id, message: `Enter the density (KG per LTR) for "${l.item}"` });
     }
     // A line sent on Trial / Rate Negotiation is priced 0 by the server (l.trial)
-    if (!row.free_of_cost && !l.trial && num(e.rate) <= 0 && billedQty(e.line, e.ack) > 0) {
+    // Rate 0 is fine on a Free of Cost order or when Settings → Features
+    // allows it for this invoicing kind (row.zero_rate_ok, from the server).
+    if (!row.free_of_cost && !row.zero_rate_ok && !l.trial && num(e.rate) <= 0 && billedQty(e.line, e.ack) > 0) {
       out.push({ type: "NO_RATE", line_id: l.line_id, message: `No rate for "${l.item}" — enter one` });
     }
   }
