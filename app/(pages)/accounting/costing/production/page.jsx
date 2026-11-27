@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +50,7 @@ import {
   Edit,
   DollarSign,
   Trash2,
+  Truck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -61,6 +62,8 @@ import {
 } from "@/components/Costing/CostingUI";
 import { Skeleton } from "@/components/ui/skeleton";
 import SemiCcPanel from "@/components/Costing/SemiCcPanel";
+import { voucherHref } from "@/lib/vouchers/voucherLink";
+import { useFeatures } from "@/hooks/useFeatures";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MONTHS = [
@@ -281,17 +284,143 @@ function AuditBlock({ title, children }) {
 }
 
 // ── Main Page ──────────────────────────────────────────────────────────────────
+
+// ── Produced on dispatch: what was issued and costed, and each dispatch ─────
+function DispatchIssuance({ detail, loading, unit }) {
+  if (loading) {
+    return <div className="space-y-2"><Skeleton className="h-24 w-full" /><Skeleton className="h-32 w-full" /></div>;
+  }
+  if (!detail) return null;
+  const mats = detail.entry?.materials || [];
+  const matQty = mats.reduce((s, m) => s + m.qty, 0);
+  const matCost = mats.reduce((s, m) => s + m.cost, 0);
+  const dispatches = detail.dispatches || [];
+  return (
+    <div className="space-y-4">
+      <div className="overflow-hidden rounded-xl border border-border">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/40 px-3 py-2">
+          <p className="text-xs font-semibold text-foreground">Materials issued (BOM of these dispatches)</p>
+          {detail.entry ? (
+            <span className="text-[11px] text-muted-foreground">
+              Costed {fmtQty(detail.entry.qty_costed)} {unit} @ <strong className="tabular-nums text-foreground">{fmt(detail.entry.cost_per_unit)}</strong>
+            </span>
+          ) : (
+            <span className="text-[11px] text-muted-foreground">Not costed yet — run Re-Cost All</span>
+          )}
+        </div>
+        {mats.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="vl-grid w-full text-xs">
+              <thead>
+                <tr>
+                  <th className={cn(TH, "text-[11px]")}>Material</th>
+                  <th className={cn(TH, "text-right text-[11px]")}>Qty issued</th>
+                  <th className={cn(TH, "text-right text-[11px]")}>Rate</th>
+                  <th className={cn(TH, "text-right text-[11px]")}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mats.map((m) => (
+                  <tr key={m.itcd} className="border-b border-border/60">
+                    <td data-label="Material" className={TD}>
+                      {m.code && <span className={cn(CODE_CHIP, "mr-1")}>{m.code}</span>}
+                      {m.item}
+                    </td>
+                    <td data-label="Qty issued" className={cn(TD, NUM)}>{fmtQty(m.qty)}</td>
+                    <td data-label="Rate" className={cn(TD, NUM)}>{fmt(m.rate)}</td>
+                    <td data-label="Cost" className={cn(TD, NUM, "font-semibold")}>{fmt(m.cost)}</td>
+                  </tr>
+                ))}
+                <tr className={TOTAL_ROW}>
+                  <td className={TD}>Total</td>
+                  <td className={cn(TD, NUM)}>{fmtQty(matQty)}</td>
+                  <td className={cn(TD, NUM)}>{matQty ? fmt(matCost / matQty) : "—"}</td>
+                  <td className={cn(TD, NUM)}>{fmt(matCost)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="px-3 py-3 text-xs text-muted-foreground">No cost entry yet.</p>
+        )}
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-border">
+        <div className="border-b border-border bg-muted/40 px-3 py-2">
+          <p className="text-xs font-semibold text-foreground">
+            Dispatches ({dispatches.length}) — production and the materials issued with it
+          </p>
+        </div>
+        <div className="max-h-[420px] overflow-auto">
+          <table className="vl-grid w-full text-xs">
+            <thead>
+              <tr>
+                <th className={cn(TH, "text-[11px]")}>Date</th>
+                <th className={cn(TH, "text-[11px]")}>Dispatch</th>
+                <th className={cn(TH, "text-right text-[11px]")}>Produced</th>
+                <th className={cn(TH, "text-[11px]")}>Issued for it</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dispatches.map((d) => {
+                const href = voucherHref({ tran_code: 6, tran_id: d.dispatch_tran_id });
+                return (
+                  <tr key={`${d.production_tran_id}-${d.line_no ?? 0}`} className="border-b border-border/60 align-top">
+                    <td data-label="Date" className={cn(TD, "whitespace-nowrap")}>{fmtDate(d.dated)}</td>
+                    <td data-label="Dispatch" className={cn(TD, "whitespace-nowrap")}>
+                      {href ? (
+                        <a href={href} target="_blank" rel="noreferrer" className="font-mono text-primary hover:underline">
+                          {d.dispatch_no || `#${d.dispatch_tran_id}`}
+                        </a>
+                      ) : (
+                        <span className="font-mono">{d.dispatch_no || "—"}</span>
+                      )}
+                    </td>
+                    <td data-label="Produced" className={cn(TD, NUM)}>{fmtQty(d.produced_qty)} {unit}</td>
+                    <td data-label="Issued for it" className={TD}>
+                      {d.materials.length ? (
+                        d.materials.map((m) => (
+                          <div key={`${m.itcd}-${m.issue_tran_id}`} className="whitespace-nowrap">
+                            {m.code || m.itcd} {m.item} — <span className="tabular-nums">{fmtQty(m.qty)}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <span className="text-destructive">No BOM issue found</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ProductionCostingPage() {
   const now = new Date();
+  // Settings → Features "costing.engine": "item" = one cost per production item
+  // (produce-on-dispatch from its own BOM issues); "plan" = one per process order
+  const itemEngine = useFeatures().value("costing.engine") === "item";
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [year,  setYear]  = useState(now.getFullYear());
 
   const [search,     setSearch]     = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter,   setTypeFilter]   = useState("all");
+  // Source: process orders / produced on dispatch / no plan ; item category
+  const [sourceFilter,   setSourceFilter]   = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [sourceCounts,   setSourceCounts]   = useState({ order: 0, dispatch: 0, noplan: 0 });
+  const [categories,     setCategories]     = useState([]);
+  const [filteredTotal,  setFilteredTotal]  = useState(0);
 
   const [plans,             setPlans]             = useState([]);
   const [orphanProductions, setOrphanProductions] = useState([]);
+  // Process orders of the month not posted yet (Completed / open) — not in stock or costing
+  const [unpostedOrders, setUnpostedOrders] = useState([]);
   const [summary,     setSummary]     = useState({ total: 0, costed: 0, not_costed: 0, period_locked: false });
   const [loadingList, setLoadingList] = useState(false);
   const [page,        setPage]        = useState(1);
@@ -300,6 +429,9 @@ export default function ProductionCostingPage() {
   const [codeFilter,  setCodeFilter]  = useState("");
 
   const [selectedPlan,   setSelectedPlan]   = useState(null);
+  // Produced on dispatch: its materials (cost entry) and the dispatches behind it
+  const [dispatchDetail, setDispatchDetail] = useState(null);
+  const [loadingDispatch, setLoadingDispatch] = useState(false);
   const [costData,       setCostData]       = useState(null);
   const [activityData,   setActivityData]   = useState(null);
   const [loadingCost,    setLoadingCost]    = useState(false);
@@ -321,11 +453,18 @@ export default function ProductionCostingPage() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (itcdFilter)  params.set("itcd",         itcdFilter);
       if (codeFilter)  params.set("code",         codeFilter);
+      if (sourceFilter !== "all") params.set("source", sourceFilter);
+      if (categoryFilter) params.set("category", categoryFilter);
+      if (typeFilter !== "all") params.set("type", typeFilter);
       const res  = await fetch(`/api/costing/production?${params}`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Failed to load");
       setPlans(json.plans || []);
       setOrphanProductions(json.orphan_productions || []);
+      setUnpostedOrders(json.unposted_orders || []);
+      setSourceCounts(json.source_counts || { order: 0, dispatch: 0, noplan: 0 });
+      setCategories(json.categories || []);
+      setFilteredTotal(json.filtered_total ?? (json.plans || []).length);
       setTotalPages(json.totalPages || 1);
       setSummary({
         total:         json.total         || 0,
@@ -338,18 +477,50 @@ export default function ProductionCostingPage() {
     } finally {
       setLoadingList(false);
     }
-  }, [month, year, search, statusFilter, itcdFilter, codeFilter, page]);
+  }, [month, year, search, statusFilter, itcdFilter, codeFilter, sourceFilter, categoryFilter, typeFilter, page]);
 
   useEffect(() => { setPage(1); fetchPlans(1); }, [month, year]); // eslint-disable-line
   // Re-fetch when status filter or page changes
   useEffect(() => { fetchPlans(page); }, [statusFilter, page]); // eslint-disable-line
+  // Every other filter applies as it changes (typing waits a moment) — page 1
+  const filtersReady = useRef(false);
+  useEffect(() => {
+    if (!filtersReady.current) { filtersReady.current = true; return; }
+    const t = setTimeout(() => { setPage(1); fetchPlans(1); }, 350);
+    return () => clearTimeout(t);
+  }, [search, itcdFilter, codeFilter, sourceFilter, categoryFilter, typeFilter]); // eslint-disable-line
+
+  const activeFilterCount = [
+    search, itcdFilter, codeFilter, categoryFilter,
+    statusFilter !== "all", sourceFilter !== "all", typeFilter !== "all",
+  ].filter(Boolean).length;
+  const clearAllFilters = () => {
+    setSearch(""); setItcdFilter(""); setCodeFilter(""); setCategoryFilter("");
+    setStatusFilter("all"); setSourceFilter("all"); setTypeFilter("all"); setPage(1);
+  };
 
   // ── Load BOM cost preview + T7/T8 activity in parallel ────────────────────
   const loadCostPreview = async (plan) => {
     setSelectedPlan(plan);
     setCostData(null);
     setActivityData(null);
-    // Orphan rows have no Posted plan — show static detail panel, skip API calls
+    setDispatchDetail(null);
+    // Produced on dispatch: load its materials issued and its dispatches
+    if (plan.is_orphan && plan.on_dispatch) {
+      setLoadingDispatch(true);
+      try {
+        const res = await fetch(`/api/costing/production?dispatch_detail=${plan.finished_id}&month=${month}&year=${year}`);
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || "Failed to load the dispatches");
+        setDispatchDetail(json);
+      } catch (err) {
+        toast.error(err.message);
+      } finally {
+        setLoadingDispatch(false);
+      }
+      return;
+    }
+    // Other rows without a Posted plan — static detail panel, no API calls
     if (plan.is_orphan) return;
     setLoadingCost(true);
     setLoadingActivity(true);
@@ -445,12 +616,16 @@ export default function ProductionCostingPage() {
       const res  = await fetch("/api/costing/production", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auto_sequence: true, only_pending: onlyPending, month, year }),
+        // "item" engine, one go: process orders in sequence, then the productions
+        // without one (produce-on-dispatch from their own BOM issues —
+        // lib/costing/noPlanCosting.js). "plan" engine: process orders only, as before.
+        body: JSON.stringify({ auto_sequence: true, auto_orphans: itemEngine, only_pending: onlyPending, month, year }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Auto-sequence failed");
+      const noPlan = json.orphans?.t8_grouped?.processed ?? 0;
       toast.success(
-        `Auto-sequence complete: ${json.costed} costed${json.failed > 0 ? `, ${json.failed} failed` : ""}`
+        `Costing complete: ${json.costed} process order(s)${noPlan ? ` + ${noPlan} item(s) without one` : ""}${json.failed > 0 ? `, ${json.failed} failed` : ""}`
       );
       await fetchPlans();
     } catch (err) {
@@ -476,10 +651,8 @@ export default function ProductionCostingPage() {
   };
 
   // ── Filtering (type filter stays client-side since it needs saved cost_entry) ──────────
-  const filteredPlans = plans.filter((p) => {
-    if (typeFilter !== "all" && p.cost_entry?.item_type !== typeFilter) return false;
-    return true;
-  });
+  // All filters run on the server over the whole month (before paging)
+  const filteredPlans = plans;
 
   const changePage = (newPage) => {
     if (newPage < 1 || newPage > totalPages) return;
@@ -669,9 +842,19 @@ export default function ProductionCostingPage() {
         <Chip tone="ok" className="text-xs"><CheckCircle2 className="h-3 w-3" /> Costed: <strong className="tabular-nums">{summary.costed}</strong></Chip>
         <Chip tone="warn" className="text-xs"><AlertTriangle className="h-3 w-3" /> Pending: <strong className="tabular-nums">{summary.not_costed}</strong></Chip>
         {summary.period_locked && <Chip tone="bad" className="text-xs">Period Locked</Chip>}
-        {orphanProductions.length > 0 && (
+        {orphanProductions.some((o) => o.on_dispatch) && (
+          <Chip tone="muted" className="text-xs" title={itemEngine ? "Made by dispatches (produce-on-dispatch) — each costed from its own BOM issue" : "Made by dispatches (produce-on-dispatch)"}>
+            <Truck className="h-3 w-3" /> Produced on dispatch: <strong className="tabular-nums">{orphanProductions.filter((o) => o.on_dispatch).length}</strong>
+          </Chip>
+        )}
+        {orphanProductions.some((o) => !o.on_dispatch) && (
           <Chip tone="brand" className="text-xs">
-            <AlertTriangle className="h-3 w-3" /> No-Plan Receipts: <strong className="tabular-nums">{orphanProductions.length}</strong>
+            <AlertTriangle className="h-3 w-3" /> No-Plan Receipts: <strong className="tabular-nums">{orphanProductions.filter((o) => !o.on_dispatch).length}</strong>
+          </Chip>
+        )}
+        {unpostedOrders.length > 0 && (
+          <Chip tone="bad" className="text-xs">
+            <AlertTriangle className="h-3 w-3" /> Not posted: <strong className="tabular-nums">{unpostedOrders.length}</strong>
           </Chip>
         )}
 
@@ -698,6 +881,38 @@ export default function ProductionCostingPage() {
         </div>
       </div>
 
+      {/* Process orders not posted yet — their issue / production vouchers do
+          not exist, so stock and this costing do not include them. */}
+      {unpostedOrders.length > 0 && (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-destructive" />
+            <p className="text-sm font-semibold text-foreground">
+              {unpostedOrders.length} process order{unpostedOrders.length === 1 ? "" : "s"} this month {unpostedOrders.length === 1 ? "is" : "are"} not posted
+            </p>
+            <span className="text-xs text-muted-foreground">
+              — no issue / production vouchers yet, so stock and costing leave them out. Post them (Process Orders → Send to Production), then Re-Cost All.
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {unpostedOrders.map((o) => (
+              <a
+                key={o.id}
+                href={`/accounting/material?tab=production&search=${o.id}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs transition hover:border-primary/40 hover:text-primary"
+                title="Open this process order"
+              >
+                <span className="font-mono font-semibold">#{o.id}</span>
+                <span className="max-w-[14rem] truncate">{o.item_code ? `${o.item_code} ` : ""}{o.item_name}</span>
+                <span className="tabular-nums text-muted-foreground">{fmtQty(o.qty)} {o.unit}</span>
+                <span className="text-muted-foreground">· {fmtDate(o.dated)}</span>
+                <Chip tone="warn" className="px-1.5 py-0 text-[10px]">{o.status}</Chip>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Body: plans list + cost preview ─────────────────────────────────── */}
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">
 
@@ -711,7 +926,7 @@ export default function ProductionCostingPage() {
                 value={search}
                 onChange={setSearch}
                 onEnter={applySearch}
-                placeholder="Search item name…"
+                placeholder="Search item, order # or dispatch #…"
               />
               <IconBtn icon={ListFilter} label="Apply search" onClick={applySearch} />
             </div>
@@ -758,7 +973,42 @@ export default function ProductionCostingPage() {
                 { key: "costed",    label: "Costed",  count: summary.costed },
               ]}
             />
-            {/* Item type filter */}
+            {/* Source: where the production came from */}
+            <Segmented
+              value={sourceFilter}
+              onChange={(k) => setSourceFilter(k)}
+              options={[
+                { key: "all",      label: "All sources" },
+                { key: "order",    label: "Orders",      count: sourceCounts.order },
+                { key: "dispatch", label: "On dispatch", count: sourceCounts.dispatch },
+                ...(sourceCounts.noplan > 0 ? [{ key: "noplan", label: "No plan", count: sourceCounts.noplan }] : []),
+              ]}
+            />
+            {/* Item category */}
+            <div className="flex gap-1.5">
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                aria-label="Item category"
+                className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+              >
+                <option value="">All categories</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              {activeFilterCount > 0 && (
+                <button
+                  type="button"
+                  onClick={clearAllFilters}
+                  className="inline-flex h-8 flex-shrink-0 items-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:border-primary/40 hover:text-primary"
+                  title="Clear every filter"
+                >
+                  <X className="h-3.5 w-3.5" /> Clear ({activeFilterCount})
+                </button>
+              )}
+            </div>
+            {/* Item type filter (cost type of the saved entry) */}
             <div className="flex flex-wrap gap-1">
               {[
                 { key: "all",                 label: "All Types" },
@@ -772,6 +1022,7 @@ export default function ProductionCostingPage() {
                   key={t.key}
                   type="button"
                   onClick={() => setTypeFilter(t.key)}
+                  aria-pressed={typeFilter === t.key}
                   className={cn(
                     "rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
                     typeFilter === t.key
@@ -783,6 +1034,9 @@ export default function ProductionCostingPage() {
                 </button>
               ))}
             </div>
+            <p className="text-[11px] text-muted-foreground">
+              {loadingList ? "Loading…" : `${filteredTotal} row${filteredTotal === 1 ? "" : "s"}${activeFilterCount ? " match the filters" : " this month"}`}
+            </p>
           </div>
 
           {/* Bulk action bar */}
@@ -836,7 +1090,8 @@ export default function ProductionCostingPage() {
                         type="button"
                         key={plan.id}
                         className={cn(
-                          "flex w-full items-start gap-2 rounded-lg border border-l-4 border-l-amber-500 p-2.5 text-left transition-colors",
+                          "flex w-full items-start gap-2 rounded-lg border border-l-4 p-2.5 text-left transition-colors",
+                          plan.on_dispatch ? "border-l-primary/60" : "border-l-amber-500",
                           isSelected ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40",
                         )}
                         onClick={() => loadCostPreview(plan)}
@@ -846,12 +1101,21 @@ export default function ProductionCostingPage() {
                             <span className="truncate text-xs font-semibold text-foreground">
                               {plan.finished_item}
                             </span>
-                            <Chip tone="warn" className="px-1.5 py-0 text-[10px]">NO PLAN</Chip>
+                            {plan.on_dispatch ? (
+                              <Chip tone="muted" className="px-1.5 py-0 text-[10px]">
+                                <Truck className="h-2.5 w-2.5" /> ON DISPATCH
+                              </Chip>
+                            ) : (
+                              <Chip tone="warn" className="px-1.5 py-0 text-[10px]">NO PLAN</Chip>
+                            )}
                           </div>
                           <div className="mt-0.5 text-[11px] text-muted-foreground">
                             {plan.finished_code && <span className="font-mono">{plan.finished_code} · </span>}
                             {fmtDate(plan.dated)}
                             <span className="ml-1 font-mono">T#{plan.tran_id}</span>
+                            {plan.on_dispatch && plan.dispatch_count > 0 && (
+                              <span className="ml-1">· {plan.dispatch_count} dispatch{plan.dispatch_count === 1 ? "" : "es"}</span>
+                            )}
                           </div>
                           <div className="text-[11px] text-muted-foreground">
                             Rcvd: <strong className="tabular-nums text-foreground">{fmtQty(plan.actual_production_qty)}</strong> {plan.unit}
@@ -1030,13 +1294,20 @@ export default function ProductionCostingPage() {
           {/* ── Orphan T8 receipt detail (no Posted plan linked) ── */}
           {selectedPlan?.is_orphan && (
             <LabCard
-              icon={AlertTriangle}
+              icon={selectedPlan.on_dispatch ? Truck : AlertTriangle}
               title={selectedPlan.finished_item}
               subtitle={
-                <>
-                  Production Receipt — No Posted Plan
-                  {selectedPlan.tran_count > 1 && <span className="ml-1">({selectedPlan.tran_count} T8 vouchers grouped)</span>}
-                </>
+                selectedPlan.on_dispatch ? (
+                  <>
+                    {itemEngine ? "Produced on dispatch — costed from its own BOM issue" : "Produced on dispatch"}
+                    <span className="ml-1">({selectedPlan.dispatch_count} dispatch{selectedPlan.dispatch_count === 1 ? "" : "es"})</span>
+                  </>
+                ) : (
+                  <>
+                    Production Receipt — No Posted Plan
+                    {selectedPlan.tran_count > 1 && <span className="ml-1">({selectedPlan.tran_count} T8 vouchers grouped)</span>}
+                  </>
+                )
               }
               actions={
                 selectedPlan.is_costed ? (
@@ -1082,8 +1353,16 @@ export default function ProductionCostingPage() {
                   </span>
                 </Figure>
                 <Figure label="Received Qty">{fmtQty(selectedPlan.actual_production_qty)} <span className="text-xs text-muted-foreground">{selectedPlan.unit}</span></Figure>
-                <Figure label="T8 Receipts"><span className="text-sm">{selectedPlan.tran_count || 1} voucher(s)</span></Figure>
+                <Figure label={selectedPlan.on_dispatch ? "Dispatches" : "T8 Receipts"}>
+                  <span className="text-sm">
+                    {selectedPlan.on_dispatch ? selectedPlan.dispatch_count : (selectedPlan.tran_count || 1)} voucher(s)
+                  </span>
+                </Figure>
               </div>
+
+              {selectedPlan.on_dispatch && (
+                <DispatchIssuance detail={dispatchDetail} loading={loadingDispatch} unit={selectedPlan.unit} />
+              )}
 
               {selectedPlan.is_costed && selectedPlan.cost_entry && (
                 <Note tone="ok" icon={CheckCircle2} title="Saved Cost Entry:">
@@ -1099,14 +1378,25 @@ export default function ProductionCostingPage() {
                 </Note>
               )}
 
-              <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
-                <p className="mb-1.5 text-xs font-semibold text-foreground">To get full BOM costing</p>
-                <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
-                  <li>Create a <strong className="text-foreground">Production Plan</strong> for this item and set rmk5 on the T8 receipt to the plan ID.</li>
-                  <li>Once linked, run <strong className="text-foreground">Auto-Cost</strong> to compute BOM + T7 issuance cost automatically.</li>
-                  <li>Until then, use <strong className="text-foreground">Set Rate</strong> above to manually record the cost for this production.</li>
-                </ul>
-              </div>
+              {selectedPlan.on_dispatch ? (
+                <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
+                  <p className="mb-1.5 text-xs font-semibold text-foreground">How this is costed</p>
+                  <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
+                    <li>Each dispatch made this item and issued its BOM materials at the same time — the two are linked automatically (same dispatch, same line).</li>
+                    <li>The cost = those materials at the month rate (purchases + their services). No production plan is needed.</li>
+                    <li><strong className="text-foreground">Re-Cost All</strong> works it out together with the process orders.</li>
+                  </ul>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
+                  <p className="mb-1.5 text-xs font-semibold text-foreground">To get full BOM costing</p>
+                  <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
+                    <li>Make a <strong className="text-foreground">Process Order</strong> for this item and post its issue and production through it.</li>
+                    <li>Until then, <strong className="text-foreground">Re-Cost All</strong> gives it a share of the month&apos;s issues not linked to any order.</li>
+                    <li>Or use <strong className="text-foreground">Set Rate</strong> above to record the cost for this production by hand.</li>
+                  </ul>
+                </div>
+              )}
             </LabCard>
           )}
 

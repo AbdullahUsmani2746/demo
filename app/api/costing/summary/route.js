@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { getOpening, openingSql } from "@/lib/openingStock";
 import { NextResponse } from "next/server";
@@ -135,7 +136,7 @@ export async function GET(request) {
     // 7. Total plans with T8 receipts linked to a Posted plan (T8-driven source of truth)
     const t8PlanCountRows = await prisma.$queryRaw`
       SELECT COUNT(DISTINCT
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer
       )::int AS cnt
       FROM "TRANSACTIONS_MASTER" tm
       JOIN "Transactions" t ON t.tran_id = tm.tran_id
@@ -146,7 +147,7 @@ export async function GET(request) {
         AND t.qty         > 0
         AND EXISTS (
           SELECT 1 FROM "productionPlanMaster" ppm
-          WHERE ppm.id = NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5,''),'[^0-9]','','g'),'')::integer
+          WHERE ppm.id = NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''),'[^0-9]','','g'),'')::integer
             AND ppm.status = 'Posted'
         )
     `;

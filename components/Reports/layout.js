@@ -16,6 +16,11 @@
 //     groupRows:  { ... },                                 // grouped documents / sections — see below
 //   }
 //
+// Columns the API adds to a report (config.extraColumns, e.g. one per service
+// used — lib/service/landedCost.js) carry `extra: { id, label, foldTo, before }`:
+// they show in every view and sit under their own header band — or inside one
+// of the layout's groups when `id` names it, in front of `before`.
+//
 // groupRows — reports whose API returns a `row_type` stream (document header,
 // its lines, a total; sections; hierarchies) are read as it comes, WITHOUT
 // changing the API. Reference entry: `payment` (voucher header › lines).
@@ -243,14 +248,32 @@ export function resolveLayout({ config, filters, columns, legacyGrouping, itemGr
       else groups.push({ id: `gh${groups.length}`, label: c.groupHeader, fields: [c.key] });
     });
   }
+  // Columns the API added (config.extraColumns): their own band, in every view.
+  // `extra.id` may name one of the layout's own groups (they join it), and
+  // `extra.before` the field they go in front of (else at the band's end).
+  const extras = keyed.filter((c) => c.extra && !pinnedSet.has(c.key));
+  for (const c of extras) {
+    const id = String(c.extra.id || "extra");
+    let g = groups.find((x) => x.id === id);
+    if (!g) {
+      g = { id, label: c.extra.label || "More", fields: [], foldTo: c.extra.foldTo };
+      groups.push(g);
+    }
+    if (g.fields.includes(c.key)) continue;
+    const at = c.extra.before ? g.fields.indexOf(c.extra.before) : -1;
+    g.fields = at >= 0 ? [...g.fields.slice(0, at), c.key, ...g.fields.slice(at)] : [...g.fields, c.key];
+  }
+  groups = groups.map((g) => (g.foldTo && !g.fields.includes(g.foldTo) ? { ...g, foldTo: g.fields[g.fields.length - 1] } : g));
+
   const groupOf = new Map();
   groups.forEach((g) => g.fields.forEach((f) => groupOf.set(f, g)));
 
-  // Views — ready-made column sets. fields omitted / null = every column.
+  // Views — ready-made column sets. fields omitted / null = every column
+  // (the API's extra columns are always in).
   const views = asArray(spec.views).map((v, i) => ({
     id: String(v.id ?? `v${i}`),
     label: v.label ?? String(v.id ?? `View ${i + 1}`),
-    fields: v.fields ? new Set(asArray(v.fields)) : null,
+    fields: v.fields ? new Set([...asArray(v.fields), ...extras.map((c) => c.key)]) : null,
   }));
   const defaultView = views.find((v) => v.id === spec.defaultView)?.id ?? views[0]?.id ?? null;
 

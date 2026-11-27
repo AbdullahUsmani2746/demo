@@ -23,6 +23,11 @@ export async function GET(request) {
   const sortBy = searchParams.get("sortBy") || "id";
   const sortOrder = searchParams.get("sortOrder") || "asc";
     const id = searchParams.get("id");
+    // List filters (Process Orders page): order date range, type, production item
+    const dateFrom = searchParams.get("dateFrom") || "";
+    const dateTo = searchParams.get("dateTo") || "";
+    const type = searchParams.get("type") || "";
+    const itemFilter = parseInt(searchParams.get("item") || "", 10);
     const onlyWithBatch = searchParams.get("onlyWithBatch") === "true";
     const fetchOnlyid = searchParams.get("fetchOnlyid") === "true";
 
@@ -66,6 +71,25 @@ export async function GET(request) {
 
       if (status) {
         where.status = status;
+      }
+
+      if (dateFrom || dateTo) {
+        const range = {};
+        if (dateFrom) { const d = new Date(dateFrom); d.setHours(0, 0, 0, 0); if (!isNaN(d)) range.gte = d; }
+        if (dateTo) { const d = new Date(dateTo); d.setHours(23, 59, 59, 999); if (!isNaN(d)) range.lte = d; }
+        if (Object.keys(range).length) where.dated = range;
+      }
+
+      if (type) {
+        where.type = type;
+      }
+
+      // Any production item of the order (main item or another output line)
+      if (Number.isInteger(itemFilter) && itemFilter > 0) {
+        where.AND = [
+          ...(where.AND || []),
+          { OR: [{ finished_id: itemFilter }, { outputs: { some: { finished_id: itemFilter } } }] },
+        ];
       }
 
       if (id) {
@@ -573,6 +597,7 @@ export const POST = guard("materialInput.create", async (request) => {
     rmk: `Material issued for SF to FG production order no: ${master.id}`,
     rmk4: master.m2m ? "M2M" : null,
     rmk5: String(master.id),
+    process_order_id: master.id,
     user_id: session.user.id,
   },
 });
@@ -603,6 +628,7 @@ export const POST = guard("materialInput.create", async (request) => {
     rmk: `Material produced from SF to FG order no: ${master.id}`,
     rmk4: master.m2m ? "M2M" : null,
     rmk5: String(master.id),
+    process_order_id: master.id,
     user_id: session.user.id,
   },
 });
@@ -770,6 +796,7 @@ export const POST = guard("materialInput.create", async (request) => {
             rmk: `Material issued for Reprocessing order no: ${master.id}`,
                 rmk4: master.m2m ? "M2M" : null,
             rmk5: String(master.id),
+            process_order_id: master.id,
             user_id: session.user.id,
         
           },
@@ -801,6 +828,7 @@ export const POST = guard("materialInput.create", async (request) => {
             rmk: `Material produced from Reprocessing order no: ${master.id}`,
             rmk4: master.m2m ? "M2M" : null,
             rmk5: String(master.id),
+            process_order_id: master.id,
             user_id: session.user.id,
           },
         });

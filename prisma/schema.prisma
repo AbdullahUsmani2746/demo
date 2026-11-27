@@ -463,6 +463,8 @@ model ItemCategory {
   pos_acno             Int?
   cogs_acno            Int?
   cogm_acno            Int?
+  // Every item of this category shares plant expenses — lib/costing/plantExpenseProducts.js
+  gets_plant_expenses  Boolean       @default(false)
   // Per-category posting accounts; empty = the Account Settings default
   // (lib/accounts/itemAccounts.js).
   purchase_acno        Int?
@@ -618,6 +620,8 @@ model Item {
   re_order              Int?
   future_cost_rate      Float?
   plant_id              Int? // legacy ITEM.PLANT_ID: production item this in-process item belongs to
+  // Shares the month's plant expenses in costing — lib/costing/plantExpenseProducts.js
+  gets_plant_expenses   Boolean                      @default(false)
   BomDetail             BomDetail[]
   BomMaster             BomMaster[]
   futureCosting         FutureCosting[]
@@ -1099,7 +1103,8 @@ model productionPlanMaster {
   narration               String?                   @db.VarChar(500)
   req_no                  Int?
   scanLogs                ProcessScanLog[]
-  costEntry               ProductionCostEntry?
+  // one per production item (output_line) — prisma/sql/2026-11-26_cost_entry_output_line.sql
+  costEntries             ProductionCostEntry[]
   qualityMaster           QualityMaster?
   changeLogs              productionPlanChangeLog[]
   productionPlanDetail    productionPlanDetail[]
@@ -1317,6 +1322,8 @@ model TransactionsMaster {
   route                 String?                @db.VarChar(150)
   // Service Invoice "Tanker No" (prisma/sql/2026-11-27_service_invoice_tanker_official.sql)
   tanker_no             String?                @db.VarChar(50)
+  // Process order (productionPlanMaster.id) this issue / production belongs to — read through lib/manufacturing/processOrderRef.js (falls back to rmk5)
+  process_order_id      Int?
   lc_no                 String?
   bond_id               Int?
   created_at            DateTime?              @default(now())
@@ -1362,6 +1369,7 @@ model TransactionsMaster {
   @@index([user_id])
   @@index([invoice_no])
   @@index([invoice_series])
+  @@index([process_order_id])
   @@index([godown])
   @@index([godown2])
   @@index([po_no])
@@ -2195,7 +2203,9 @@ model PeriodLockLog {
 
 model ProductionCostEntry {
   id                        Int                    @id @default(autoincrement())
-  plan_id                   Int?                   @unique
+  plan_id                   Int?
+  // Production item of the order (productionPlanOutput.line_no) — one cost per order + line
+  output_line               Int                    @default(1)
   itcd                      Int?
   month                     Int
   year                      Int
@@ -2219,6 +2229,7 @@ model ProductionCostEntry {
   details                   ProductionCostDetail[]
   plan                      productionPlanMaster?  @relation(fields: [plan_id], references: [id])
 
+  @@unique([plan_id, output_line])
   @@index([plan_id])
   @@index([itcd])
   @@index([month, year])

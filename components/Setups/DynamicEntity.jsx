@@ -10,12 +10,13 @@ import { useFeatures } from "@/hooks/useFeatures";
 
 const DynamicEntity = () => {
   const { entity } = useParams();
-  // A field with `feature: "<key>"` exists only while that feature is on (Settings → Features)
+  // A field with `feature: "<key>"` exists only while that feature is on (Settings → Features);
+  // with `featureValue` too, only while that choice feature has that value
   const features = useFeatures();
   const baseConfig = entityConfig[entity];
   const config = useMemo(
     () => (baseConfig?.fields?.some((f) => f.feature)
-      ? { ...baseConfig, fields: baseConfig.fields.filter((f) => !f.feature || features.on(f.feature)) }
+      ? { ...baseConfig, fields: baseConfig.fields.filter((f) => !f.feature || (f.featureValue !== undefined ? features.value(f.feature) === f.featureValue : features.on(f.feature))) }
       : baseConfig),
     [baseConfig, features],
   );

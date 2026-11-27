@@ -1,5 +1,6 @@
 // /api/manufacturing/production/[id]
 
+import { poWhere } from "@/lib/manufacturing/processOrderRef";
 import prisma from '@/lib/prisma';
 import { NextResponse } from 'next/server';
 import { buildProductionBarcode } from "@/lib/productionBarcode.js";
@@ -281,7 +282,7 @@ export const PUT = guard("materialInput.create", async (request, { params }) => 
         const txMaster = await prisma.transactionsMaster.findFirst({
           where: {
             tran_code: 8,
-            rmk5: String(planId),
+            ...poWhere(planId),
           },
         });
 

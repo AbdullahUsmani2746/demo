@@ -198,6 +198,7 @@ const MENU = [
       rep("trialBalance", "TRIAL BALANCE"),
       rep("trialBalancePeriod", "TRIAL BALANCE (PERIOD)"),
       rep("trialBalanceSheet", "BALANCE SHEET"),
+      rep("monthlyBalanceSheet", "MONTHLY BALANCE SHEET"),
       rep("profitLoss", "PROFIT & LOSS"),
       rep("profitLossMonthly", "PROFIT & LOSS - MONTH ON MONTH"),
       rep("accountsActivity", "ACCOUNTS ACTIVITY"),

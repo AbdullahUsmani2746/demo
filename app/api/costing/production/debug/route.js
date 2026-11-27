@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
@@ -34,18 +35,18 @@ export async function GET(request) {
         tm.tran_id,
         tm.vr_no,
         tm.dated,
-        tm.rmk5,
-        COALESCE(tm.rmk5, '')                                                             AS rmk5_raw,
-        REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g')                          AS rmk5_digits,
-        NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')              AS rmk5_nullif,
-        LENGTH(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'))                  AS rmk5_digit_len,
+        ${poRefSql("tm")} AS rmk5,
+        COALESCE(${poRefSql("tm")}, '')                                                             AS rmk5_raw,
+        REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g')                          AS rmk5_digits,
+        NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')              AS rmk5_nullif,
+        LENGTH(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'))                  AS rmk5_digit_len,
         COUNT(t.id)::int                                                                   AS line_count
       FROM "TRANSACTIONS_MASTER" tm
       LEFT JOIN "Transactions" t ON t.tran_id = tm.tran_id
       WHERE tm.tran_code = 7
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-      GROUP BY tm.tran_id, tm.vr_no, tm.dated, tm.rmk5
+      GROUP BY tm.tran_id, tm.vr_no, tm.dated, ${poRefSql("tm")}
       ORDER BY tm.dated DESC
       LIMIT 50
     `;
@@ -56,12 +57,12 @@ export async function GET(request) {
         tm.tran_id,
         tm.vr_no,
         tm.dated,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         tm.tran_code,
-        REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g') AS rmk5_digits
+        REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') AS rmk5_digits
       FROM "TRANSACTIONS_MASTER" tm
       WHERE tm.tran_code = 7
-        AND COALESCE(tm.rmk5, '') LIKE ${'%' + planIdStr + '%'}
+        AND COALESCE(${poRefSql("tm")}, '') LIKE ${'%' + planIdStr + '%'}
       ORDER BY tm.dated DESC
       LIMIT 20
     `;
@@ -72,13 +73,13 @@ export async function GET(request) {
         tm.tran_id,
         tm.vr_no,
         tm.dated,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         tm.tran_code,
         COUNT(t.id)::int AS line_count
       FROM "TRANSACTIONS_MASTER" tm
       LEFT JOIN "Transactions" t ON t.tran_id = tm.tran_id
-      WHERE tm.rmk5 = ${planIdStr}
-      GROUP BY tm.tran_id, tm.vr_no, tm.dated, tm.rmk5, tm.tran_code
+      WHERE ${poRefSql("tm")} = ${planIdStr}
+      GROUP BY tm.tran_id, tm.vr_no, tm.dated, ${poRefSql("tm")}, tm.tran_code
       ORDER BY tm.dated DESC
       LIMIT 20
     `;
@@ -92,7 +93,7 @@ export async function GET(request) {
         MAX(tm.dated) AS latest,
         string_agg(DISTINCT tm.rmk5, ', ' ORDER BY tm.rmk5) AS rmk5_values
       FROM "TRANSACTIONS_MASTER" tm
-      WHERE COALESCE(tm.rmk5, '') LIKE ${'%' + planIdStr + '%'}
+      WHERE COALESCE(${poRefSql("tm")}, '') LIKE ${'%' + planIdStr + '%'}
       GROUP BY tm.tran_code
       ORDER BY tm.tran_code
     `;
@@ -103,13 +104,13 @@ export async function GET(request) {
         tm.tran_id,
         tm.vr_no,
         tm.dated,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         COUNT(t.id)::int AS line_count
       FROM "TRANSACTIONS_MASTER" tm
       LEFT JOIN "Transactions" t ON t.tran_id = tm.tran_id
       WHERE tm.tran_code = 7
-        AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
-      GROUP BY tm.tran_id, tm.vr_no, tm.dated, tm.rmk5
+        AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
+      GROUP BY tm.tran_id, tm.vr_no, tm.dated, ${poRefSql("tm")}
       ORDER BY tm.dated DESC
     `;
 
@@ -119,15 +120,15 @@ export async function GET(request) {
         tm.tran_id,
         tm.vr_no,
         tm.dated,
-        tm.rmk5,
+        ${poRefSql("tm")} AS rmk5,
         COUNT(t.id)::int AS line_count
       FROM "TRANSACTIONS_MASTER" tm
       LEFT JOIN "Transactions" t ON t.tran_id = tm.tran_id
       WHERE tm.tran_code = 7
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-        AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
-      GROUP BY tm.tran_id, tm.vr_no, tm.dated, tm.rmk5
+        AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
+      GROUP BY tm.tran_id, tm.vr_no, tm.dated, ${poRefSql("tm")}
       ORDER BY tm.dated DESC
     `;
 
@@ -140,7 +141,7 @@ export async function GET(request) {
       FROM "TRANSACTIONS_MASTER" tm
       JOIN "Transactions" t ON t.tran_id = tm.tran_id
       WHERE tm.tran_code = 7
-        AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
+        AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
       GROUP BY t.sub_tran_id
     `;
 
@@ -164,7 +165,7 @@ export async function GET(request) {
       WHERE tm.tran_code = 7
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-        AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
+        AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
       ORDER BY t.id
     `;
 
@@ -183,7 +184,7 @@ export async function GET(request) {
       WHERE tm.tran_code = 7
         AND tm.dated >= ${startDate}
         AND tm.dated <= ${endDate}
-        AND NULLIF(REGEXP_REPLACE(COALESCE(tm.rmk5, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
+        AND NULLIF(REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g'), '')::integer = ${planId}
         AND t.sub_tran_id = 1
         AND t.qty > 0
       GROUP BY t.itcd, i.item, t.sub_tran_id

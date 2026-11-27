@@ -3,7 +3,7 @@ import prisma from "@/lib/prisma";
 import { getCashBankMacnos } from "@/lib/accounts/partyMacnos";
 import { checkPeriodLock } from "@/lib/periodLock";
 import { getOpening, getOpeningRates, getLatestOpeningPeriod, openingQtySql, openingQtyByGodownSql } from "@/lib/openingStock";
-import { REPORT_CONFIG, ENTERED_BY_REPORTS } from "@/components/Reports/config";
+import { REPORT_CONFIG, ENTERED_BY_REPORTS, reportDay, reportMonths } from "@/components/Reports/config";
 import { attachEnteredBy } from "@/lib/audit/enteredBy";
 import { getAccount, requireAccount, getAccountGroup, accountSettingError } from "@/lib/accounts/accountSettings";
 import { distributorFileCodes } from "@/lib/reports/distributorFiles";
@@ -47,12 +47,27 @@ import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
 import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingApprovals";
 import { getPosReport } from "@/lib/reports/pos";
 import { getReturnablePackingReport as getReturnablePackingBalances, returnablePackingSummary } from "@/lib/reports/returnablePacking";
+import { attachServices, grnServicesByItemAccount, serviceCategoryColumns, servicesByItem } from "@/lib/service/landedCost";
+import { linkedIssuesFor } from "@/lib/items/processLink";
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
+import { poRefOf, poWhere } from "@/lib/manufacturing/processOrderRef";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
-//  Settings (lib/accounts/accountSettingDefs.js):
+//  Settings (lib/accounts/accountSettingDefs.js), never from code. The standard
+//  (IAS 2, perpetual stock — ):
+//    COGM voucher : the month's GRN services move from their expense accounts
+//                   into the item's stock (Dr stock / Cr the account each
+//                   Service Invoice debited); production: Dr each product's
+//                   stock / Cr each material's stock (landed) / Cr
+//                   conversion_cost (overhead absorbed). Returned material
+//                   (a minus issue) goes back: Dr its stock.
+//    COGS voucher : Dr each item category's COGS account (category column,
+//                   default 'cogs') / Cr the item's stock, at full cost.
+//                   Dispatch services (freight out) are selling expenses —
+//                   already posted by their Service Invoices, not here.
 //    conversion_cost : credited by the COGM voucher (required)
-//    cogs            : debited by the COGS voucher (required)
+//    cogs            : COGS default when a category has none (required)
 //    stock_lost      : Direct Material Issuance Dr for Cleaning issuances
 //    qc_cost         : Direct Material Issuance Dr for Lab / QC issuances
 //  stock_lost / qc_cost are optional settings — while one is unset the JV that
@@ -64,6 +79,12 @@ import { getReturnablePackingReport as getReturnablePackingBalances, returnableP
 // Party groups (customers / vendors) come from Account Settings. An empty group
 // matches no account — Prisma.join cannot take an empty list.
 const macnoInSql = (macnos) => Prisma.join(macnos.length ? macnos : [-1]);
+
+// "Purchase amounts" filter (amountBasis): Net = with the purchase sales tax,
+// DISPLAY only (Stock Activity, COGM, COGS, Data Checking).
+// The standard (and every journal / opening / costing) is Gross.
+const wantsNet = (filters) =>
+  String((filters?.amountBasis && typeof filters.amountBasis === "object" ? filters.amountBasis.value : filters?.amountBasis) || "").toLowerCase() === "net";
 
 function normalizeDateStr(dateStr) {
   if (typeof dateStr !== "string") return dateStr;
@@ -151,6 +172,8 @@ export async function POST(request, { params }) {
     const u = await prisma.user.findUnique({ where: { id: String(userId) }, select: { id: true } });
     userId = u ? u.id : null;
   }
+  // Journals always post the standard (Gross) — never the display-only Net view
+  delete filters.amountBasis;
 
   try {
     if (reportType === "costOfGoodsManufactured") {
@@ -209,18 +232,39 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 // ── Build ordered JV lines [{acno, acname, damt, camt}] from Dr/Cr maps ──────
 function buildJVLines(debitByAcno, creditByAcno, nameMap, tag) {
+  // One net line per account: a minus credit (returned material) is a debit
+  const net = new Map();
+  for (const [acno, amt] of debitByAcno) net.set(Number(acno), (net.get(Number(acno)) || 0) + Number(amt));
+  for (const [acno, amt] of creditByAcno) net.set(Number(acno), (net.get(Number(acno)) || 0) - Number(amt));
   const lines = [];
-  for (const [acno, amt] of debitByAcno) {
-    const damt = round2(amt);
-    if (damt === 0) continue;
-    lines.push({ acno: Number(acno), acname: nameMap.get(Number(acno)) || `Account ${acno}`, damt, camt: 0, narration1: `${tag} auto JV` });
+  for (const [acno, amt] of net) {
+    const v = round2(amt);
+    if (v === 0) continue;
+    lines.push({
+      acno, acname: nameMap.get(acno) || `Account ${acno}`,
+      damt: v > 0 ? v : 0, camt: v < 0 ? -v : 0, narration1: `${tag} auto JV`,
+    });
   }
-  for (const [acno, amt] of creditByAcno) {
-    const camt = round2(amt);
-    if (camt === 0) continue;
-    lines.push({ acno: Number(acno), acname: nameMap.get(Number(acno)) || `Account ${acno}`, damt: 0, camt, narration1: `${tag} auto JV` });
+  return lines.sort((a, b) => (b.damt - a.damt) || (a.camt - b.camt));
+}
+
+// ── Resolve itcd → its category's COGS account (default 'cogs') ──────────────
+async function getCogsAcnoMap(itcds) {
+  const ids = [...new Set(itcds.map(Number).filter((n) => Number.isFinite(n)))];
+  const items = ids.length
+    ? await prisma.item.findMany({ where: { itcd: { in: ids } }, select: { itcd: true, itemCategories: { select: { cogs_acno: true } } } })
+    : [];
+  const map = new Map();
+  let fallback;
+  for (const it of items) {
+    let acno = it.itemCategories?.cogs_acno;
+    if (acno == null) {
+      if (fallback === undefined) fallback = await requireAccount("cogs");
+      acno = fallback;
+    }
+    map.set(Number(it.itcd), Number(acno));
   }
-  return lines;
+  return map;
 }
 
 // ── Preview or persist a balanced tran_code=3 voucher from Dr/Cr maps ────────
@@ -382,6 +426,29 @@ async function postCostOfGoodsManufacturedJV(filters, userId, preview = false) {
   const y = parseInt(filters.year) || new Date().getFullYear();
   const dated = new Date(y, m, 0, 0, 0, 0, 0); // last day of the selected month
 
+  // GRN services of the month into stock — only while Settings → Features
+  // "costing.servicesInCost" is on: they were posted to expense by their
+  // Service Invoices; costing then values the materials at landed cost
+  // (Stock Activity With Rate, lib/costing/monthRates.js), so the stock they
+  // are credited from must carry them too. Dr item stock / Cr the expense
+  // account each line debited. Off: services stay expenses (nothing here).
+  const services = (await feature("costing.servicesInCost"))
+    ? await grnServicesByItemAccount(new Date(y, m - 1, 1), new Date(y, m, 0, 23, 59, 59, 999))
+    : [];
+  if (services.length) {
+    const svcStock = await getStockAcnoMap(services.map((sv) => sv.itcd));
+    for (const sv of services) {
+      const amt = round2(sv.amount);
+      if (!amt) continue;
+      const stockAcno = svcStock.get(sv.itcd);
+      if (stockAcno == null) { missing.push(`Item ${sv.itcd} (services into stock)`); continue; }
+      if (sv.expense_acno == null) { missing.push(`Item ${sv.itcd}: a Service Invoice line without an account`); continue; }
+      if (stockAcno === sv.expense_acno) continue; // already posted to that stock account
+      debitByAcno.set(stockAcno, (debitByAcno.get(stockAcno) || 0) + amt);
+      creditByAcno.set(sv.expense_acno, (creditByAcno.get(sv.expense_acno) || 0) + amt);
+    }
+  }
+
   return await finalizeCogJV({
     tag: "COGM",
     rmk: `COGM JV ${String(m).padStart(2, "0")}/${y}`,
@@ -390,7 +457,7 @@ async function postCostOfGoodsManufacturedJV(filters, userId, preview = false) {
   });
 }
 
-// ── COGS JV: Dr cogs (total cost) / Cr item stock account (total cost) ───────
+// ── COGS JV: Dr cogs (category's, or the default) / Cr item stock account ───
 async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
   const data = await getCostOfGoodsSoldReport(filters);
   if (!data || data.length === 0) {
@@ -398,30 +465,30 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
   }
 
   const acnoMap = await getStockAcnoMap(data.map((r) => r.product_code));
+  // Settings → Features "costing.cogsByCategory": each item category's own
+  // COGS account (Account Settings category table, default 'cogs'); off: the
+  // 'cogs' account for every item, as before.
+  const cogsMap = (await feature("costing.cogsByCategory")) ? await getCogsAcnoMap(data.map((r) => r.product_code)) : null;
+  let cogsDefault;
   const creditByAcno = new Map();
+  const debitByAcno = new Map();
   const missing = [];
-  let totalCost = 0;
 
   for (const r of data) {
-    // COGS: net of earlier months' returns at their own cost (saleReturn.costAtOriginalMonth);
-    // rows without net_cost_amount (feature off / COGM) use total_cost_amount as before
+    // COGS: net of earlier months' returns at their own cost
+    // (saleReturn.costAtOriginalMonth). Total cost never holds the dispatch /
+    // sale-return services (selling expenses, already posted by their Service
+    // Invoices); GRN services are in it only while costing.servicesInCost is
+    // on — and then the COGM journal has moved them into stock.
     const cost = Number(r.net_cost_amount ?? r.total_cost_amount ?? 0);
     if (cost === 0) continue;
     const acno = acnoMap.get(Number(r.product_code));
     if (acno == null) { missing.push(`Item ${r.product_code} (${r.product_name || ""})`); continue; }
+    if (!cogsMap && cogsDefault === undefined) cogsDefault = await requireAccount("cogs");
+    const cogsAcno = cogsMap ? cogsMap.get(Number(r.product_code)) : cogsDefault;
     creditByAcno.set(acno, (creditByAcno.get(acno) || 0) + cost);
-    totalCost += cost;
+    debitByAcno.set(cogsAcno, (debitByAcno.get(cogsAcno) || 0) + cost);
   }
-
-  // Debit the COGS account (Account Settings) with the same total that was credited.
-  // A stock account whose returns outweigh its cost is debited instead (and
-  // COGS credited when the whole period nets negative) — never a negative amount.
-  const debitByAcno = new Map();
-  for (const [acno, amt] of [...creditByAcno]) {
-    if (amt < 0) { creditByAcno.delete(acno); debitByAcno.set(acno, (debitByAcno.get(acno) || 0) - amt); }
-  }
-  if (totalCost > 0) debitByAcno.set(await requireAccount("cogs"), (debitByAcno.get(await requireAccount("cogs")) || 0) + totalCost);
-  else if (totalCost < 0) creditByAcno.set(await requireAccount("cogs"), (creditByAcno.get(await requireAccount("cogs")) || 0) - totalCost);
   const dated = filters.dateTo ? new Date(filters.dateTo) : new Date();
 
   return await finalizeCogJV({
@@ -967,7 +1034,17 @@ export async function GET(request, { params }) {
         summary = calculateStockActivityViewSummary(data);
         break;
       case "stockActivityWithRate":
-        data = await getStockActivityWithRateReport(filters);
+        // The screen only: an in-process item's rate takes in its production
+        // item's production (inProcessRate). Month-end opening (lib/
+        // openingStockGenerate.js) and COGS call without it — unchanged.
+        // "Purchase amounts" filter (amountBasis): gross (default) = before
+        // sales tax; net = with it, as the Purchase report's Net Amount and the
+        // — screen only, like inProcessRate (openings / COGS: gross).
+        data = await getStockActivityWithRateReport({
+          ...filters,
+          inProcessRate: true,
+          withTax: wantsNet(filters),
+        });
         summary = calculateStockActivityWithRateSummary(data);
         break;
 
@@ -975,6 +1052,23 @@ export async function GET(request, { params }) {
         data = await getCostOfGoodsSoldReport(filters);
         summary = calculateCOGSSummary(data);
         break;
+
+      // Data Checking Report = the COGS figures without the margin columns
+      // (components/Reports/config.js, dataChecking): same rows, no margin totals.
+      case "dataChecking": {
+        const MARGIN_KEYS = ["margin_rate", "margin_amount", "gross_margin_pct", "gross_profit_rate", "gross_profit_amount", "gross_profit_pct"];
+        data = (await getCostOfGoodsSoldReport(filters)).map((r) => {
+          const row = { ...r };
+          for (const k of MARGIN_KEYS) delete row[k];
+          return row;
+        });
+        const {
+          total_margin: _m, avg_gross_margin: _mp, total_gross_profit: _gp, avg_gross_profit_pct: _gpp, // eslint-disable-line no-unused-vars
+          ...rest
+        } = calculateCOGSSummary(data);
+        summary = rest;
+        break;
+      }
 
       case "costOfGoodsManufactured":
         data = await getCostOfGoodsManufacturedReport(filters);
@@ -1134,6 +1228,9 @@ export async function GET(request, { params }) {
         data = trialBalanceAccountRows(flatData);
         break;
       }
+      case "monthlyBalanceSheet":
+        ({ data, summary } = await getMonthlyBalanceSheetReport(filters));
+        break;
       case "profitLoss": {
         const flatData = await getProfitLossReport(filters);
         summary = calculateTrialBalancePeriodSummary(flatData);
@@ -1582,6 +1679,22 @@ export async function GET(request, { params }) {
     // a report lacks (components/Reports/itemColumns.js).
     await attachItemInfo(prisma, reportType === "stockMetrics" ? data?.items : data);
 
+    // Services on GRN / dispatch / sale return (freight, off-load, weighing …)
+    // spread onto each row's items — one column per service used, then the
+    // services total and the landed cost (purchase side) or net of services
+    // (sale side). Reports with config `services` (components/Reports/config.js);
+    // lib/service/landedCost.js; the viewer appends the columns.
+    let extraColumns = [];
+    if (config.services && Array.isArray(data)) {
+      extraColumns = await attachServices(data, { side: config.services });
+    }
+    // Stock Activity With Rate / COGS: services split by service category, one
+    // column per category used, placed in the report's own bands
+    // (config.serviceCategoryColumns → serviceCategoryColumns).
+    if (config.serviceCategoryColumns && Array.isArray(data)) {
+      extraColumns = await serviceCategoryColumns(data, config.serviceCategoryColumns);
+    }
+
     // Calculate pagination info
     const isSalesOrderBalanceCustomer = reportType === "salesOrderBalance" && filters.view === "customer";
 
@@ -1618,6 +1731,7 @@ export async function GET(request, { params }) {
         columns: currentColumns,
         detailColumns: config.detailColumns,
         exportOptions: config.exportOptions,
+        extraColumns,
       },
     };
 
@@ -6413,6 +6527,230 @@ async function getTrialBalanceSheetReport(filters) {
   }));
 }
 
+// ── Monthly Balance Sheet ────────────────────────────────────────────────────
+// (Profit and Loss month on month is getProfitLossMonthlyReport further down.)
+// Ported from arcc (commit 555d86c8) onto SMS's chart: MBSCD (1 Assets,
+// 2 Liabilities, 3 Owner's Equity, 4 Income, 5 Expenses) › BSCD › MACNO ›
+// ACNO, with the same tran_codes and Dr / Cr rule as getTrialBalanceSheetReport
+// / getProfitLossReport, so the figures agree with those reports. One column
+// per month of the period (m_YYYY_MM, reportMonths in
+// components/Reports/config.js). Rows go out as a row_type stream
+// (header › accounts › total per tree level) read by the report's
+// layout.groupRows; the last row (net_row) is the Accumulated Profit / (Loss)
+// or the Profit / (Loss).
+
+// A filter date (local-midnight Date from the route, or a string) →
+// "YYYY-MM-DD" of the day the user picked, or the fallback.
+function reportYmd(value, fallback) {
+  const d = reportDay(value);
+  if (!d) return fallback;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Debit / credit of every account under the given main groups (MBSCD), summed
+// per "bucket": the month (YYYY_MM), or "OPEN" for everything before
+// openingBefore.
+async function getMonthlyAccountMovements({ mbscds, dateFrom, dateTo, openingBefore = null, accountIds = [] }) {
+  const bucketSql = openingBefore
+    ? Prisma.sql`CASE WHEN tm.dated < ${openingBefore}::date THEN 'OPEN' ELSE to_char(tm.dated, 'YYYY_MM') END`
+    : Prisma.sql`to_char(tm.dated, 'YYYY_MM')`;
+
+  const results = await prisma.$queryRaw`
+    WITH txn AS (
+      SELECT
+        t.acno,
+        a.acname,
+        a.macno,
+        m.macname,
+        m.bscd,
+        mb.mbscd,
+        mb."mbscdDetail",
+        b."bscdDetail",
+        ${bucketSql} AS bucket,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN COALESCE(t.damt,0)
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.damt,0)
+          ELSE 0
+        END AS debit_amount,
+
+        CASE
+          WHEN tm.tran_code = 1 AND t.sub_tran_id = 1 THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code = 1 AND t.sub_tran_id IN (2,3) THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id = 1 THEN 0
+          WHEN tm.tran_code = 2 AND t.sub_tran_id IN (2,3) THEN COALESCE(t.camt,0)
+          WHEN tm.tran_code IN (3,4,5,6,9,10,12,21) THEN COALESCE(t.camt,0)
+          ELSE 0
+        END AS credit_amount
+
+      FROM "Transactions" t
+      INNER JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
+      INNER JOIN "acno" a ON t.acno = a.acno
+      INNER JOIN "MACNO" m ON a.macno = m.macno
+      INNER JOIN "BSCD" b ON m.bscd = b.bscd
+      INNER JOIN "MBSCD" mb ON b.mbscd = mb.mbscd
+
+      WHERE tm.tran_code IN (1,2,3,4,5,6,9,10,12,21)
+        AND tm.dated <= ${dateTo}::date
+        ${dateFrom ? Prisma.sql`AND tm.dated >= ${dateFrom}::date` : Prisma.empty}
+        AND mb.mbscd IN (${Prisma.join(mbscds)})
+        ${accountIds.length ? Prisma.sql`AND t.acno IN (${Prisma.join(accountIds)})` : Prisma.empty}
+    )
+    SELECT
+      acno,
+      macno,
+      mbscd,
+      bscd,
+      "mbscdDetail",
+      "bscdDetail",
+      acname AS account,
+      macname AS macaccount,
+      bucket,
+      SUM(debit_amount)::float8 AS debit,
+      SUM(credit_amount)::float8 AS credit
+    FROM txn
+    GROUP BY acno, acname, macno, macname, bscd, mbscd, "mbscdDetail", "bscdDetail", bucket
+  `;
+
+  // One row per account, its buckets side by side
+  const byAccount = new Map();
+  for (const r of results) {
+    const acno = Number(r.acno);
+    let row = byAccount.get(acno);
+    if (!row) {
+      row = {
+        mbscd: r.mbscd ?? "",
+        mbscdName: r.mbscdDetail ?? "",
+        bscd: r.bscd ?? "",
+        bscdName: r.bscdDetail ?? "",
+        macno: r.macno != null ? Number(r.macno) : "",
+        macaccount: r.macaccount ?? "",
+        acno,
+        account: r.account ?? "",
+        debit: 0,
+        credit: 0,
+        buckets: {},
+      };
+      byAccount.set(acno, row);
+    }
+    const debit = Number(r.debit) || 0;
+    const credit = Number(r.credit) || 0;
+    row.debit += debit;
+    row.credit += credit;
+    row.buckets[r.bucket] = (row.buckets[r.bucket] || 0) + (debit - credit);
+  }
+
+  // Tree order: main group › sub group › main account › account name
+  const code = (v) => parseFloat(v) || 0;
+  return [...byAccount.values()]
+    .filter((r) => r.debit !== 0 || r.credit !== 0)
+    .sort(
+      (a, b) =>
+        code(a.mbscd) - code(b.mbscd) ||
+        code(a.bscd) - code(b.bscd) ||
+        code(a.macno) - code(b.macno) ||
+        String(a.account).localeCompare(String(b.account)),
+    );
+}
+
+// Sorted account rows → row_type stream for layout.groupRows. Total rows
+// carry no figures (the viewer sums the accounts). netRow { label, plus,
+// minus }: last row = Σ main groups in plus − Σ those in minus.
+function buildMonthlyAccountTreeRows(accounts, fields, netRow) {
+  const label = (no, name) => [no, name].filter((v) => v !== "" && v != null).join(" ");
+  const net = Object.fromEntries(fields.map((f) => [f, 0]));
+  const rows = [];
+  let mbKey = null;
+  let bsKey = null;
+  let macKey = null;
+
+  const closeMac = () => { if (macKey !== null) rows.push({ row_type: "macno_total" }); macKey = null; };
+  const closeBs = () => { closeMac(); if (bsKey !== null) rows.push({ row_type: "bscd_total" }); bsKey = null; };
+  const closeMb = () => { closeBs(); if (mbKey !== null) rows.push({ row_type: "mbscd_total" }); mbKey = null; };
+
+  for (const acc of accounts) {
+    const mb = String(acc.mbscd);
+    const bs = `${mb}/${acc.bscd}`;
+    const mac = `${bs}/${acc.macno}`;
+    if (mb !== mbKey) {
+      closeMb();
+      rows.push({ row_type: "mbscd_header", label: label(acc.mbscd, acc.mbscdName) });
+      mbKey = mb;
+    }
+    if (bs !== bsKey) {
+      closeBs();
+      rows.push({ row_type: "bscd_header", label: label(acc.bscd, acc.bscdName) });
+      bsKey = bs;
+    }
+    if (mac !== macKey) {
+      closeMac();
+      rows.push({ row_type: "macno_header", label: label(acc.macno, acc.macaccount) });
+      macKey = mac;
+    }
+
+    const line = {
+      row_type: "account_row",
+      acno: acc.acno,
+      account: acc.account,
+      mbscdName: acc.mbscdName,
+      bscdName: acc.bscdName,
+      macaccount: acc.macaccount,
+    };
+    fields.forEach((f) => { line[f] = acc[f] || 0; });
+    rows.push(line);
+
+    const mbNo = Number(acc.mbscd);
+    const sign = netRow?.plus?.includes(mbNo) ? 1 : netRow?.minus?.includes(mbNo) ? -1 : 0;
+    fields.forEach((f) => { net[f] += sign * (acc[f] || 0); });
+  }
+  closeMb();
+
+  if (netRow && rows.length) {
+    const line = { row_type: "net_row", account: netRow.label };
+    // Round to paisa and drop −0 so the row never shows "-0.00"
+    fields.forEach((f) => { line[f] = Math.round(net[f] * 100) / 100 || 0; });
+    rows.push(line);
+  }
+  return rows;
+}
+
+// Monthly Balance Sheet: each month column = the account's closing balance
+// (Dr − Cr) at that month end = opening (before From Date) + the months so
+// far. Liabilities (2) and Equity (3) × −1 so they read positive.
+async function getMonthlyBalanceSheetReport(filters) {
+  const today = reportYmd(new Date(), "");
+  const dateFrom = reportYmd(filters.dateFrom, `${today.slice(0, 4)}-01-01`);
+  const dateTo = reportYmd(filters.dateTo, today);
+  const months = reportMonths({ dateFrom, dateTo }).map((m) => m.field);
+
+  const accounts = await getMonthlyAccountMovements({ mbscds: [1, 2, 3], dateFrom: null, dateTo, openingBefore: dateFrom });
+  accounts.forEach((acc) => {
+    let running = acc.buckets.OPEN || 0;
+    months.forEach((f) => {
+      running += acc.buckets[f.slice(2)] || 0;
+      acc[f] = [2, 3].includes(Number(acc.mbscd)) ? 0 - running : running;
+    });
+  });
+
+  const total_debit = accounts.reduce((s, r) => s + r.debit, 0);
+  const total_credit = accounts.reduce((s, r) => s + r.credit, 0);
+  const summary = {
+    total_accounts: accounts.length,
+    total_debit,
+    total_credit,
+    diff: Number((total_debit - total_credit).toFixed(2)),
+  };
+  const data = buildMonthlyAccountTreeRows(accounts, months, {
+    label: "ACCUMULATED PROFIT / (LOSS)",
+    plus: [1],
+    minus: [2, 3],
+  });
+  return { data, summary };
+}
+
 async function getProfitLossReport(filters) {
   let { dateFrom, dateTo } = filters;
 
@@ -8987,7 +9325,8 @@ async function getMaterialProductionReport(filters) {
   const whereTransactions = {};
 
   if (filters.processOrder) {
-    where.rmk5 = parseInt(filters.processOrder);
+    // Process order ref (lib/manufacturing/processOrderRef.js)
+    Object.assign(where, poWhere(parseInt(filters.processOrder)));
   }
 
   if (filters.salesOrder) {
@@ -9027,9 +9366,9 @@ async function getMaterialProductionReport(filters) {
       let batchNo = t.rmk3;
 
       // Get production plan details if process order exists
-      if (t.rmk5) {
+      if (poRefOf(t)) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
-          where: { id: parseInt(t.rmk5) },
+          where: { id: parseInt(poRefOf(t)) || -1 },
           include: {
             item: true,
           },
@@ -9063,7 +9402,7 @@ async function getMaterialProductionReport(filters) {
         productionPlan,
         production_item: productionItem,
         batch_no: batchNo,
-        process_order_no: t.rmk5,
+        process_order_no: poRefOf(t),
         sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         actual_yield_qty: totalQty,
         total_amount: totalAmount,
@@ -9098,7 +9437,8 @@ async function getMaterialIssuanceReport(filters) {
   const whereTransactions = {};
 
   if (filters.processOrder) {
-    where.rmk5 = parseInt(filters.processOrder);
+    // Process order ref (lib/manufacturing/processOrderRef.js)
+    Object.assign(where, poWhere(parseInt(filters.processOrder)));
   }
 
   if (filters.salesOrder) {
@@ -9138,12 +9478,13 @@ async function getMaterialIssuanceReport(filters) {
       }
 
       // Get production plan details if process order exists
-      // rmk5 is a process order id only when numeric — a direct issue carries
-      // "CLEANING" / "LAB QC" there (Direct Material Issuance Cost), which made
-      // parseInt NaN and the whole report fail.
-      if (/^\d+$/.test(String(t.rmk5 ?? "").trim())) {
+      // The process order (lib/manufacturing/processOrderRef.js) is an id only
+      // when numeric — a direct issue carries "CLEANING" / "LAB QC" in rmk5
+      // (Direct Material Issuance Cost), which made parseInt NaN.
+      const poRef = poRefOf(t);
+      if (/^\d+$/.test(String(poRef ?? "").trim())) {
         productionPlan = await prisma.productionPlanMaster.findFirst({
-          where: { id: parseInt(t.rmk5, 10) },
+          where: { id: parseInt(poRef, 10) },
         });
       }
 
@@ -9155,7 +9496,7 @@ async function getMaterialIssuanceReport(filters) {
         productionPlan,
         issued_items: issuedItems,
         issued_item: issuedItems[0] || null, // First item for main view
-        process_order_no: t.rmk5,
+        process_order_no: poRefOf(t),
         sales_order_no: t.so_no || productionPlan?.sale_ord_no, // the plan stores the Sale Order no itself
         issued_qty: totalQty,
         total_amount: totalAmount,
@@ -9685,7 +10026,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t2
            JOIN "TRANSACTIONS_MASTER" tm2 ON t2.tran_id = tm2.tran_id
            WHERE tm2.tran_code = 7 
-             AND CAST(tm2.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+             AND ${poRefSql("tm2")} = CAST(ppm.id AS TEXT)
              ${item ? Prisma.sql`AND t2.itcd = ${parseInt(item)}` : Prisma.empty}) AS material_issued_qty,
           
           -- Material Cost from Issuance
@@ -9698,7 +10039,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t2
            JOIN "TRANSACTIONS_MASTER" tm2 ON t2.tran_id = tm2.tran_id
            WHERE tm2.tran_code = 7 
-             AND CAST(tm2.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+             AND ${poRefSql("tm2")} = CAST(ppm.id AS TEXT)
              ${item ? Prisma.sql`AND t2.itcd = ${parseInt(item)}` : Prisma.empty}) AS material_cost,
            
           -- Finished Goods Produced (tran_code 8)
@@ -9706,7 +10047,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t3
            JOIN "TRANSACTIONS_MASTER" tm3 ON t3.tran_id = tm3.tran_id
            WHERE tm3.tran_code = 8 
-             AND CAST(tm3.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)) AS finished_produced_qty,
+             AND ${poRefSql("tm3")} = CAST(ppm.id AS TEXT)) AS finished_produced_qty,
              
           -- Finished Goods Value
           (SELECT COALESCE(SUM(
@@ -9718,7 +10059,7 @@ async function getBatchCostingReport(filters = {}) {
            FROM "Transactions" t3
            JOIN "TRANSACTIONS_MASTER" tm3 ON t3.tran_id = tm3.tran_id
            WHERE tm3.tran_code = 8 
-             AND CAST(tm3.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)) AS finished_value,
+             AND ${poRefSql("tm3")} = CAST(ppm.id AS TEXT)) AS finished_value,
              
           -- BOM Reference
           bm.id AS bom_id,
@@ -9743,7 +10084,7 @@ async function getBatchCostingReport(filters = {}) {
               SELECT 1 FROM "Transactions" t 
               JOIN "TRANSACTIONS_MASTER" tm ON t.tran_id = tm.tran_id
               WHERE tm.tran_code = 7 
-                AND CAST(tm.rmk5 AS TEXT) = CAST(ppm.id AS TEXT)
+                AND ${poRefSql("tm")} = CAST(ppm.id AS TEXT)
                 AND t.itcd = ${parseInt(item)}
             ))` : Prisma.empty}
       )
@@ -10461,6 +10802,21 @@ function calculateMonthlyStockValuationSummary(data) {
 export async function getStockActivityWithRateReport(filters = {}) {
   try {
     const { dateFrom, dateTo, product, category, godown, viewMode } = filters;
+    // Settings → Features (all off = today's figures):
+    //   costing.inProcessLink              — in-process items show / take in the
+    //                                        issues of their production item (screen only)
+    //   costing.servicesInCost             — GRN services in the purchase value
+    //                                        (landed cost); dispatch / sale-return
+    //                                        services in Sale Cost on this screen
+    //   costing.zeroValueReceiptsAtAverage — a receipt without a value enters at
+    //                                        the average (its qty not in the rate)
+    const inProcessRate = filters.inProcessRate === true && (await feature("costing.inProcessLink"));
+    const servicesInCost = await feature("costing.servicesInCost");
+    const zeroValueAtAverage = await feature("costing.zeroValueReceiptsAtAverage");
+    // Purchases, purchase returns and sale returns at their Net Amount (gross +
+    // sales tax, the Purchase report's "Net Amount") — the report screen only.
+    // Month-end opening (lib/openingStockGenerate.js) and COGS call without it.
+    const withTax = filters.withTax === true;
 
     // Month/year derived from dateFrom — used for opening stock lookup
     const reportDate = dateFrom ? new Date(dateFrom) : new Date();
@@ -10552,11 +10908,18 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
         -- Purchases (tran_code=4), sub_tran_id=1 lines only
         COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN t.qty              ELSE 0 END), 0) AS purchase_qty,
+        -- the part of it that carries a value: a receipt without one (returned
+        -- empty drums, a GRN not invoiced yet) enters at the average, so only
+        -- valued qty goes into the rates below (lib/costing/monthRates.js — same rule)
+        COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 AND COALESCE(t.damt,0) <> 0 THEN t.qty ELSE 0 END), 0) AS purchase_valued_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN COALESCE(t.damt,0) ELSE 0 END), 0) AS purchase_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 4  AND t.sub_tran_id = 1 THEN COALESCE(t.st_amount,0) ELSE 0 END), 0) AS purchase_tax_amount,
 
         -- Purchase Returns (9)
         COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN t.qty              ELSE 0 END), 0) AS purchase_ret_qty,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 AND COALESCE(t.camt,0) <> 0 THEN t.qty ELSE 0 END), 0) AS purchase_ret_valued_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN COALESCE(t.camt,0) ELSE 0 END), 0) AS purchase_ret_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 9  AND t.sub_tran_id = 1 THEN COALESCE(t.st_amount,0) ELSE 0 END), 0) AS purchase_ret_tax_amount,
 
         -- Sales (6)
         COALESCE(SUM(CASE WHEN tm.tran_code = 6  THEN t.qty                      ELSE 0 END), 0) AS sale_qty,
@@ -10565,6 +10928,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
         -- Sale Returns (10)
         COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN t.qty                      ELSE 0 END), 0) AS sale_ret_qty,
         COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN COALESCE(t.damt,0)         ELSE 0 END), 0) AS sale_ret_amount,
+        COALESCE(SUM(CASE WHEN tm.tran_code = 10 THEN COALESCE(t.st_amount,0)    ELSE 0 END), 0) AS sale_ret_tax_amount,
 
         -- POS (5)
         COALESCE(SUM(CASE WHEN tm.tran_code = 5  THEN t.qty                      ELSE 0 END), 0) AS pos_qty,
@@ -10609,6 +10973,11 @@ export async function getStockActivityWithRateReport(filters = {}) {
     `;
 
 
+    // Services spread onto the items (lib/service/landedCost.js): GRN services
+    // are landed cost (into the purchase value → average / closing rate);
+    // dispatch and sale-return services are cost of those goods sold.
+    const servicesOf = await servicesByItem({ dateFrom, dateTo, item: product, category, godown });
+
     // ── 4. Add opening-stock-only items (no period transactions) ─────────────
     // The SQL above acts like an INNER JOIN — items with no period activity are
     // missing.  We add them from the opening stock map so they still appear.
@@ -10637,6 +11006,16 @@ export async function getStockActivityWithRateReport(filters = {}) {
       }
     }
 
+
+    // ── 4b. In-process items (Item.plant_id — lib/items/processLink.js) ──────
+    // An in-process item shows the materials issued for making its
+    // production item (by process order) as "Linked production": qty, and cost at each
+    // material's issue rate (worked out after step 5). Separate columns, never
+    // in its stock or the report totals; it goes into its blended rate. The
+    // report screen only (inProcessRate) — month-end opening and COGS: none.
+    const linkedProduction = inProcessRate
+      ? await linkedIssuesFor(prisma, { itcds: allRows.map((r) => r.product_code), dateFrom, dateTo, godown })
+      : new Map();
 
     // ── 2.5. Batch-fetch period purchase avg for produced items without PCE ──
     // For items with T8 receipts but no ProductionCostEntry, we fall back to:
@@ -10762,6 +11141,77 @@ export async function getStockActivityWithRateReport(filters = {}) {
         (f) => getStockActivityWithRateReport({ ...f, _priorDepth: priorDepth + 1 }),
       )
       : new Map();
+    // ── 4c. Net Amount (with sales tax) on the screen ─────────────────────────
+    // Without withTax the amounts stay gross (before tax) — unchanged for the
+    // month-end opening and COGS. Every rate below follows these amounts.
+    if (withTax) {
+      for (const r of allRows) {
+        r.purchase_amount = Number(r.purchase_amount || 0) + Number(r.purchase_tax_amount || 0);
+        r.purchase_ret_amount = Number(r.purchase_ret_amount || 0) + Number(r.purchase_ret_tax_amount || 0);
+        r.sale_ret_amount = Number(r.sale_ret_amount || 0) + Number(r.sale_ret_tax_amount || 0);
+      }
+    } else {
+      // Gross: the tax columns stay empty (hidden on the screen).
+      for (const r of allRows) {
+        delete r.purchase_tax_amount;
+        delete r.purchase_ret_tax_amount;
+        delete r.sale_ret_tax_amount;
+      }
+    }
+
+    // ── 4d. Net: the purchase sales tax carried THROUGH production ────────────
+    // (display only — "Purchase amounts: Net", as some companies report it). A produced
+    // item's cost (ProductionCostEntry, costed without tax) gets the tax that
+    // sits inside its materials: Σ material qty × that material's tax per unit,
+    // where tax per unit = (its own purchase tax + the tax inside its own
+    // production) ÷ its qty for the rate. A product made from taxed
+    // materials carries their tax, a product made from it carries its, and so on.
+    // Worked out over ALL items (an item filter would miss the materials).
+    let productionTaxOf = new Map();
+    let taxDeltaOf = new Map();
+    if (withTax) {
+      if (product || category || godown) {
+        const whole = await getStockActivityWithRateReport({ dateFrom, dateTo, withTax: true });
+        productionTaxOf = whole.productionTax || new Map();
+        taxDeltaOf = whole.taxDeltas || new Map();
+      } else {
+        const qtyForRate = new Map();
+        const ownTax = new Map();
+        for (const r of allRows) {
+          const id = Number(r.product_code);
+          const os = openingStockMap.get(id);
+          qtyForRate.set(id, Number(os?.opening_qty || 0)
+            + Number((zeroValueAtAverage ? r.purchase_valued_qty : null) ?? r.purchase_qty ?? 0)
+            - Number((zeroValueAtAverage ? r.purchase_ret_valued_qty : null) ?? r.purchase_ret_qty ?? 0)
+            + Number(r.material_production_qty || 0));
+          ownTax.set(id, Number(r.purchase_tax_amount || 0) - Number(r.purchase_ret_tax_amount || 0));
+        }
+        const usage = await prisma.$queryRaw`
+          SELECT e.itcd, d.material_id, SUM(COALESCE(d.actual_qty, 0))::float8 AS qty
+            FROM "ProductionCostEntry" e
+            JOIN "ProductionCostDetail" d ON d.entry_id = e.id
+           WHERE e.qty_costed > 0 AND e.itcd IS NOT NULL AND d.material_id IS NOT NULL
+             ${ymFrom ? Prisma.sql`AND (e.year * 100 + e.month) >= ${ymFrom}` : Prisma.empty}
+             ${ymTo ? Prisma.sql`AND (e.year * 100 + e.month) <= ${ymTo}` : Prisma.empty}
+           GROUP BY 1, 2`;
+        const usesOf = new Map();
+        for (const u of usage) {
+          const k = Number(u.itcd);
+          if (!usesOf.has(k)) usesOf.set(k, []);
+          usesOf.get(k).push({ m: Number(u.material_id), q: Number(u.qty) || 0 });
+        }
+        // A few passes settle the chain (materials → product → product made from it …)
+        for (let pass = 0; pass < 6; pass++) {
+          const next = new Map();
+          for (const [id, q] of qtyForRate) {
+            const prodTax = (usesOf.get(id) || []).reduce((a, u) => a + u.q * (taxDeltaOf.get(u.m) || 0), 0);
+            productionTaxOf.set(id, prodTax);
+            next.set(id, q > 0 ? (ownTax.get(id) + prodTax) / q : 0);
+          }
+          taxDeltaOf = next;
+        }
+      }
+    }
 
     // ── 5. Enrich: derive all rates and computed values ───────────────────────
     // Categories that carry CC this month: finished goods, plus semi-finished
@@ -10769,8 +11219,10 @@ export async function getStockActivityWithRateReport(filters = {}) {
     // "costing.method" = blendedCC → CC carried in by semi-finished / finished
     // inputs is tracked through every stage (lib/costing/ccRates.js).
     const ccCategoryIds = await ccCategoryIdsFor(month, year);
+    // Settings → Features "costing.engine" = "item" (lib/costing/productionCosting.js)
+    const itemEngine = (await feature("costing.engine")) === "item";
     const ccComponents = (await isBlendedCosting()) ? await getCcComponents({ month, year }) : null;
-    const enrichedResults = allRows.map(item => {
+    const enrichRow = (item) => {
       const os = openingStockMap.get(Number(item.product_code))
         ?? { opening_qty: 0, opening_rate: 0, opening_value: 0 };
 
@@ -10809,8 +11261,10 @@ export async function getStockActivityWithRateReport(filters = {}) {
         - Number(item.transfer_out_qty || 0);
 
       // ── Actual per-unit rates from raw transaction amounts ──────────────────
-      const purchase_rate = Number(item.purchase_qty || 0) > 0 ? Number(item.purchase_amount || 0) / Number(item.purchase_qty) : 0;
-      const purchase_ret_rate = Number(item.purchase_ret_qty || 0) > 0 ? Number(item.purchase_ret_amount || 0) / Number(item.purchase_ret_qty) : 0;
+      const purchase_valued_qty = Number((zeroValueAtAverage ? item.purchase_valued_qty : null) ?? item.purchase_qty ?? 0);
+      const purchase_ret_valued_qty = Number((zeroValueAtAverage ? item.purchase_ret_valued_qty : null) ?? item.purchase_ret_qty ?? 0);
+      const purchase_rate = purchase_valued_qty > 0 ? Number(item.purchase_amount || 0) / purchase_valued_qty : 0;
+      const purchase_ret_rate = purchase_ret_valued_qty > 0 ? Number(item.purchase_ret_amount || 0) / purchase_ret_valued_qty : 0;
       const sale_rate = Number(item.sale_qty || 0) > 0 ? Number(item.sale_amount || 0) / Number(item.sale_qty) : 0;
       const sale_ret_rate = Number(item.sale_ret_qty || 0) > 0 ? Number(item.sale_ret_amount || 0) / Number(item.sale_ret_qty) : 0;
       const pos_rate = Number(item.pos_qty || 0) > 0 ? Number(item.pos_amount || 0) / Number(item.pos_qty) : 0;
@@ -10818,10 +11272,14 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
       // ── CC rate: PER-ITEM from PCE (CHANGED from global cc_rate_per_unit) ──
       // carries_cc: finished goods (Production setup), plus semi-finished while
-      // "costing.semiFinishedCC" applies, carry a CC overhead.
+      // "costing.semiFinishedCC" applies, carry a CC overhead. With
+      // costing.engine = "item" overhead is on everything made on a process
+      // order (lib/costing/productionCosting.js), so every produced item may carry it.
       // cc_rate is looked up from itemCcRateMap using this item's product_code.
       // If the item has no PCE rows (not produced), cc_rate = 0.
-      const carries_cc = ccCategoryIds.includes(Number(item.category_id));
+      const carries_cc = itemEngine
+        ? (ccAggByItcd.has(Number(item.product_code)) || opening_cc_rate > 0)
+        : ccCategoryIds.includes(Number(item.category_id));
       let cc_rate = 0;
       let cc_own_cost = 0;
       let cc_input_cost = 0;
@@ -10850,12 +11308,33 @@ export async function getStockActivityWithRateReport(filters = {}) {
       }
       // ── (END CHANGE) ─────────────────────────────────────────────────────────
 
+      // ── Services (landed cost on purchases, cost of sales on dispatches) ────
+      const svc = servicesOf.get(Number(item.product_code)) || { purchase: 0, sale: 0 };
+      const purchase_services_amount = svc.purchase;
+      const sale_services_amount = svc.sale;
+      const purchase_landed_amount = Number(item.purchase_amount || 0) + purchase_services_amount;
+      const purchase_landed_rate = purchase_valued_qty > 0 ? purchase_landed_amount / purchase_valued_qty : 0;
+      // In the cost only while costing.servicesInCost is on (else shown only)
+      const purchase_services_in_rate = servicesInCost ? purchase_services_amount : 0;
+      const sale_services_in_cost = servicesInCost ? sale_services_amount : 0;
+
+      // ── Linked production (in-process item ← its production item) ─────────
+      const lp = linkedProduction.get(Number(item.product_code));
+      const linked_production_qty = lp?.qty || 0;
+      const linked_production_rate = lp?.rate || 0;
+      const linked_production_amount = lp?.amount || 0;
+      // In the rate only on the screen, and only once it has a cost (step 5b).
+      const linked_in_rate = inProcessRate && linked_production_qty > 0 && linked_production_amount > 0;
+
       // ── RM production rate: PCE → opening_rate → purchase_avg → 0 ──────────
       const net_purchase_value = Number(item.purchase_amount || 0) - Number(item.purchase_ret_amount || 0);
       const raw_production_rate = productionCostMap.get(Number(item.product_code)) || 0;
       const purch_avg_rate = purchaseAvgMap.get(Number(item.product_code)) || 0;
       // effective_production_rate = RM cost per unit (CC is added separately)
-      const effective_production_rate = raw_production_rate || 0;
+      // Net view: + the purchase sales tax inside its materials (step 4d)
+      const production_tax_amount = withTax ? (productionTaxOf.get(Number(item.product_code)) || 0) : 0;
+      const effective_production_rate = (raw_production_rate || 0)
+        + (withTax && production_qty > 0 ? production_tax_amount / production_qty : 0);
 
       // production_value includes BOTH RM and CC overhead for this item
       const production_value = production_qty * (effective_production_rate);
@@ -10864,20 +11343,30 @@ export async function getStockActivityWithRateReport(filters = {}) {
       // Formula: (opening_value + net_purchase_value + production_value)
       //        / (opening_qty   + net_purchase_qty   + production_qty)
       // CC is already baked into production_value, so no separate CC addition needed.
+      // valued receipts only: a receipt without a value enters at this rate
       const total_qty_for_rate = opening_stock
-        + Number(item.purchase_qty || 0)
-        - Number(item.purchase_ret_qty || 0)
+        + purchase_valued_qty
+        - purchase_ret_valued_qty
         + production_qty
-        + prior_ret_qty;
+        + prior_ret_qty
+        + (linked_in_rate ? linked_production_qty : 0);
       const total_value_for_rate = opening_value
         + Number(item.purchase_amount || 0)
+        + purchase_services_in_rate
         - Number(item.purchase_ret_amount || 0)
         + production_value
-        + prior_ret_cost_value;
+        + prior_ret_cost_value
+        + (linked_in_rate ? linked_production_amount : 0);
       const avg_rate_after_purchase = total_qty_for_rate > 0
         ? total_value_for_rate / total_qty_for_rate
         : 0;
       const total_cost_rate = avg_rate_after_purchase; // CC already baked in
+      // The same rate WITHOUT the GRN services — what the books carry: the
+      // services stay expenses (their Service Invoices post them there), so a
+      // journal that moves stock (COGS JV) must use this one.
+      const book_cost_rate = total_qty_for_rate > 0
+        ? (total_value_for_rate - purchase_services_in_rate) / total_qty_for_rate
+        : 0;
 
       // ── Re-valued amounts at authoritative cost rates ───────────────────────
       const material_production_rate = effective_production_rate;
@@ -10895,7 +11384,8 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
       // Sales and POS valued at full blended cost rate (includes CC for FG items)
       const sale_cost_rate = total_cost_rate;
-      const sale_cost_amount = Number(item.sale_qty || 0) * sale_cost_rate;
+      // + the services of those dispatches / sale returns (freight out, weighing …)
+      const sale_cost_amount = Number(item.sale_qty || 0) * sale_cost_rate + sale_services_in_cost;
       const pos_cost_rate = total_cost_rate;
       const pos_cost_amount = Number(item.pos_qty || 0) * pos_cost_rate;
 
@@ -10907,6 +11397,17 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
       // Closing stock value
       const stock_value = stock_balance * total_cost_rate;
+
+      // Services by SERVICE CATEGORY (lib/service/landedCost.js):
+      // pur_svc_c<id> / sale_svc_c<id> columns (serviceCategoryColumns), and
+      // each category's share of the cost rate, for COGS (not sent to the screen).
+      const svcCatFields = {};
+      for (const [c, a] of Object.entries(svc.purchaseBy || {})) svcCatFields[`pur_svc_c${c}`] = a;
+      for (const [c, a] of Object.entries(svc.saleBy || {})) svcCatFields[`sale_svc_c${c}`] = a;
+      // (only while the services are in the cost — costing.servicesInCost)
+      const landedRateByCat = Object.fromEntries(
+        Object.entries(servicesInCost ? svc.purchaseBy || {} : {}).map(([c, a]) => [c, total_qty_for_rate > 0 ? a / total_qty_for_rate : 0]),
+      );
 
       // ── Item type classification ────────────────────────────────────────────
       let item_type = 'OTHER';
@@ -10921,12 +11422,17 @@ export async function getStockActivityWithRateReport(filters = {}) {
         + Number(item.purchase_ret_qty || 0) + issuance_qty
         + Number(item.transfer_out_qty || 0);
 
-      return {
+      const row = {
         ...item,
+        ...svcCatFields,
         opening_stock,
         opening_rate,
         opening_value,
         purchase_rate,
+        purchase_services_amount,
+        purchase_landed_amount,
+        purchase_landed_rate,
+        sale_services_amount,
         purchase_ret_rate,
         sale_rate,
         sale_ret_rate,
@@ -10941,6 +11447,13 @@ export async function getStockActivityWithRateReport(filters = {}) {
         material_production_rate,
         material_production_amount,
         production_cost_source,          // 'pce' | 'opening_rate' | 'weighted_avg' | 'no_cost'
+        ...(lp ? {
+          linked_production_item: lp.plant_item,
+          linked_production_qty,
+          linked_production_rate,
+          linked_production_amount,
+          linked_in_rate,
+        } : {}),
         transfer_in_rate,
         transfer_in_amount,
         transfer_out_rate,
@@ -10964,6 +11477,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
         prior_ret_sources: pr ? [...new Set(pr.sources)].join(", ") : "",
         avg_rate_after_purchase,
         total_cost_rate,
+        book_cost_rate,
         stock_value,
         closing_qty: stock_balance,
         closing_rate: total_cost_rate,
@@ -10978,9 +11492,38 @@ export async function getStockActivityWithRateReport(filters = {}) {
           ? (Number(item.sale_qty || 0) * 100.0 / opening_stock)
           : 0,
       };
-    });
+      // Read by getCostOfGoodsSoldReport; not enumerable, so never in the JSON.
+      Object.defineProperty(row, "landedRateByCat", { value: landedRateByCat, enumerable: false });
+      return row;
+    };
+    let enrichedResults = allRows.map(enrichRow);
+
+    // ── 5b. Cost of the linked issues: each material at its issue rate ───────
+    // (this report's Issue Rate for that material — from this run, or a run
+    // for just that material when the filters left it out), then the
+    // in-process rows are worked out again with that cost in their rate.
+    if (linkedProduction.size) {
+      const issueRate = new Map(enrichedResults.map((r) => [Number(r.product_code), Number(r.material_issuance_rate) || 0]));
+      const materials = [...new Set([...linkedProduction.values()].flatMap((l) => [...l.byMaterial.keys()]))];
+      for (const m of materials.filter((m) => !issueRate.has(m))) {
+        const [one] = await getStockActivityWithRateReport({ dateFrom, dateTo, godown, product: String(m), withTax });
+        issueRate.set(m, Number(one?.material_issuance_rate) || 0);
+      }
+      for (const l of linkedProduction.values()) {
+        l.amount = [...l.byMaterial].reduce((s, [m, q]) => s + q * (issueRate.get(m) || 0), 0);
+        l.rate = l.qty ? l.amount / l.qty : 0;
+      }
+      enrichedResults = allRows.map((item, i) =>
+        linkedProduction.has(Number(item.product_code)) ? enrichRow(item) : enrichedResults[i],
+      );
+    }
 
 
+    // Net view: the tax per unit inside each item (COGM report, a filtered run)
+    if (withTax) {
+      Object.defineProperty(enrichedResults, "taxDeltas", { value: taxDeltaOf, enumerable: false });
+      Object.defineProperty(enrichedResults, "productionTax", { value: productionTaxOf, enumerable: false });
+    }
     const visibleResults = enrichedResults.sort((a, b) =>
       (Number(a.product_code) || 0) - (Number(b.product_code) || 0)
     );
@@ -11093,7 +11636,8 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
     dTo.setHours(23, 59, 59, 999);
 
     // getStockActivityWithRateReport already uses per-item CC from PCE
-    const rawData = await getStockActivityWithRateReport(filters);
+    // Net (display only): purchases with sales tax, also inside production.
+    const rawData = await getStockActivityWithRateReport({ ...filters, withTax: wantsNet(filters) });
     const prodSetup = await getProductionSetup();
 
     // Settings → Features "saleReturn.costAtOriginalMonth": this period's sales
@@ -11137,19 +11681,38 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
 
         const rm_cost_amount = rm_rate * sold_qty;
         const cc_cost_amount = cc_rate * sold_qty;
+        // Services of these dispatches / sale returns (freight out, weighing …):
+        // SELLING expenses (the standard — IAS 2 leaves them out of stock and
+        // of cost of goods sold). Shown for information, not in COGS / gross
+        // profit. GRN services are in the cost rate (landed cost, in stock).
+        const services_cost_amount = Number(item.sale_services_amount || 0);
+        const services_cost_rate = sold_qty > 0 ? services_cost_amount / sold_qty : 0;
+        // Cost of goods sold = the goods at their full cost (landed purchase +
+        // production + overhead) — also what the COGS journal posts.
         const total_cost_amount = total_cost_rate * sold_qty;
+        const book_cost_amount = total_cost_amount;
 
-        // Margin = gross margin BEFORE conversion cost (Revenue − RM only)
+        // Margin = gross margin BEFORE conversion cost (Revenue − material cost)
         const margin_rate = sale_rate - rm_rate;
         const margin_amount = sale_amt - rm_cost_amount;
         const gross_margin_pct = sale_amt > 0 ? (margin_amount / sale_amt * 100) : 0;
 
-        // Gross Profit = AFTER deducting conversion cost (Revenue − RM − CC)
+        // Gross Profit = Revenue − cost of goods sold (material + conversion)
         const gross_profit_rate = sale_rate - total_cost_rate;
         const gross_profit_amount = sale_amt - total_cost_amount;
         const gross_profit_pct = sale_amt > 0 ? (gross_profit_amount / sale_amt * 100) : 0;
 
+        // By service category (lib/service/landedCost.js serviceCategoryColumns):
+        //   sale_svc_c<id>   services on these dispatches / returns (in services_cost_amount)
+        //   landed_svc_c<id> what that category's GRN services add to the cost of
+        //                    the goods sold — its share of the cost rate × qty sold
+        //                    (already inside RM cost; shown, never added again)
+        const svcCat = {};
+        for (const [k, v] of Object.entries(item)) if (k.startsWith("sale_svc_c")) svcCat[k] = Number(v) || 0;
+        for (const [c, rate] of Object.entries(item.landedRateByCat || {})) svcCat[`landed_svc_c${c}`] = rate * sold_qty;
+
         return {
+          ...svcCat,
           product_code: item.product_code,
           ink_code: item.ink_code || '',
           product_name: item.product_name,
@@ -11166,8 +11729,12 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
           // CC (Conversion) Cost — finished goods only, now per-item from PCE
           cc_rate,
           cc_cost_amount,
+          // Services on the dispatches / returns
+          services_cost_rate,
+          services_cost_amount,
+          book_cost_amount,
           // Total Cost
-          total_cost_rate,
+          total_cost_rate: total_cost_rate + services_cost_rate,
           total_cost_amount,
           // Margin (before CC)
           margin_rate,
@@ -11187,6 +11754,7 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
           ret_cost_amount,
           net_sale_amount: sale_amt - ret_sale_amount,
           net_cost_amount: total_cost_amount - ret_cost_amount,
+          net_book_cost_amount: book_cost_amount - ret_cost_amount,
           net_gross_profit: (sale_amt - ret_sale_amount) - (total_cost_amount - ret_cost_amount),
           // Supporting columns
           opening_qty: item.opening_stock || 0,
@@ -11208,6 +11776,7 @@ function calculateCOGSSummary(data) {
   const total_revenue = data.reduce((s, r) => s + (r.sale_amount || 0), 0);
   const total_rm = data.reduce((s, r) => s + (r.rm_cost_amount || 0), 0);
   const total_cc = data.reduce((s, r) => s + (r.cc_cost_amount || 0), 0);
+  const total_services = data.reduce((s, r) => s + (r.services_cost_amount || 0), 0);
   const total_cost = data.reduce((s, r) => s + (r.total_cost_amount || 0), 0);
   const total_margin = data.reduce((s, r) => s + (r.margin_amount || 0), 0);            // before CC
   const total_gross_profit = data.reduce((s, r) => s + (r.gross_profit_amount || 0), 0); // after CC
@@ -11217,6 +11786,7 @@ function calculateCOGSSummary(data) {
     total_revenue,
     total_rm_cost: total_rm,
     total_cc_cost: total_cc,
+    total_services_cost: total_services,
     total_cost,
     total_margin,
     avg_gross_margin: total_revenue > 0 ? (total_margin / total_revenue * 100) : 0,
@@ -11265,9 +11835,33 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
       orderBy: [{ year: 'asc' }, { month: 'asc' }],
     });
 
-    // ── 2. Resolve orphan items ───────────────────────────────────────────────
+    // Net view (display only): each material + the purchase sales tax per unit
+    // inside it this month (Stock Activity's Net — step 4d)
+    let taxPerUnit = new Map();
+    // Net: each material at its Net issue rate on Stock Activity With Rate
+    // (Net, as on the screen — in-process items with their linked issues), so
+    // COGM and Stock Activity always agree; a line's extra = Net rate − the
+    // rate it was costed at.
+    let netRateOf = new Map();
+    if (wantsNet(filters)) {
+      const whole = await getStockActivityWithRateReport({
+        dateFrom: new Date(y, m - 1, 1, 0, 0, 0, 0), dateTo: new Date(y, m, 0, 23, 59, 59, 999), withTax: true, inProcessRate: true,
+      });
+      taxPerUnit = whole.taxDeltas || new Map();
+      netRateOf = new Map(whole.map((r) => [Number(r.product_code), Number(r.material_issuance_rate) || 0]));
+    }
+    const lineDelta = (d) => {
+      if (!netRateOf.size) return 0;
+      const net = netRateOf.get(Number(d.material_id));
+      if (net == null) return taxPerUnit.get(Number(d.material_id)) || 0;
+      return net - Number(d.actual_unit_cost ?? d.unit_cost ?? 0);
+    };
+    const entryTax = (entry) => (entry.details || []).reduce((a, d) => a + Number(d.actual_qty ?? d.qty ?? 0) * lineDelta(d), 0);
+
+    // ── 2. Resolve the items — every entry's OWN item (an order making two
+    // products has one entry per product, ProductionCostEntry.output_line)
     const orphanItcds = [...new Set(
-      entries.filter(e => !e.plan && e.itcd).map(e => e.itcd)
+      entries.filter(e => e.itcd).map(e => e.itcd)
     )];
     const orphanItemMap = new Map();
     if (orphanItcds.length > 0) {
@@ -11286,14 +11880,18 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
     // the CC carried in by inputs — shown as its own split (lib/costing/ccRates.js).
     const ccCategoryIds = await ccCategoryIdsFor(m, y);
     const carriesCc = (icId) => ccCategoryIds.includes(Number(icId));
+    const itemEngine = (await feature("costing.engine")) === "item";
     const ccComponents = (await isBlendedCosting()) ? await getCcComponents({ month: m, year: y }) : null;
 
     for (const entry of entries) {
-      const finished_id = entry.plan?.finished_id ?? entry.itcd;
+      // costing.engine = "item": production only — "issues with no production"
+      // records (qty 0) are not COGM (the "plan" engine keeps listing them)
+      if (itemEngine && !(Number(entry.qty_costed) > 0)) continue;
+      const finished_id = entry.itcd ?? entry.plan?.finished_id;
       if (!finished_id) continue;
 
       const id = Number(finished_id);
-      const item = entry.plan?.item ?? orphanItemMap.get(id) ?? null;
+      const item = orphanItemMap.get(id) ?? entry.plan?.item ?? null;
       const ic_id = Number(item?.ic_id ?? 0);
       const ic_name = item?.itemCategories?.ic_name ?? '';
       const is_fg = isFinishedCategory(prodSetup, ic_id);
@@ -11330,7 +11928,7 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
       const rm_cost = qty * Number(
         entry.actual_cost_per_unit              // RM only ✅
         ?? (Number(entry.cost_per_unit || 0) - Number(entry.cc_rate || 0))  // fallback: strip CC
-      );
+      ) + entryTax(entry);                      // Net view: + tax inside the materials
       const cc_cost = Number(entry.cc_cost || 0);
 
       g.total_qty += qty;
@@ -11345,8 +11943,8 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
       for (const detail of entry.details) {
         const mk = detail.material_id;
         const d_qty = Number(detail.actual_qty ?? detail.qty ?? 0);
-        const d_cost = Number(detail.actual_cost ?? detail.total_cost ?? 0);
-        const d_rate = Number(detail.actual_unit_cost ?? detail.unit_cost ?? 0);
+        const d_cost = Number(detail.actual_cost ?? detail.total_cost ?? 0) + d_qty * lineDelta(detail);
+        const d_rate = Number(detail.actual_unit_cost ?? detail.unit_cost ?? 0) + lineDelta(detail);
         if (!g.material_map[mk]) {
           g.material_map[mk] = {
             material_itcd: mk,
@@ -11377,7 +11975,8 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
 
       const qty = g.total_qty;
       const rm_cost = g.total_rm_cost;
-      const cc_cost = carriesCc(g.ic_id) ? g.total_cc_cost : 0;
+      // costing.engine = "item": overhead on everything made on a process order
+      const cc_cost = (itemEngine || carriesCc(g.ic_id)) ? g.total_cc_cost : 0;
       const rm_rate = qty > 0 ? rm_cost / qty : 0;
       const cc_rate = qty > 0 ? cc_cost / qty : 0;
       const net_rate = rm_rate + cc_rate;
@@ -11422,7 +12021,7 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
             entry.actual_cost_per_unit
             ?? (Number(entry.cost_per_unit || 0) - Number(entry.cc_rate || 0))
           );
-          const po_rm_cost = po_qty * po_rm_rate;
+          const po_rm_cost = po_qty * po_rm_rate + entryTax(entry);
           const po_cc_cost = Number(entry.cc_cost || 0);
 
           result.push({ row_type: 'po_header', plan_id: po_id, mm_no: id });
@@ -11436,8 +12035,9 @@ export async function getCostOfGoodsManufacturedReport(filters = {}) {
               material_name: detail.material_name,
               material_code: detail.material_code ?? '',
               qty: Number(detail.actual_qty ?? detail.qty ?? 0),
-              rm_rate: Number(detail.actual_unit_cost ?? detail.unit_cost ?? 0),
-              rm_cost: Number(detail.actual_cost ?? detail.total_cost ?? 0),
+              rm_rate: Number(detail.actual_unit_cost ?? detail.unit_cost ?? 0) + lineDelta(detail),
+              rm_cost: Number(detail.actual_cost ?? detail.total_cost ?? 0)
+                + Number(detail.actual_qty ?? detail.qty ?? 0) * lineDelta(detail),
             });
           }
 

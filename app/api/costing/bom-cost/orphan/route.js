@@ -1,3 +1,4 @@
+import { poRefSql } from "@/lib/manufacturing/processOrderRefSql";
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 import { guard } from "@/lib/auth/route";
@@ -54,9 +55,9 @@ export async function GET(request) {
           AND t.sub_tran_id = 1
           AND t.qty > 0
           AND (
-            tm.rmk5 IS NULL
-            OR TRIM(tm.rmk5) = ''
-            OR REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') = ''
+            ${poRefSql("tm")} IS NULL
+            OR TRIM(${poRefSql("tm")}) = ''
+            OR REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') = ''
           )
       `,
 
@@ -74,9 +75,9 @@ export async function GET(request) {
           AND t.sub_tran_id = 1
           AND t.qty > 0
           AND (
-            tm.rmk5 IS NULL
-            OR TRIM(tm.rmk5) = ''
-            OR REGEXP_REPLACE(COALESCE(tm.rmk5,''), '[^0-9]', '', 'g') = ''
+            ${poRefSql("tm")} IS NULL
+            OR TRIM(${poRefSql("tm")}) = ''
+            OR REGEXP_REPLACE(COALESCE(${poRefSql("tm")}, ''), '[^0-9]', '', 'g') = ''
           )
       `,
     ]);
