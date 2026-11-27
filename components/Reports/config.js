@@ -252,11 +252,14 @@ const customerMarginLayout = {
     { id: "sales", label: "Sales", fields: ["qty", "sales_value", "sale_rate"] },
     { id: "cost", label: "Cost", fields: ["cost_rate", "cost_value"] },
     { id: "margin", label: "Margin", fields: ["margin_amount", "margin_percent"], foldTo: "margin_amount" },
+    // service categories join this band (config serviceCategoryColumns)
+    { id: "svc", label: "Services", fields: ["services_amount", "total_cost_value"], foldTo: "services_amount" },
+    { id: "net", label: "Net margin", fields: ["net_margin_amount", "net_margin_percent"], foldTo: "net_margin_amount" },
   ],
   rowGroupBy: [
     { field: "customer_acno", title: "Customer", contiguous: true, label: (r) => [r.customer_acno || "", r.customer].filter(Boolean).join(" — "), subtotalLabel: "Total" },
   ],
-  card: { title: "item_name", subtitle: (r) => [r.product, r.customer].filter(Boolean).join(" · "), figures: ["sales_value", "cost_value", "margin_amount", "margin_percent"] },
+  card: { title: "item_name", subtitle: (r) => [r.product, r.customer].filter(Boolean).join(" · "), figures: ["sales_value", "margin_amount", "services_amount", "net_margin_amount"] },
 };
 
 // Checks In Hand: one row per cheque; the Report Base picks the groups
@@ -11868,7 +11871,15 @@ export const REPORT_CONFIG = {
       { field: "cost_value", headerName: "Cost Value", width: 22, type: "currency", showTotal: true },
       { field: "margin_amount", headerName: "Margin Amount", width: 22, type: "currency", showTotal: true },
       { field: "margin_percent", headerName: "Margin %", width: 18, type: "percent", totalRatio: { num: "margin_amount", den: "cost_value", scale: 100 } },
+      // Services on the customer's dispatches / returns (one column per service
+      // category before this total — serviceCategoryColumns), then the margin after them.
+      { field: "services_amount", headerName: "Services Total", width: 20, type: "currency", showTotal: true },
+      { field: "total_cost_value", headerName: "Cost + Services", width: 22, type: "currency", showTotal: true },
+      { field: "net_margin_amount", headerName: "Net Margin", width: 22, type: "currency", showTotal: true },
+      { field: "net_margin_percent", headerName: "Net Margin %", width: 18, type: "percent", totalRatio: { num: "net_margin_amount", den: "total_cost_value", scale: 100 } },
     ],
+    apiExtraColumns: true,
+    serviceCategoryColumns: [{ prefix: "sale_svc_c", band: "svc", before: "services_amount" }],
     // Wide-report layout (rule 15): grouped by customer with weighted subtotals.
     // No groupedDetailView — the API returns flat customer × product rows.
     layout: customerMarginLayout,
@@ -11890,6 +11901,9 @@ export const REPORT_CONFIG = {
       { field: "totalCost", label: "Total Cost", type: "currency" },
       { field: "totalMargin", label: "Gross Margin", type: "currency" },
       { field: "marginPercent", label: "Margin %", type: "number" },
+      { field: "totalServices", label: "Services", type: "currency" },
+      { field: "netMargin", label: "Net Margin", type: "currency" },
+      { field: "netMarginPercent", label: "Net Margin %", type: "number" },
     ],
     exportOptions: { excel: true, pdf: true },
   },
@@ -12429,6 +12443,14 @@ export const REPORT_CONFIG = {
     description: "Comprehensive stock movement analysis with production costing",
     apiEndpoint: "/api/reports/stockActivityWithRate",
     showSummary: true,
+    // Pur Services / Sale Services split by SERVICE CATEGORY (Transport &
+    // Handling, Excise …): one column per category used, in the Purchase /
+    // Sale band before its total (lib/service/landedCost.js serviceCategoryColumns).
+    apiExtraColumns: true,
+    serviceCategoryColumns: [
+      { prefix: "pur_svc_c", band: "pur", before: "purchase_services_amount" },
+      { prefix: "sale_svc_c", band: "sale", before: "sale_services_amount" },
+    ],
 
     filters: [
       {
@@ -12537,6 +12559,10 @@ export const REPORT_CONFIG = {
         { field: "purchase_qty", headerName: "Pur Qty", width: 12, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { colId: "purchase_rate", headerName: "Pur Rate", width: 12, type: "currency", cellClass: "text-right", valueGetter: rawPurRate },
         { field: "purchase_amount", headerName: "Pur Amt", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
+        // GRN services spread onto the item (lib/service/landedCost.js) — landed cost
+        { field: "purchase_services_amount", headerName: "Pur Services Total", width: 14, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
+        { field: "purchase_landed_rate", headerName: "Landed Rate", width: 13, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
+        { field: "purchase_landed_amount", headerName: "Landed Amt", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         // ── Purchase Return ───────────────────────────────────────────────────
         { field: "purchase_ret_qty", headerName: "Pur Ret Qty", width: 13, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { colId: "purchase_ret_rate", headerName: "Pur Ret Rate", width: 13, type: "currency", cellClass: "text-right", valueGetter: rawPurRetRate },
@@ -12550,6 +12576,8 @@ export const REPORT_CONFIG = {
         // ── Sale ─────────────────────────────────────────────────────────────
         { field: "sale_qty", headerName: "Sale Qty", width: 12, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "sale_cost_rate", headerName: "Sale Rate", width: 12, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
+        // Dispatch / sale-return services of these items — part of Sale Cost
+        { field: "sale_services_amount", headerName: "Sale Services Total", width: 14, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "sale_cost_amount", headerName: "Sale Cost", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         // ── Sale Return ───────────────────────────────────────────────────────
         { field: "sale_ret_qty", headerName: "Sale Ret Qty", width: 13, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
@@ -12586,6 +12614,7 @@ export const REPORT_CONFIG = {
       const RATE_OF = {
         opening_rate: ["opening_value", "opening_stock"],
         purchase_rate: ["purchase_amount", "purchase_qty"],
+        purchase_landed_rate: ["purchase_landed_amount", "purchase_qty"],
         purchase_ret_rate: ["purchase_ret_amount", "purchase_ret_qty"],
         material_production_rate: ["material_production_amount", "material_production_qty"],
         sale_cost_rate: ["sale_cost_amount", "sale_qty"],
@@ -12612,11 +12641,11 @@ export const REPORT_CONFIG = {
       const G = (id, label, qty, rate, amt) => ({ id, label, fields: [qty, rate, amt], foldTo: amt });
       const groups = [
         G("open", "Opening", "opening_stock", "opening_rate", "opening_value"),
-        G("pur", "Purchase", "purchase_qty", "purchase_rate", "purchase_amount"),
+        { id: "pur", label: "Purchase", fields: ["purchase_qty", "purchase_rate", "purchase_amount", "purchase_services_amount", "purchase_landed_rate", "purchase_landed_amount"], foldTo: "purchase_landed_amount" },
         G("purret", "Purchase return", "purchase_ret_qty", "purchase_ret_rate", "purchase_ret_amount"),
         G("prod", "Production", "material_production_qty", "material_production_rate", "material_production_amount"),
         { id: "blend", label: "Blended", fields: ["total_cost_rate"], foldTo: "total_cost_rate" },
-        G("sale", "Sale", "sale_qty", "sale_cost_rate", "sale_cost_amount"),
+        { id: "sale", label: "Sale", fields: ["sale_qty", "sale_cost_rate", "sale_services_amount", "sale_cost_amount"], foldTo: "sale_cost_amount" },
         G("saleret", "Sale return", "sale_ret_qty", "sale_ret_rate", "sale_ret_amount"),
         G("pos", "POS", "pos_qty", "pos_rate", "pos_amount"),
         G("posret", "POS return", "pos_ret_qty", "pos_ret_rate", "pos_ret_amount"),
@@ -13305,6 +13334,15 @@ export const REPORT_CONFIG = {
     description: "Period COGS per product: Sale vs RM Cost vs Conversion Cost (CC, finished goods only) — Margin analysis",
     apiEndpoint: "/api/reports/costOfGoodsSold",
     showSummary: true,
+    // By SERVICE CATEGORY (lib/service/landedCost.js serviceCategoryColumns):
+    // the dispatch services in "Services", and what each category of GRN
+    // services (excise, freight-in …) adds to the cost of these goods — that
+    // part is already inside RM Cost, shown for information, never added again.
+    apiExtraColumns: true,
+    serviceCategoryColumns: [
+      { prefix: "sale_svc_c", band: "svcSale", bandLabel: "Sale services (in Services)" },
+      { prefix: "landed_svc_c", band: "svcLanded", bandLabel: "Landed services (in RM Cost)" },
+    ],
 
     filters: [
       {
@@ -13402,6 +13440,13 @@ export const REPORT_CONFIG = {
         width: 18,
         type: "currency",
       },
+      // Services of the dispatches / sale returns (freight out, weighing …) — lib/service/landedCost.js
+      {
+        field: "services_cost_amount",
+        headerName: "Services",
+        width: 16,
+        type: "currency",
+      },
       // Total Cost
       {
         field: "total_cost_rate",
@@ -13456,6 +13501,7 @@ export const REPORT_CONFIG = {
       { field: "total_revenue", label: "Total Revenue", type: "currency" },
       { field: "total_rm_cost", label: "Total RM Cost", type: "currency" },
       { field: "total_cc_cost", label: "Total CC Cost", type: "currency" },
+      { field: "total_services_cost", label: "Total Services", type: "currency" },
       { field: "total_cost", label: "Total Cost", type: "currency" },
       { field: "total_margin", label: "Total Margin (excl CC)", type: "currency" },
       { field: "avg_gross_margin", label: "Avg Margin %", type: "percent" },
@@ -15811,6 +15857,30 @@ REPORT_CONFIG.exbondReport = {
     REPORT_CONFIG.grn.getColumns(filters).filter((c) => c.field !== "po_no"),
 };
 
+// ─── Data Checking Report ────────────────────────────────────────────────────
+// The Cost of Goods Sold report without its margin / gross-profit columns —
+// for checking quantities, rates and costs (owner, 25 Nov 2026). Same data
+// (the API serves it with getCostOfGoodsSoldReport), filters, service-category
+// columns and drill; no JV button. Built from the COGS entry so they never drift.
+{
+  const MARGIN_FIELDS = new Set(["margin_rate", "margin_amount", "gross_margin_pct", "gross_profit_rate", "gross_profit_amount", "gross_profit_pct"]);
+  const MARGIN_SUMMARY = new Set(["total_margin", "avg_gross_margin", "total_gross_profit", "avg_gross_profit_pct"]);
+  const cogs = REPORT_CONFIG.costOfGoodsSold;
+  // eslint-disable-next-line no-unused-vars
+  const { postJV, getColumns, ...rest } = cogs;
+  REPORT_CONFIG.dataChecking = {
+    ...rest,
+    title: "Data Checking Report",
+    description: "Cost of Goods Sold figures per product — quantities, sale value, RM / CC cost and services — without the margin columns",
+    apiEndpoint: "/api/reports/dataChecking",
+    columns: cogs.columns.filter((c) => !MARGIN_FIELDS.has(c.field)),
+    summaryFields: (cogs.summaryFields || []).filter((f) => !MARGIN_SUMMARY.has(f.field)),
+    getColumns(filters) {
+      return cogs.getColumns.call({ columns: this.columns }, filters);
+    },
+  };
+}
+
 // ─── HR reports ──────────────────────────────────────────────────────────────
 // One entry per report in lib/hr/reports/catalog.js (titles, kinds, columns),
 // keyed hrAttendanceSummary, hrLeaveRegister, … (hrEngineKey). Rows come from
@@ -15898,6 +15968,27 @@ function hrMonthOptions() {
 
 
 
+
+// ── Services breakdown on document reports ────────────────────────────────────
+// Freight, off-load, weighing … booked on a GRN / dispatch / sale return as
+// Service Invoices, spread onto the document's items (lib/service/landedCost.js:
+// by goods value, else by quantity). The API adds one column per service used,
+// then "Services total" and "Landed cost" + "Landed rate" (purchase side: goods
+// + services) or "Net of services" + "Net rate" (sale side: goods − services) —
+// sent as config.extraColumns, appended by ReportViewer to whatever view is open.
+export const SERVICE_REPORTS = {
+  purchase: "purchase",
+  grn: "purchase",
+  exbondReport: "purchase",
+  sale: "sale",
+  saleReturn: "sale",
+  dispatch: "sale",
+  dispatchWithoutRates: "sale",
+  dispatchReturn: "sale",
+};
+Object.entries(SERVICE_REPORTS).forEach(([key, side]) => {
+  if (REPORT_CONFIG[key]) REPORT_CONFIG[key].services = side;
+});
 
 // ── "Entered by" on document reports ─────────────────────────────────────────
 // Who keyed each voucher / order. The API fills `entered_by` on every row that

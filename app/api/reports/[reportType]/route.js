@@ -47,6 +47,7 @@ import { ccCategoryIdsFor } from "@/lib/costing/ccPolicy";
 import { getPendingByItem, getPendingStockMoves } from "@/lib/stock/pendingApprovals";
 import { getPosReport } from "@/lib/reports/pos";
 import { getReturnablePackingReport as getReturnablePackingBalances, returnablePackingSummary } from "@/lib/reports/returnablePacking";
+import { attachServices, serviceCategoryColumns, servicesByItem } from "@/lib/service/landedCost";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Journal Voucher posting (tran_code 3) — GL accounts from Finance → Account
@@ -403,9 +404,12 @@ async function postCostOfGoodsSoldJV(filters, userId, preview = false) {
   let totalCost = 0;
 
   for (const r of data) {
-    // COGS: net of earlier months' returns at their own cost (saleReturn.costAtOriginalMonth);
-    // rows without net_cost_amount (feature off / COGM) use total_cost_amount as before
-    const cost = Number(r.net_cost_amount ?? r.total_cost_amount ?? 0);
+    // COGS: net of earlier months' returns at their own cost (saleReturn.costAtOriginalMonth),
+    // goods at the BOOK rate only: the services (GRN landed cost and the dispatch /
+    // sale-return services in the report's total — costing.servicesInCost) were
+    // posted to their expense accounts by their Service Invoices, so none of them
+    // is credited to stock here (lib/service/landedCost.js).
+    const cost = Number(r.net_book_cost_amount ?? r.net_cost_amount ?? r.total_cost_amount ?? 0);
     if (cost === 0) continue;
     const acno = acnoMap.get(Number(r.product_code));
     if (acno == null) { missing.push(`Item ${r.product_code} (${r.product_name || ""})`); continue; }
@@ -975,6 +979,23 @@ export async function GET(request, { params }) {
         data = await getCostOfGoodsSoldReport(filters);
         summary = calculateCOGSSummary(data);
         break;
+
+      // Data Checking Report = the COGS figures without the margin columns
+      // (components/Reports/config.js, dataChecking): same rows, no margin totals.
+      case "dataChecking": {
+        const MARGIN_KEYS = ["margin_rate", "margin_amount", "gross_margin_pct", "gross_profit_rate", "gross_profit_amount", "gross_profit_pct"];
+        data = (await getCostOfGoodsSoldReport(filters)).map((r) => {
+          const row = { ...r };
+          for (const k of MARGIN_KEYS) delete row[k];
+          return row;
+        });
+        const {
+          total_margin: _m, avg_gross_margin: _mp, total_gross_profit: _gp, avg_gross_profit_pct: _gpp, // eslint-disable-line no-unused-vars
+          ...rest
+        } = calculateCOGSSummary(data);
+        summary = rest;
+        break;
+      }
 
       case "costOfGoodsManufactured":
         data = await getCostOfGoodsManufacturedReport(filters);
@@ -1582,6 +1603,22 @@ export async function GET(request, { params }) {
     // a report lacks (components/Reports/itemColumns.js).
     await attachItemInfo(prisma, reportType === "stockMetrics" ? data?.items : data);
 
+    // Services on GRN / dispatch / sale return (freight, off-load, weighing …)
+    // spread onto each row's items — one column per service used, then the
+    // services total and the landed cost (purchase side) or net of services
+    // (sale side). Reports with config `services` (components/Reports/config.js);
+    // lib/service/landedCost.js; the viewer appends the columns.
+    let extraColumns = [];
+    if (config.services && Array.isArray(data)) {
+      extraColumns = await attachServices(data, { side: config.services });
+    }
+    // Stock Activity With Rate / COGS: services split by service category, one
+    // column per category used, placed in the report's own bands
+    // (config.serviceCategoryColumns → serviceCategoryColumns).
+    if (config.serviceCategoryColumns && Array.isArray(data)) {
+      extraColumns = await serviceCategoryColumns(data, config.serviceCategoryColumns);
+    }
+
     // Calculate pagination info
     const isSalesOrderBalanceCustomer = reportType === "salesOrderBalance" && filters.view === "customer";
 
@@ -1618,6 +1655,7 @@ export async function GET(request, { params }) {
         columns: currentColumns,
         detailColumns: config.detailColumns,
         exportOptions: config.exportOptions,
+        extraColumns,
       },
     };
 
@@ -10609,6 +10647,11 @@ export async function getStockActivityWithRateReport(filters = {}) {
     `;
 
 
+    // Services spread onto the items (lib/service/landedCost.js): GRN services
+    // are landed cost (into the purchase value → average / closing rate);
+    // dispatch and sale-return services are cost of those goods sold.
+    const servicesOf = await servicesByItem({ dateFrom, dateTo, item: product, category, godown });
+
     // ── 4. Add opening-stock-only items (no period transactions) ─────────────
     // The SQL above acts like an INNER JOIN — items with no period activity are
     // missing.  We add them from the opening stock map so they still appear.
@@ -10850,6 +10893,13 @@ export async function getStockActivityWithRateReport(filters = {}) {
       }
       // ── (END CHANGE) ─────────────────────────────────────────────────────────
 
+      // ── Services (landed cost on purchases, cost of sales on dispatches) ────
+      const svc = servicesOf.get(Number(item.product_code)) || { purchase: 0, sale: 0 };
+      const purchase_services_amount = svc.purchase;
+      const sale_services_amount = svc.sale;
+      const purchase_landed_amount = Number(item.purchase_amount || 0) + purchase_services_amount;
+      const purchase_landed_rate = Number(item.purchase_qty || 0) > 0 ? purchase_landed_amount / Number(item.purchase_qty) : 0;
+
       // ── RM production rate: PCE → opening_rate → purchase_avg → 0 ──────────
       const net_purchase_value = Number(item.purchase_amount || 0) - Number(item.purchase_ret_amount || 0);
       const raw_production_rate = productionCostMap.get(Number(item.product_code)) || 0;
@@ -10871,6 +10921,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
         + prior_ret_qty;
       const total_value_for_rate = opening_value
         + Number(item.purchase_amount || 0)
+        + purchase_services_amount
         - Number(item.purchase_ret_amount || 0)
         + production_value
         + prior_ret_cost_value;
@@ -10878,6 +10929,12 @@ export async function getStockActivityWithRateReport(filters = {}) {
         ? total_value_for_rate / total_qty_for_rate
         : 0;
       const total_cost_rate = avg_rate_after_purchase; // CC already baked in
+      // The same rate WITHOUT the GRN services — what the books carry: the
+      // services stay expenses (their Service Invoices post them there), so a
+      // journal that moves stock (COGS JV) must use this one.
+      const book_cost_rate = total_qty_for_rate > 0
+        ? (total_value_for_rate - purchase_services_amount) / total_qty_for_rate
+        : 0;
 
       // ── Re-valued amounts at authoritative cost rates ───────────────────────
       const material_production_rate = effective_production_rate;
@@ -10895,7 +10952,8 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
       // Sales and POS valued at full blended cost rate (includes CC for FG items)
       const sale_cost_rate = total_cost_rate;
-      const sale_cost_amount = Number(item.sale_qty || 0) * sale_cost_rate;
+      // + the services of those dispatches / sale returns (freight out, weighing …)
+      const sale_cost_amount = Number(item.sale_qty || 0) * sale_cost_rate + sale_services_amount;
       const pos_cost_rate = total_cost_rate;
       const pos_cost_amount = Number(item.pos_qty || 0) * pos_cost_rate;
 
@@ -10907,6 +10965,16 @@ export async function getStockActivityWithRateReport(filters = {}) {
 
       // Closing stock value
       const stock_value = stock_balance * total_cost_rate;
+
+      // Services by SERVICE CATEGORY (lib/service/landedCost.js):
+      // pur_svc_c<id> / sale_svc_c<id> columns (serviceCategoryColumns), and
+      // each category's share of the cost rate, for COGS (not sent to the screen).
+      const svcCatFields = {};
+      for (const [c, a] of Object.entries(svc.purchaseBy || {})) svcCatFields[`pur_svc_c${c}`] = a;
+      for (const [c, a] of Object.entries(svc.saleBy || {})) svcCatFields[`sale_svc_c${c}`] = a;
+      const landedRateByCat = Object.fromEntries(
+        Object.entries(svc.purchaseBy || {}).map(([c, a]) => [c, total_qty_for_rate > 0 ? a / total_qty_for_rate : 0]),
+      );
 
       // ── Item type classification ────────────────────────────────────────────
       let item_type = 'OTHER';
@@ -10921,12 +10989,17 @@ export async function getStockActivityWithRateReport(filters = {}) {
         + Number(item.purchase_ret_qty || 0) + issuance_qty
         + Number(item.transfer_out_qty || 0);
 
-      return {
+      const row = {
         ...item,
+        ...svcCatFields,
         opening_stock,
         opening_rate,
         opening_value,
         purchase_rate,
+        purchase_services_amount,
+        purchase_landed_amount,
+        purchase_landed_rate,
+        sale_services_amount,
         purchase_ret_rate,
         sale_rate,
         sale_ret_rate,
@@ -10964,6 +11037,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
         prior_ret_sources: pr ? [...new Set(pr.sources)].join(", ") : "",
         avg_rate_after_purchase,
         total_cost_rate,
+        book_cost_rate,
         stock_value,
         closing_qty: stock_balance,
         closing_rate: total_cost_rate,
@@ -10978,6 +11052,9 @@ export async function getStockActivityWithRateReport(filters = {}) {
           ? (Number(item.sale_qty || 0) * 100.0 / opening_stock)
           : 0,
       };
+      // Read by getCostOfGoodsSoldReport; not enumerable, so never in the JSON.
+      Object.defineProperty(row, "landedRateByCat", { value: landedRateByCat, enumerable: false });
+      return row;
     });
 
 
@@ -11137,19 +11214,37 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
 
         const rm_cost_amount = rm_rate * sold_qty;
         const cc_cost_amount = cc_rate * sold_qty;
-        const total_cost_amount = total_cost_rate * sold_qty;
+        // Services of these dispatches / sale returns (freight out, weighing …) —
+        // cost of the goods sold (lib/service/landedCost.js). GRN services are
+        // already in the cost rate (landed cost).
+        const services_cost_amount = Number(item.sale_services_amount || 0);
+        const services_cost_rate = sold_qty > 0 ? services_cost_amount / sold_qty : 0;
+        const total_cost_amount = total_cost_rate * sold_qty + services_cost_amount;
+        // For the COGS JV: goods at the book rate (no landed services — those
+        // are expenses already, and so are the dispatch services above).
+        const book_cost_amount = Number(item.book_cost_rate ?? total_cost_rate) * sold_qty;
 
-        // Margin = gross margin BEFORE conversion cost (Revenue − RM only)
-        const margin_rate = sale_rate - rm_rate;
-        const margin_amount = sale_amt - rm_cost_amount;
+        // Margin = gross margin BEFORE conversion cost (Revenue − RM − services)
+        const margin_rate = sale_rate - rm_rate - services_cost_rate;
+        const margin_amount = sale_amt - rm_cost_amount - services_cost_amount;
         const gross_margin_pct = sale_amt > 0 ? (margin_amount / sale_amt * 100) : 0;
 
         // Gross Profit = AFTER deducting conversion cost (Revenue − RM − CC)
-        const gross_profit_rate = sale_rate - total_cost_rate;
+        const gross_profit_rate = sale_rate - total_cost_rate - services_cost_rate;
         const gross_profit_amount = sale_amt - total_cost_amount;
         const gross_profit_pct = sale_amt > 0 ? (gross_profit_amount / sale_amt * 100) : 0;
 
+        // By service category (lib/service/landedCost.js serviceCategoryColumns):
+        //   sale_svc_c<id>   services on these dispatches / returns (in services_cost_amount)
+        //   landed_svc_c<id> what that category's GRN services add to the cost of
+        //                    the goods sold — its share of the cost rate × qty sold
+        //                    (already inside RM cost; shown, never added again)
+        const svcCat = {};
+        for (const [k, v] of Object.entries(item)) if (k.startsWith("sale_svc_c")) svcCat[k] = Number(v) || 0;
+        for (const [c, rate] of Object.entries(item.landedRateByCat || {})) svcCat[`landed_svc_c${c}`] = rate * sold_qty;
+
         return {
+          ...svcCat,
           product_code: item.product_code,
           ink_code: item.ink_code || '',
           product_name: item.product_name,
@@ -11166,8 +11261,12 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
           // CC (Conversion) Cost — finished goods only, now per-item from PCE
           cc_rate,
           cc_cost_amount,
+          // Services on the dispatches / returns
+          services_cost_rate,
+          services_cost_amount,
+          book_cost_amount,
           // Total Cost
-          total_cost_rate,
+          total_cost_rate: total_cost_rate + services_cost_rate,
           total_cost_amount,
           // Margin (before CC)
           margin_rate,
@@ -11187,6 +11286,7 @@ export async function getCostOfGoodsSoldReport(filters = {}) {
           ret_cost_amount,
           net_sale_amount: sale_amt - ret_sale_amount,
           net_cost_amount: total_cost_amount - ret_cost_amount,
+          net_book_cost_amount: book_cost_amount - ret_cost_amount,
           net_gross_profit: (sale_amt - ret_sale_amount) - (total_cost_amount - ret_cost_amount),
           // Supporting columns
           opening_qty: item.opening_stock || 0,
@@ -11208,6 +11308,7 @@ function calculateCOGSSummary(data) {
   const total_revenue = data.reduce((s, r) => s + (r.sale_amount || 0), 0);
   const total_rm = data.reduce((s, r) => s + (r.rm_cost_amount || 0), 0);
   const total_cc = data.reduce((s, r) => s + (r.cc_cost_amount || 0), 0);
+  const total_services = data.reduce((s, r) => s + (r.services_cost_amount || 0), 0);
   const total_cost = data.reduce((s, r) => s + (r.total_cost_amount || 0), 0);
   const total_margin = data.reduce((s, r) => s + (r.margin_amount || 0), 0);            // before CC
   const total_gross_profit = data.reduce((s, r) => s + (r.gross_profit_amount || 0), 0); // after CC
@@ -11217,6 +11318,7 @@ function calculateCOGSSummary(data) {
     total_revenue,
     total_rm_cost: total_rm,
     total_cc_cost: total_cc,
+    total_services_cost: total_services,
     total_cost,
     total_margin,
     avg_gross_margin: total_revenue > 0 ? (total_margin / total_revenue * 100) : 0,

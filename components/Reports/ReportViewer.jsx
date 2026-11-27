@@ -803,6 +803,22 @@ const ReportViewer = ({ reportType }) => {
     }
   }, [reportType, filters.godownWise, reportData?.config?.columns]);
 
+  // Reports with a services breakdown (config.services — GRN, dispatch,
+  // purchase, sale …): the API sends one column per service used plus the
+  // totals (lib/service/landedCost.js); they go after the view's own columns,
+  // under a "Services" band (components/Reports/layout.js).
+  // Reports with config.apiExtraColumns (Stock Activity With Rate, COGS: one
+  // column per service category) get the API's columns as sent — each names
+  // its band and position (`extra: { id, label, before }`).
+  const serviceColumns = useMemo(() => {
+    if (config?.apiExtraColumns) return reportData?.config?.extraColumns || [];
+    if (!config?.services) return [];
+    return (reportData?.config?.extraColumns || []).map((c) => ({
+      ...c,
+      extra: { id: "services", label: "Services", foldTo: "services_amount" },
+    }));
+  }, [config?.services, config?.apiExtraColumns, reportData?.config?.extraColumns]);
+
   // Reports whose columns depend on the data (config.apiColumns, e.g. HR
   // Leave taken: one column per leave type used) take the API's column list.
   useEffect(() => {
@@ -3612,8 +3628,8 @@ const ReportViewer = ({ reportType }) => {
       ? config.getColumns(filters)
       : config.columns || [];
 
-    return [...baseColumns, ...dynamicColumns];
-  }, [config, dynamicColumns, filters, reportType, apiColumns, parameterColumns]);
+    return [...baseColumns, ...dynamicColumns, ...serviceColumns];
+  }, [config, dynamicColumns, serviceColumns, filters, reportType, apiColumns, parameterColumns]);
 
   // + the item Code / Category / Sub Category a report lacks (itemColumns.js)
   const itemSourceRows = Array.isArray(reportData?.allData) ? allData : data;
