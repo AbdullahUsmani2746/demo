@@ -4,7 +4,11 @@
 // and the bulk-results sheet. Lab dialog frame (LabUI DIALOG*): near full
 // width on phones, body scrolls, footer stays at the bottom.
 
-import { Loader2, LockOpen, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import axios from "axios";
+import { toast } from "sonner";
+import { ExternalLink, Link2Off, Loader2, LockOpen, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -17,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { DIALOG, DIALOG_BODY, DIALOG_FOOT, DIALOG_HEAD, Chip } from "@/components/Material/shared/LabUI";
 import { cn } from "@/lib/utils";
+import { voucherHref } from "@/lib/vouchers/voucherLink";
 
 import { fmtMoney } from "./format";
 import { IdChip, ResultPill, UI } from "./parts";
@@ -101,7 +106,17 @@ export function ConfirmGenerateDialog({ cfg, rows, drafts, totalOf, nextNo, busy
 }
 
 // ── unlock ──────────────────────────────────────────────────────────────
-export function UnlockDialog({ cfg, row, reason, onReasonChange, busy, onCancel, onConfirm }) {
+export function UnlockDialog({ kind, cfg, row, reason, onReasonChange, busy, onCancel, onConfirm }) {
+  // Receipts / payments matched to this invoice block the reversal — listed
+  // here, each un-matched on its own (GET …/knockoffs, POST /api/invoice-knockoff/[id]).
+  const tranId = row?.tran_id ?? null;
+  const { data: ko, isLoading: koLoading } = useQuery({
+    queryKey: ["invoicing-knockoffs", kind, tranId],
+    queryFn: async () => (await axios.get(`/api/invoicing/${kind}/knockoffs`, { params: { tran_id: tranId } })).data,
+    enabled: !!tranId && !!kind,
+  });
+  const matched = ko?.knockoffs ?? [];
+  const blocked = koLoading || matched.length > 0;
   return (
     <Dialog open={!!row} onOpenChange={(open) => !open && !busy && onCancel()}>
       <DialogContent className={cn(DIALOG, "sm:max-w-md")}>
@@ -129,6 +144,10 @@ export function UnlockDialog({ cfg, row, reason, onReasonChange, busy, onCancel,
             </div>
           </DialogDescription>
 
+          {matched.length > 0 && (
+            <MatchedPayments kind={kind} tranId={tranId} matched={matched} canReverse={ko?.canReverse} />
+          )}
+
           <label className="block space-y-1.5">
             <span className={UI.label}>
               Reason <span className="text-destructive">*</span>
@@ -147,13 +166,74 @@ export function UnlockDialog({ cfg, row, reason, onReasonChange, busy, onCancel,
           <Button variant="outline" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="destructive" disabled={busy || !reason.trim()} onClick={onConfirm}>
+          <Button variant="destructive" disabled={busy || blocked || !reason.trim()} onClick={onConfirm}>
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LockOpen className="h-4 w-4" />}
             Reverse {cfg.invoiceNoun.toLowerCase()}
           </Button>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Payments / receipts matched (knocked off) against the invoice. Each one is
+// un-matched here; the amount goes back to the knock-off queue as unapplied
+// and the matcher (Invoice Knock-Off Review → Run now, or its twice-daily run)
+// places it again, oldest open invoice first — so invoice it again first.
+function MatchedPayments({ kind, tranId, matched, canReverse }) {
+  const queryClient = useQueryClient();
+  const [busyId, setBusyId] = useState(null);
+  const unmatch = async (k) => {
+    setBusyId(k.id);
+    try {
+      await axios.post(`/api/invoice-knockoff/${k.id}`);
+      toast.success(`Match of ${fmtMoney(k.amount)} undone.`);
+      await queryClient.invalidateQueries({ queryKey: ["invoicing-knockoffs", kind, tranId] });
+    } catch (err) {
+      toast.error(err?.response?.data?.message || err.message || "Could not undo the match");
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const total = matched.reduce((s, k) => s + k.amount, 0);
+  return (
+    <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+      <p className="font-medium text-amber-900">
+        {matched.length === 1 ? "A payment is" : `${matched.length} payments are`} matched to this invoice ({fmtMoney(total)}) — undo the
+        match{matched.length === 1 ? "" : "es"} first.
+      </p>
+      <ul className="divide-y divide-amber-200">
+        {matched.map((k) => {
+          const v = k.voucher;
+          const href = v ? voucherHref({ tran_code: v.tran_code, tran_id: v.tran_id }) : null;
+          return (
+            <li key={k.id} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+              <span className="min-w-0 text-xs text-amber-900">
+                {String(k.source_type || "").toLowerCase() || "voucher"} {v?.vr_no ? `#${v.vr_no}` : `#T-${v?.tran_id ?? "?"}`}
+                {v?.dated ? ` · ${String(v.dated).slice(0, 10)}` : ""} ·{" "}
+                <span className="font-semibold tabular-nums">{fmtMoney(k.amount)}</span>
+                {href && (
+                  <a href={href} target="_blank" rel="noreferrer" className="ml-1.5 inline-flex items-center gap-0.5 underline">
+                    open <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </span>
+              {canReverse ? (
+                <Button size="sm" variant="outline" className="h-8 gap-1.5" disabled={busyId != null} onClick={() => unmatch(k)}>
+                  {busyId === k.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Link2Off className="h-3.5 w-3.5" />}
+                  Undo match
+                </Button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="text-[11px] text-amber-800">
+        {canReverse
+          ? "The amount goes back as unapplied. Invoice it again, then Invoice Knock-Off Review → Run now matches it again."
+          : "Ask someone with the knock-off right (Finance) to undo the match."}
+      </p>
+    </div>
   );
 }
 

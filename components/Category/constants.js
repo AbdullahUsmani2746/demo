@@ -1942,14 +1942,33 @@ const soApprovalCheckboxes = () => [
 // ── Service Invoice (tran_code 21) helpers ──────────────────────────────────
 // Mirror lib/service/serviceInvoice.js prepareServiceInvoice so the form shows
 // what the server will post: qty defaults to 1 (blank / 0 → 1), amount =
-// qty × rate, tax = amount × (st_rate + additional_tax) / 100, each rounded
+// official + unofficial when typed, else qty × rate, tax = amount × (st_rate + additional_tax) / 100, each rounded
 // to 2 decimals. The server re-prices every line; these are display only.
 const svcRound2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const svcNum = (v) => parseFloat(v?.value ?? v) || 0;
 
+const svcRound4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+
+/** Official + Unofficial typed on a Service Invoice line (0 = priced by rate). */
+export const serviceLineParts = (line = {}) =>
+  svcRound2(svcRound2(svcNum(line.official_amount)) + svcRound2(svcNum(line.unofficial_amount)));
+
+// Service Invoice line: Amount is Official + Unofficial when either is typed
+// (Rate = Amount ÷ Qty), otherwise Qty × Rate. Typing Rate clears the parts.
+const serviceRateFromParts = (_, line) => {
+  const parts = serviceLineParts(line);
+  return parts > 0 ? { rate: svcRound4(parts / (svcNum(line.qty) || 1)) } : {};
+};
+
+// A saved Service Invoice priced by Official / Unofficial keeps those columns
+// while the feature is off (lib/features/apply.js featureKeep).
+const serviceInvoiceHasParts = (saved) =>
+  (saved?.transactions || saved?.lines || []).some((t) => t?.official_amount != null || t?.unofficial_amount != null);
+
 export const serviceLineAmounts = (line = {}) => {
   const qty = svcNum(line.qty) || 1;
-  const gross = svcRound2(qty * svcNum(line.rate));
+  const parts = serviceLineParts(line);
+  const gross = parts > 0 ? parts : svcRound2(qty * svcNum(line.rate));
   const tax = svcRound2((gross * (svcNum(line.st_rate) + svcNum(line.additional_tax))) / 100);
   return { qty, gross, tax, total: svcRound2(gross + tax) };
 };
@@ -2028,8 +2047,9 @@ const MANUAL_DC_NO_FIELD = { name: "manual_no", label: "Manual DC No", type: "te
 const MANUAL_GRN_NO_FIELD = { name: "manual_no", label: "Manual GRN No", type: "text", uppercase: true };
 // Dispatch: the city the vehicle is taking the goods to (TransactionsMaster.city).
 const DISPATCH_CITY_FIELD = { name: "city", label: "City (Destination)", type: "text", uppercase: true, group: "logistics", feature: "dispatch.extraFields" };
-// Dispatch: the route the vehicle takes (TransactionsMaster.route), shown under City.
-const DISPATCH_ROUTE_FIELD = { name: "route", label: "Route", type: "text", uppercase: true, group: "logistics", feature: "dispatch.extraFields" };
+// Dispatch: the route the vehicle takes (TransactionsMaster.route), shown under
+// City across the whole row — a route lists several stops.
+const DISPATCH_ROUTE_FIELD = { name: "route", label: "Route", type: "text", uppercase: true, group: "logistics", feature: "dispatch.extraFields", fullWidth: true };
 
 const LEGACY_DOC_FIELD = {
   name: "rmk5",
@@ -4111,6 +4131,8 @@ export const VOUCHER_CONFIG = {
           }
         },
       },
+      // Settings → Features "documents.serviceTankerOfficial" (kept on a saved invoice that has one).
+      { name: "tanker_no", label: "Tanker No", type: "text", uppercase: true, feature: "documents.serviceTankerOfficial", featureKeep: (saved) => Boolean(saved?.master?.tanker_no) },
       { name: "check_no", label: "ST Invoice No", type: "text" },
       { name: "check_date", label: "ST Invoice Date", type: "date" },
       {
@@ -4157,9 +4179,11 @@ export const VOUCHER_CONFIG = {
       },
       { name: "rmk", label: "Narration", type: "textarea", fullWidth: true },
     ],
-    // Services are not packed: Qty (default 1) × Rate. The server prices every
-    // line itself (lib/service/serviceInvoice.js); the calculated columns
-    // below mirror it (serviceLineAmounts). Additional Tax is not offered —
+    // Services are not packed: Qty (default 1) × Rate, or Official + Unofficial
+    // (then Rate = Amount ÷ Qty; typing Rate clears them). Only Amount posts and
+    // carries the tax — the two parts are kept on the line for the record. The
+    // server prices every line itself (lib/service/serviceInvoice.js); the
+    // calculated columns below mirror it (serviceLineAmounts). Additional Tax is not offered —
     // a saved line that has one keeps it (it rides on the line) and it is
     // included in ST Amount / Total.
     newLineDefaults: { qty: 1 },
@@ -4183,11 +4207,35 @@ export const VOUCHER_CONFIG = {
         required: true,
         validate: async (value) =>
           (parseFloat(value) || 0) <= 0 ? "Qty must be greater than 0" : null,
+        // Amount typed as Official / Unofficial stays; the rate follows the qty.
+        onChange: serviceRateFromParts,
+      },
+      {
+        name: "official_amount",
+        feature: "documents.serviceTankerOfficial",
+        featureKeep: serviceInvoiceHasParts,
+        label: "Official",
+        type: "number",
+        onChange: serviceRateFromParts,
+        validate: async (value) =>
+          (parseFloat(value) || 0) < 0 ? "Official amount cannot be negative" : null,
+      },
+      {
+        name: "unofficial_amount",
+        feature: "documents.serviceTankerOfficial",
+        featureKeep: serviceInvoiceHasParts,
+        label: "Unofficial",
+        type: "number",
+        onChange: serviceRateFromParts,
+        validate: async (value) =>
+          (parseFloat(value) || 0) < 0 ? "Unofficial amount cannot be negative" : null,
       },
       {
         name: "rate",
         label: "Rate",
         type: "number",
+        // Typing a rate = priced by rate: the Official / Unofficial parts go.
+        onChange: () => ({ official_amount: 0, unofficial_amount: 0 }),
         validate: async (value) =>
           (parseFloat(value) || 0) < 0 ? "Rate cannot be negative" : null,
       },
@@ -4196,7 +4244,7 @@ export const VOUCHER_CONFIG = {
         label: "Amount",
         type: "number",
         hideCalculatedHint: true,
-        dependencies: ["qty", "rate"],
+        dependencies: ["qty", "rate", "official_amount", "unofficial_amount"],
         calculate: (v) => serviceLineAmounts(v).gross,
       },
       { name: "st_rate", label: "ST %", type: "number" },
@@ -4205,7 +4253,7 @@ export const VOUCHER_CONFIG = {
         label: "ST Amount",
         type: "number",
         hideCalculatedHint: true,
-        dependencies: ["qty", "rate", "st_rate", "additional_tax"],
+        dependencies: ["qty", "rate", "official_amount", "unofficial_amount", "st_rate", "additional_tax"],
         calculate: (v) => serviceLineAmounts(v).tax,
       },
       {
@@ -4214,7 +4262,7 @@ export const VOUCHER_CONFIG = {
         label: "Total",
         type: "number",
         hideCalculatedHint: true,
-        dependencies: ["qty", "rate", "st_rate", "additional_tax"],
+        dependencies: ["qty", "rate", "official_amount", "unofficial_amount", "st_rate", "additional_tax"],
         calculate: (v) => serviceLineAmounts(v).total,
       },
     ],
@@ -4253,6 +4301,7 @@ export const VOUCHER_CONFIG = {
         value1: "acno",
         value2: "acname",
       },
+      { name: "tanker_no", label: "Tanker No", type: "text", feature: "documents.serviceTankerOfficial" },
       { name: "rmk", label: "Narration", type: "text" },
       {
         // The vendor's 'Auto Entry' is a CREDIT on a service invoice.
