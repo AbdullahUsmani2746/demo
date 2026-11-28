@@ -220,9 +220,9 @@ const entityConfig = {
       },
       {
         name: "gets_plant_expenses",
-        label: "Gets plant expenses",
+        label: "Gets CC",
         fieldType: "checkbox",
-        checkboxLabel: "Costing: every item of this group shares the month's plant expenses when made on a process order",
+        checkboxLabel: "Costing: every item of this group gets the month's CC (conversion cost) when made on a process order",
         trueLabel: "Yes",
         falseLabel: "No",
         defaultValue: false,

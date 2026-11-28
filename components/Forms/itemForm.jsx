@@ -984,8 +984,8 @@ export default function ItemForm() {
 
               {plantExpenseProducts && (
               <Field
-                label="Gets plant expenses?"
-                hint="Costing: this product shares the month's plant expenses (overhead) when made on a process order. Its category can be ticked too."
+                label="Gets CC?"
+                hint="Costing: this product gets the month's CC (conversion cost) when made on a process order. Its category can be ticked too."
               >
                 <label className="flex h-10 cursor-pointer items-center justify-between gap-3 rounded-lg border border-input bg-background px-3">
                   <span className="text-sm text-muted-foreground">{formData.gets_plant_expenses ? "Yes" : "No"}</span>

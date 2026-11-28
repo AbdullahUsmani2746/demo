@@ -10876,7 +10876,7 @@ export async function getStockActivityWithRateReport(filters = {}) {
                / SUM(pce.qty_costed)
           ELSE 0
         END AS production_cost_per_unit,
-        -- the plant expenses (overhead) inside that cost, per unit
+        -- the CC (conversion cost) inside that cost, per unit
         CASE
           WHEN SUM(pce.qty_costed) > 0
           THEN SUM(COALESCE(pce.cc_cost, 0)) / SUM(pce.qty_costed)

@@ -12683,12 +12683,12 @@ export const REPORT_CONFIG = {
         { field: "purchase_ret_tax_amount", headerName: "Pur Ret Tax (incl.)", width: 14, type: "currency", cellClass: "text-right" },
         // ── Production Output (tran_code=8) ──────────────────────────────────
         { field: "material_production_qty", headerName: "Prod Qty", width: 12, type: "number", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
-        // Production split: Materials + Plant expenses = Prod Rate / Prod Amt.
+        // Production split: Materials + CC (conversion cost) = Prod Rate / Prod Amt.
         // Plant expenses = the cost entries' cc_cost; display only, the cost is unchanged.
         { field: "production_materials_rate", headerName: "Materials Rate", width: 12, type: "currency", cellClass: "text-right" },
         { field: "production_materials_amount", headerName: "Materials Amt", width: 15, type: "currency", cellClass: "text-right" },
-        { field: "production_plant_rate", headerName: "Plant Exp Rate", width: 12, type: "currency", cellClass: "text-right" },
-        { field: "production_plant_amount", headerName: "Plant Exp Amt", width: 15, type: "currency", cellClass: "text-right" },
+        { field: "production_plant_rate", headerName: "CC Rate", width: 12, type: "currency", cellClass: "text-right" },
+        { field: "production_plant_amount", headerName: "CC Amt", width: 15, type: "currency", cellClass: "text-right" },
         { field: "material_production_rate", headerName: "Prod Rate", width: 12, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         { field: "material_production_amount", headerName: "Prod Amt", width: 15, type: "currency", cellClass: "text-right", valueFormatter: (p) => p.value ?? 0 },
         // ── Linked production: an in-process item (Item setup → "In-process
@@ -12792,7 +12792,7 @@ export const REPORT_CONFIG = {
       const LINKED = { 0: ["linked_production_item", "linked_production_qty"], 1: ["linked_production_rate"], 2: ["linked_production_amount"] };
       // Tax inside the amounts (Purchase amounts: Net) — shown in the Values view.
       const TAX = new Set(["purchase_tax_amount", "purchase_ret_tax_amount", "sale_ret_tax_amount"]);
-      // Production: Materials + Plant expenses + total, by role.
+      // Production: Materials + CC + total, by role.
       const PROD = {
         0: ["material_production_qty"],
         1: ["production_materials_rate", "production_plant_rate", "material_production_rate"],
